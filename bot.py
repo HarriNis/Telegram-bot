@@ -42,7 +42,7 @@ async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thinking = await update.message.reply_text("Mmm... odota hetki, olen jo kiimainen sun takia 😏")
 
         response = await client.chat.completions.create(
-            model="grok-4.1-fast",  # Toimiva malli helmikuussa 2026 – nopea ja agentic
+            model="grok-4-1-fast-reasoning",  # Toimiva malli 2026: nopea, tool-calling, 2M context
             messages=[
                 {
                     "role": "system",
