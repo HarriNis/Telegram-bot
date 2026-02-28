@@ -70,11 +70,7 @@ async def main():
     print("Megan käynnistyy Renderissä...")
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(
-        allowed_updates=["message"],
-        drop_pending_updates=True,
-        poll_interval=2.0
-    )
+    await app.updater.start_polling(allowed_updates=["message"], drop_pending_updates=True, poll_interval=2.0)
     print("Polling käynnissä – Megan on live ja valmis leikkimään 💋")
 
     await asyncio.sleep(float('inf'))
