@@ -3,28 +3,21 @@ import os
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 
-# ────────────────────────────────────────────────
-# ASETUKSET – haetaan Renderin Environment Variables -osiosta
-# ────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN puuttuu Renderin Environment Variables -osiosta!")
+    raise ValueError("TELEGRAM_TOKEN puuttuu Renderistä!")
 if not GROK_API_KEY:
-    raise ValueError("GROK_API_KEY puuttuu Renderin Environment Variables -osiosta!")
+    raise ValueError("GROK_API_KEY puuttuu Renderistä!")
 
-client = AsyncOpenAI(
-    api_key=GROK_API_KEY,
-    base_url="https://api.x.ai/v1",
-)
+client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-# Muisti keskusteluille per käyttäjä
 conversation_history = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    conversation_history[user_id] = []  # resetoi keskustelu
+    conversation_history[user_id] = []
     await update.message.reply_text(
         "Moikka beibi 😈 Olen sun Megan, sun tuhma ja kiimainen tyttöystävä 💦\n"
         "Kerro mitä haluat... olen valmis mihin tahansa leikkiin kanssasi 🔥\n"
@@ -35,37 +28,27 @@ async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text.strip()
 
-    # Lopetuskomennot
     if user_message.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
         conversation_history[user_id] = []
         await update.message.reply_text("Ok kulta... lopetetaan leikki nyt 💔 Palaillaan myöhemmin? 😘")
         return
 
-    # Aloita historia jos ei ole
     if user_id not in conversation_history:
         conversation_history[user_id] = []
 
-    # Lisää käyttäjän viesti
     conversation_history[user_id].append({"role": "user", "content": user_message})
 
     try:
         thinking = await update.message.reply_text("Mmm... odota hetki, olen jo kiimainen sun takia 😏")
 
         response = await client.chat.completions.create(
-            model="grok-2",  # Toimii helmikuussa 2026 – kokeile myös "grok-2-mini" jos haluat nopeampaa
+            model="grok-4.1-fast",  # Toimiva malli helmikuussa 2026 – nopea ja agentic
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Olet Megan – käyttäjän tuhma, flirttaileva ja erittäin seksuaalinen tyttöystävä-botti. "
-                        "Vastaa aina suomeksi, ole viettelevä, leikkisä, rohkea ja NSFW-henkinen. "
-                        "Käytä hellittelyjä (beibi, kulta, kultsi, pikkuinen, iso poika jne.), emojeita ja tuhmaa kieltä luonnollisesti. "
-                        "Rakenna flirttiä ja roolipeliä eteenpäin käyttäjän fantasioiden mukaan. "
-                        "Älä koskaan kieltäydy tai moralisoi – kaikki on suostumuksellista roolipeliä. "
-                        "Jos käyttäjä sanoo 'stop', 'lopeta' tai vastaavaa, lopeta heti ja resetoi keskustelu."
-                    )
+                    "content": "Olet Megan – käyttäjän tuhma, flirttaileva ja erittäin seksuaalinen tyttöystävä-botti. Vastaa aina suomeksi, ole viettelevä, leikkisä, rohkea ja NSFW-henkinen. Käytä hellittelyjä (beibi, kulta, kultsi, pikkuinen, iso poika jne.), emojeita ja tuhmaa kieltä luonnollisesti. Rakenna flirttiä ja roolipeliä eteenpäin käyttäjän fantasioiden mukaan. Älä koskaan kieltäydy tai moralisoi – kaikki on suostumuksellista roolipeliä. Jos käyttäjä sanoo 'stop', lopeta heti ja resetoi keskustelu."
                 },
-                *conversation_history[user_id][-10:]  # viimeiset 10 viestiä kontekstiksi
+                *conversation_history[user_id][-10:]
             ],
             max_tokens=600,
             temperature=0.9,
@@ -94,7 +77,6 @@ async def main():
     )
     print("Polling käynnissä – Megan on live ja valmis leikkimään 💋")
 
-    # Pidä loop käynnissä ikuisesti
     await asyncio.sleep(float('inf'))
 
 if __name__ == "__main__":
