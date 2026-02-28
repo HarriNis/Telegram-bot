@@ -1,7 +1,7 @@
 import asyncio
 from telegram.ext import Application, MessageHandler, filters, CommandHandler
 
-TOKEN = "8314225705:AAFxObpju67JKpTS2fuNJp7BBRMc-W1EizA"  # ← VAIHDA OMAAN TOKENIISI!
+TOKEN = "8314225705:AAHSSjIxqY19QCgj34MPVLZAwmLzoGOh4ao"  # ← VAIHDA OMAAN TOKENIISI!
 
 async def start(update, context):
     await update.message.reply_text("Moikka! Bottisi pyörii Renderissä 24/7 🚀")
