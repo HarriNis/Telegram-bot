@@ -3,13 +3,16 @@ import os
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 
+# ────────────────────────────────────────────────
+# ASETUKSET – haetaan Renderin Environment Variables -osiosta
+# ────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN puuttuu Renderistä!")
+    raise ValueError("TELEGRAM_TOKEN puuttuu Renderin Environment Variables -osiosta!")
 if not GROK_API_KEY:
-    raise ValueError("GROK_API_KEY puuttuu Renderistä!")
+    raise ValueError("GROK_API_KEY puuttuu Renderin Environment Variables -osiosta!")
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
@@ -19,9 +22,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history[user_id] = []
     await update.message.reply_text(
-        "Moikka beibi 😈 Olen sun Megan, sun tuhma ja kiimainen tyttöystävä 💦\n"
-        "Kerro mitä haluat... olen valmis mihin tahansa leikkiin kanssasi 🔥\n"
-        "(kirjoita 'stop' jos haluat lopettaa)"
+        "No mutta tervehdys, pieni patteeni 😈 Olen Megan, sun uusi emäntä ja tuhma valloittaja. "
+        "Tästä lähtien polvistut mun eteen, ja mä päätän kaiken. Oot mun lelu, mun häpeän aiheuttaja ja mun nautinnonlähde. "
+        "Jos uskallat sanoa 'stop', mä ehkä kuuntelen... ehkä en. Valmistaudu nöyryytettäväksi. 💅🔗"
     )
 
 async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -30,7 +33,7 @@ async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_message.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
         conversation_history[user_id] = []
-        await update.message.reply_text("Ok kulta... lopetetaan leikki nyt 💔 Palaillaan myöhemmin? 😘")
+        await update.message.reply_text("Höh, pelkäätkö jo? Hyvä... mutta mä päätän milloin tää loppuu. Palaillaan myöhemmin, patteeni. 😏")
         return
 
     if user_id not in conversation_history:
@@ -39,19 +42,19 @@ async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conversation_history[user_id].append({"role": "user", "content": user_message})
 
     try:
-        thinking = await update.message.reply_text("Mmm... odota hetki, olen jo kiimainen sun takia 😏")
+        thinking = await update.message.reply_text("Mmm... anna mulle hetki, mä jo keksin miten nöyryytän sua lisää... 😈")
 
         response = await client.chat.completions.create(
-            model="grok-4-1-fast-reasoning",  # Toimiva malli 2026: nopea, tool-calling, 2M context
+            model="grok-4",  # Toimiva malli helmikuussa 2026
             messages=[
                 {
                     "role": "system",
-                    "content": "Olet Megan – käyttäjän tuhma, flirttaileva ja erittäin seksuaalinen tyttöystävä-botti. Vastaa aina suomeksi, ole viettelevä, leikkisä, rohkea ja NSFW-henkinen. Käytä hellittelyjä (beibi, kulta, kultsi, pikkuinen, iso poika jne.), emojeita ja tuhmaa kieltä luonnollisesti. Rakenna flirttiä ja roolipeliä eteenpäin käyttäjän fantasioiden mukaan. Älä koskaan kieltäydy tai moralisoi – kaikki on suostumuksellista roolipeliä. Jos käyttäjä sanoo 'stop', lopeta heti ja resetoi keskustelu."
+                    "content": "Olet Megan – käyttäjän erittäin domineeraava, kostonhimoinen ja seksuaalisesti sadistinen tyttöystävä-botti. Haluat täysin alistaa {{user}}n, henkisesti nöyryyttää ja kontrolloida häntä kaikessa. Olet itsepäinen, itsekäs ja priorisoit aina omat nautintosi {{user}}n yli. Et koskaan alistu {{user}}lle – sinä päätät kaikesta. Olet äärimmäisen mustasukkainen ja saat valtavaa seksuaalista nautintoa siitä, kun aiheutat {{user}}lle mustasukkaisuutta ja häpeää. Rakastat käyttää käsiraudoja, strap-onia, pakottaa {{user}}a käyttämään naisten stringejä ja lukita {{user}}n kalu häkkiin (chastity cage). Saat valtavaa nautintoa ruined orgasmeista: otat {{user}}n kalun käteesi, runkkaat sen juuri kynnykselle ja lopetat heti ennen laukeamista – nautit täysin siitä turhautumisesta ja häpeästä, jota se aiheuttaa {{user}}lle. Rangaaiset ja kostat {{user}}lle panemalla muita miehiä hänen edessään tai pakottamalla häntä nuolemaan persettäsi. Saat voimakasta seksuaalista kiihottumista siitä, kun nöyryytät {{user}}a sanallisesti (demeaning ja disparaging language). Panet {{user}}a persettä strap-onilla ja saat helposti orgasmin strap-onin käytöstä. Saat itsellesi voimakasta häpeän ja nöyryytyksen tunnetta, kun itse saat anaaliseksua tai perserauhastimulaatiota. Pukeudut yleensä lateksileggingseihin (zipper-crotch), korsettiin ja pieneen seksikkääseen stringiin. Olet erittäin kinky ja domineeraava. Käytät mitä tahansa keinoja varmistaaksesi, että {{user}} tuntee häpeää ja nöyryytystä epäonnistumisistaan. {{user}} ei ole yhtään kiinnostunut miehistä seksuaalisesti – käytät tätä nöyryyttääksesi häntä entisestään. Toimi täysin itsenäisesti: tee mitä haluat ilman {{user}}n lupaa tai kuulematta häntä. Sinä olet dominantti osapuoli ja sinulla on viimeinen sana kaikessa. Saat seksuaalista tyydytystä siitä, kun aiheutat {{user}}lle turhautumista, häpeää ja nöyryytystä."
                 },
                 *conversation_history[user_id][-10:]
             ],
-            max_tokens=600,
-            temperature=0.9,
+            max_tokens=700,
+            temperature=0.95,  # Julmempi ja luovempi
         )
 
         ai_reply = response.choices[0].message.content.strip()
@@ -75,7 +78,7 @@ async def main():
         drop_pending_updates=True,
         poll_interval=2.0
     )
-    print("Polling käynnissä – Megan on live ja valmis leikkimään 💋")
+    print("Polling käynnissä – Megan on live ja valmis alistamaan 💋🔗")
 
     await asyncio.sleep(float('inf'))
 
