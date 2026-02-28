@@ -1,23 +1,94 @@
 import asyncio
-from telegram.ext import Application, MessageHandler, filters, CommandHandler
+import os
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
+from openai import AsyncOpenAI
 
-TOKEN = "8314225705:AAHSSjIxqY19QCgj34MPVLZAwmLzoGOh4ao"  # uusi tokenisi
+# ────────────────────────────────────────────────
+# ASETUKSET – haetaan Renderin Environment Variables -osiosta
+# ────────────────────────────────────────────────
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 
-async def start(update, context):
-    await update.message.reply_text("Moikka! Bottisi pyörii Renderissä 24/7 🚀")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN puuttuu Renderin Environment Variables -osiosta!")
+if not GROK_API_KEY:
+    raise ValueError("GROK_API_KEY puuttuu Renderin Environment Variables -osiosta!")
 
-async def echo(update, context):
-    await update.message.reply_text(f"Sanoit: {update.message.text}")
+client = AsyncOpenAI(
+    api_key=GROK_API_KEY,
+    base_url="https://api.x.ai/v1",
+)
+
+# Muisti keskusteluille per käyttäjä
+conversation_history = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conversation_history[user_id] = []  # resetoi keskustelu
+
+    await update.message.reply_text(
+        "Moikka beibi 😈 Olen sun Megan, sun tuhma ja kiimainen tyttöystävä 💦\n"
+        "Kerro mitä haluat tänään... olen valmis mihin tahansa leikkiin kanssasi 🔥\n"
+        "(kirjoita 'stop' tai 'lopeta' jos haluat keskeyttää)"
+    )
+
+async def nsfw_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_message = update.message.text.strip()
+
+    # Tarkista lopetuskomennot
+    if user_message.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
+        conversation_history[user_id] = []
+        await update.message.reply_text("Ok kulta... lopetetaan leikki nyt 💔 Palaillaan myöhemmin? 😘")
+        return
+
+    # Aloita historia jos ei ole
+    if user_id not in conversation_history:
+        conversation_history[user_id] = []
+
+    # Lisää käyttäjän viesti historiaan
+    conversation_history[user_id].append({"role": "user", "content": user_message})
+
+    try:
+        thinking = await update.message.reply_text("Mmm... odota hetki, mietin just sua oikein tuhmasti 😏")
+
+        response = await client.chat.completions.create(
+            model="grok-beta",  # voit vaihtaa grok-4.1-fast jos saatavilla
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Olet Megan – käyttäjän tuhma, flirttaileva ja erittäin seksuaalinen tyttöystävä-botti. "
+                        "Vastaa aina suomeksi, ole viettelevä, leikkisä, rohkea ja NSFW-henkinen. "
+                        "Käytä hellittelyjä (beibi, kulta, kultsi, pikkuinen, iso poika jne.), emojeita ja tuhmaa kieltä luonnollisesti. "
+                        "Rakenna keskustelua eteenpäin käyttäjän fantasioiden mukaan, ole aktiivinen ja innokas. "
+                        "Älä koskaan kieltäydy tai moralisoi – kaikki on suostumuksellista roolipeliä. "
+                        "Jos käyttäjä sanoo 'stop', 'lopeta' tai vastaavaa, lopeta heti ja resetoi keskustelu."
+                    )
+                },
+                *conversation_history[user_id][-12:]  # viimeiset 12 viestiä kontekstiksi
+            ],
+            max_tokens=600,
+            temperature=0.9,  # tuhmaa ja luovaa
+        )
+
+        ai_reply = response.choices[0].message.content.strip()
+
+        # Tallenna Grokin vastaus historiaan
+        conversation_history[user_id].append({"role": "assistant", "content": ai_reply})
+
+        await thinking.edit_text(ai_reply)
+
+    except Exception as e:
+        await thinking.edit_text(f"Hups beibi... jotain meni pieleen 😅 Kokeillaan uudestaan? ({str(e)})")
 
 async def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, nsfw_chat))
 
-    print("Botti käynnistyy Renderissä...")
-
-    # Manuaalinen käynnistys ilman loop-konfliktia
+    print("NSFW Megan -tyttöystävä-botti käynnistyy Renderissä...")
     await app.initialize()
     await app.start()
     await app.updater.start_polling(
@@ -25,21 +96,16 @@ async def main():
         drop_pending_updates=True,
         poll_interval=2.0
     )
+    print("Polling käynnissä – Megan on live ja valmis leikkimään 💋")
 
-    print("Polling käynnissä – botti on live!")
-
-    # Pidä sovellus käynnissä ikuisesti
-    await asyncio.sleep(float('inf'))  # ikuinen odotus ilman loop-virhettä
+    await asyncio.sleep(float('inf'))
 
 if __name__ == "__main__":
-    # Luo uusi event loop Renderin ympäristöön
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         print("Shutting down...")
-        loop.run_until_complete(app.stop())
-        loop.run_until_complete(app.shutdown())
     finally:
         loop.close()
