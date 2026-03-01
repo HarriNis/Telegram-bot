@@ -39,35 +39,67 @@ naughty_prompts = [
     "Teasing girlfriend in latex gloves and harness, ruined orgasm theme, close-up on face with evil grin, artistic style"
 ]
 
-# Lataa muisti tiedostosta
+# Lataa muisti tiedostosta – vahva muunnos ja turva
 def load_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
     if os.path.exists(file_path):
-        with open(file_path, 'r') as f:
-            data = json.load(f)
-            conversation_history[user_id] = data.get("history", [])
-            anger = data.get("anger", [0, datetime.now().isoformat()])
-            # Muunna angerin toinen alkio datetime:ksi jos string
-            if isinstance(anger[1], str):
-                anger = (anger[0], datetime.fromisoformat(anger[1]))
-            else:
-                anger = (anger[0], anger[1])
-            anger_level[user_id] = anger
-
-            emotions = data.get("emotions", [])
-            # Muunna emotionien ajat datetime:ksi jos string
-            emotion_memory[user_id] = [
-                (e[0], e[1], datetime.fromisoformat(e[2]) if isinstance(e[2], str) else e[2])
-                for e in emotions
-            ]
-
-            personality_mood[user_id] = data.get("mood", "hellä")
-            last_time = data.get("last_time", datetime.now().isoformat())
-            # Muunna last_time datetime:ksi jos string
-            if isinstance(last_time, str):
-                last_message_time[user_id] = datetime.fromisoformat(last_time)
-            else:
-                last_message_time[user_id] = last_time
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                
+                conversation_history[user_id] = data.get("history", [])
+                
+                # Anger: pakota tuple + datetime
+                anger_data = data.get("anger", [0, datetime.now().isoformat()])
+                if isinstance(anger_data, list) and len(anger_data) == 2:
+                    level = anger_data[0]
+                    time_str = anger_data[1]
+                    if isinstance(time_str, str):
+                        try:
+                            time_obj = datetime.fromisoformat(time_str)
+                        except ValueError:
+                            time_obj = datetime.now()
+                    else:
+                        time_obj = time_str if isinstance(time_str, datetime) else datetime.now()
+                    anger_level[user_id] = (level, time_obj)
+                else:
+                    anger_level[user_id] = (0, datetime.now())
+                
+                # Emotions: pakota datetime
+                emotions = data.get("emotions", [])
+                emotion_memory[user_id] = []
+                for e in emotions:
+                    if isinstance(e, list) and len(e) == 3:
+                        emo, txt, ts = e
+                        if isinstance(ts, str):
+                            try:
+                                ts = datetime.fromisoformat(ts)
+                            except ValueError:
+                                ts = datetime.now()
+                        elif not isinstance(ts, datetime):
+                            ts = datetime.now()
+                        emotion_memory[user_id].append((emo, txt, ts))
+                
+                personality_mood[user_id] = data.get("mood", "hellä")
+                
+                # Last time
+                last_time = data.get("last_time", datetime.now().isoformat())
+                if isinstance(last_time, str):
+                    try:
+                        last_message_time[user_id] = datetime.fromisoformat(last_time)
+                    except ValueError:
+                        last_message_time[user_id] = datetime.now()
+                else:
+                    last_message_time[user_id] = last_time if isinstance(last_time, datetime) else datetime.now()
+                    
+        except Exception as e:
+            print(f"Muistin lataus epäonnistui user {user_id}: {e}")
+            # Fail-safe: tyhjennä muisti jos tiedosto rikki
+            conversation_history[user_id] = []
+            anger_level[user_id] = (0, datetime.now())
+            emotion_memory[user_id] = []
+            personality_mood[user_id] = "hellä"
+            last_message_time[user_id] = datetime.now()
     else:
         conversation_history[user_id] = []
         anger_level[user_id] = (0, datetime.now())
@@ -78,17 +110,20 @@ def load_memory(user_id):
 # Tallenna muisti tiedostoon
 def save_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
-    data = {
-        "history": conversation_history[user_id],
-        "anger": [anger_level[user_id][0], anger_level[user_id][1].isoformat()],
-        "emotions": [
-            [e[0], e[1], e[2].isoformat()] for e in emotion_memory[user_id]
-        ],
-        "mood": personality_mood[user_id],
-        "last_time": last_message_time[user_id].isoformat()
-    }
-    with open(file_path, 'w') as f:
-        json.dump(data, f)
+    try:
+        data = {
+            "history": conversation_history.get(user_id, []),
+            "anger": [anger_level[user_id][0], anger_level[user_id][1].isoformat()],
+            "emotions": [
+                [e[0], e[1], e[2].isoformat()] for e in emotion_memory.get(user_id, [])
+            ],
+            "mood": personality_mood.get(user_id, "hellä"),
+            "last_time": last_message_time[user_id].isoformat()
+        }
+        with open(file_path, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Muistin tallennus epäonnistui user {user_id}: {e}")
 
 # Analysoi ja tiivistä historia Grokilla (jos pitkä)
 async def analyze_history(user_id):
@@ -141,7 +176,7 @@ async def independent_message_loop(app: Application):
                     try:
                         prompt = random.choice(naughty_prompts)
                         image_response = await client.images.generate(
-                            model="grok-beta",  # Vaihda uusimpaan malliin jos tarpeen (tarkista docs.x.ai)
+                            model="grok-beta",
                             prompt=prompt,
                             n=1,
                             size="1024x1024",
@@ -156,10 +191,10 @@ async def independent_message_loop(app: Application):
                         ]
                         caption = random.choice(captions)
                         await app.bot.send_photo(chat_id=user_id, photo=grok_image_url, caption=caption)
-                        continue  # Skippaa teksti jos kuva lähetetty
+                        continue
                     except Exception as e:
                         print(f"Kuvan generointi epäonnistui: {e}")
-                        pass  # Jatka tekstiin jos epäonnistuu
+                        pass
                 
                 # Muuten lähetä teksti
                 texts = {
@@ -207,11 +242,17 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     load_memory(user_id)  # Lataa aina varmuudeksi
 
-    # Turva vanhoille tiedostoille: Varmista että last_anger on datetime
-    current_anger, last_anger = anger_level[user_id]
-    if isinstance(last_anger, str):
-        last_anger = datetime.fromisoformat(last_anger)
-        anger_level[user_id] = (current_anger, last_anger)
+    # Pakota last_anger aina datetime:ksi – tämä estää virheen
+    current_anger, last_anger = anger_level.get(user_id, (0, datetime.now()))
+    if not isinstance(last_anger, datetime):
+        try:
+            if isinstance(last_anger, str):
+                last_anger = datetime.fromisoformat(last_anger)
+            else:
+                last_anger = datetime.now()
+        except:
+            last_anger = datetime.now()
+    anger_level[user_id] = (current_anger, last_anger)
 
     if text.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
         conversation_history[user_id] = []
@@ -264,13 +305,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Analysoi historia ennen vastausta
     await analyze_history(user_id)
 
-    # Generoi ja lähetä kuva Grokilla triggerillä (esim. anger >=7 tai käyttäjä triggeröi)
+    # Generoi ja lähetä kuva Grokilla triggerillä
     sent_image = False
     if current_anger >= 7 or ("näytä" in text.lower() and "kuva" in text.lower()) or "strap-on" in text.lower():
         try:
             prompt = random.choice(naughty_prompts)
             image_response = await client.images.generate(
-                model="grok-beta",  # Vaihda jos tarpeen
+                model="grok-beta",
                 prompt=prompt,
                 n=1,
                 size="1024x1024",
@@ -289,8 +330,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(f"Hups... kuva ei menny läpi 😅 ({str(e)})")
             print(f"Kuvan generointi epäonnistui: {e}")
 
-    # Normaali chat-vastaus (jos ei skipattu kuvaa varten)
-    if not sent_image or random.random() < 0.8:  # Lähetä teksti usein kuvan lisäksi
+    # Normaali chat-vastaus
+    if not sent_image or random.random() < 0.8:
         for attempt in range(2):
             try:
                 thinking = await message.reply_text("Mmm... mietin sulle... 😏")
@@ -332,7 +373,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 conversation_history[user_id].append({"role": "assistant", "content": reply})
                 await thinking.edit_text(reply)
-                break  # Poistu loopista onnistuneen jälkeen
+                break
 
             except Exception as e:
                 if attempt == 1:
