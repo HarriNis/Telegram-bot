@@ -135,7 +135,7 @@ async def analyze_history(user_id):
         # Muodosta analyysi-prompt
         history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in old_history])
         response = await client.chat.completions.create(
-            model="grok-beta",
+            model="grok-4-1-fast-reasoning",
             messages=[
                 {
                     "role": "system",
@@ -177,7 +177,7 @@ async def independent_message_loop(app: Application):
                     try:
                         prompt = random.choice(naughty_prompts)
                         image_response = await client.images.generate(
-                            model="grok-beta",
+                            model="grok-imagine-image",
                             prompt=prompt,
                             n=1,
                             size="1024x1024",
@@ -321,7 +321,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             prompt = random.choice(naughty_prompts)
             image_response = await client.images.generate(
-                model="grok-beta",
+                model="grok-imagine-image",
                 prompt=prompt,
                 n=1,
                 size="1024x1024",
@@ -353,7 +353,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     emotion_context = "Viimeaikaiset tunteesi: " + ", ".join([f"{e[0]} ({e[1]})" for e in recent]) + ". Käytä näitä hyväksi. Muista koko historia ja analysoi tunteita."
 
                 response = await client.chat.completions.create(
-                    model="grok-beta",  # Nopeampi malli viiveen vähentämiseksi
+                    model="grok-4-1-fast-reasoning",  # Korjattu malli
                     messages=[
                         {
                             "role": "system",
