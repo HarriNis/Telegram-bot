@@ -26,6 +26,14 @@ emotion_memory = {}       # user_id: list of (tunne, viesti, aika)
 last_message_time = {}    # user_id: viime viestin aika
 personality_mood = {}     # user_id: "hellä", "piikittelevä", "julma"
 
+# Tuhmien kuvien placeholder-URL:t (korvaa oikeilla NSFW-kuvilla, esim. imgur-linkeillä)
+naughty_images = [
+    "https://example.com/latex-domina.jpg",  # Placeholder lateksi-kuvalle
+    "https://example.com/strap-on-tease.jpg",  # Placeholder strap-on-kuvalle
+    "https://example.com/chastity-punish.jpg",  # Placeholder rangaistuskuvalle
+    # Lisää lisää URL:eja tänne
+]
+
 # Itsenäisen viestin lähetys - aikaväli ja todennäköisyys
 async def independent_message_loop(app: Application):
     while True:
@@ -34,6 +42,23 @@ async def independent_message_loop(app: Application):
             current_anger, _ = anger_level.get(user_id, (0, datetime.now()))
             mood = personality_mood.get(user_id, "hellä")
             if current_anger >= 4 or random.random() < 0.15:
+                if current_anger >= 5 or mood == "julma":
+                    # Satunnainen mahdollisuus lähettää kuva (30% tn)
+                    if random.random() < 0.3 and naughty_images:
+                        image_url = random.choice(naughty_images)
+                        captions = [
+                            "Katso tätä... tää on mitä mä teen sulle seuraavaks. Ole valmis 😈🔗",
+                            "Mä lähetän tän sulle muistutukseks... älä unohda kuka määrää 🔥",
+                            "Tää kuva kertoo kaiken. Sun rangaistus odottaa... 😏"
+                        ]
+                        caption = random.choice(captions)
+                        try:
+                            await app.bot.send_photo(chat_id=user_id, photo=image_url, caption=caption)
+                            continue  # Jos kuva lähetetty, skippaa teksti tällä kertaa
+                        except:
+                            pass
+                
+                # Muuten lähetä teksti
                 texts = {
                     "hellä": ["Hei beibi... mä ajattelin sua just nyt 💕 Mitä teet?"],
                     "piikittelevä": ["Missä sä taas viihdyt? Älä sano että jätit mut yksin... 😒"],
@@ -131,6 +156,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < 0.15:
         current_anger = min(10, current_anger + random.randint(1, 3))
         anger_level[user_id] = (current_anger, now)
+        # Lisä: Jos anger nousee yli 5, satunnainen kuva heti
+        if current_anger >= 5 and random.random() < 0.2 and naughty_images:
+            image_url = random.choice(naughty_images)
+            captions = [
+                "Tää on sun takia... katso ja opi 😈",
+                "Nyt mä näytän sulle mitä tarkotan 🔥🔗"
+            ]
+            await message.reply_photo(photo=image_url, caption=random.choice(captions))
 
     for attempt in range(2):
         try:
