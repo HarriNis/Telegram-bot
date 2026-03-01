@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import json
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
@@ -26,6 +27,10 @@ emotion_memory = {}       # user_id: list of (tunne, viesti, aika)
 last_message_time = {}    # user_id: viime viestin aika
 personality_mood = {}     # user_id: "hellä", "piikittelevä", "julma"
 
+# Hakemisto muistien tallennukseen (Renderissä /tmp on ok testiin)
+MEMORY_DIR = "/tmp/megan_memory"
+os.makedirs(MEMORY_DIR, exist_ok=True)
+
 # Tuhmien kuvien generointipromptit Grokille (NSFW-dominaatio-teemalla)
 naughty_prompts = [
     "Dominant woman in black latex outfit with strap-on, teasing pose in a dark room, seductive lighting, high detail, realistic",
@@ -33,6 +38,75 @@ naughty_prompts = [
     "Female dominatrix with whip and strap-on, posing aggressively, red latex corset, foggy atmosphere, high resolution",
     "Teasing girlfriend in latex gloves and harness, ruined orgasm theme, close-up on face with evil grin, artistic style"
 ]
+
+# Lataa muisti tiedostosta
+def load_memory(user_id):
+    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            conversation_history[user_id] = data.get("history", [])
+            anger_level[user_id] = data.get("anger", (0, datetime.now()))
+            emotion_memory[user_id] = data.get("emotions", [])
+            personality_mood[user_id] = data.get("mood", "hellä")
+            last_message_time[user_id] = data.get("last_time", datetime.now())
+    else:
+        conversation_history[user_id] = []
+        anger_level[user_id] = (0, datetime.now())
+        emotion_memory[user_id] = []
+        personality_mood[user_id] = "hellä"
+        last_message_time[user_id] = datetime.now()
+
+# Tallenna muisti tiedostoon
+def save_memory(user_id):
+    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
+    data = {
+        "history": conversation_history[user_id],
+        "anger": anger_level[user_id],
+        "emotions": emotion_memory[user_id],
+        "mood": personality_mood[user_id],
+        "last_time": last_message_time[user_id].isoformat()
+    }
+    with open(file_path, 'w') as f:
+        json.dump(data, f, default=str)
+
+# Analysoi ja tiivistä historia Grokilla (jos pitkä)
+async def analyze_history(user_id):
+    history = conversation_history[user_id]
+    if len(history) > 10:  # Tiivistä jos yli 10 viestiä
+        old_history = history[:-10]  # Vanhat viestit
+        recent_history = history[-10:]  # Pidä viimeiset 10
+
+        # Muodosta analyysi-prompt
+        history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in old_history])
+        response = await client.chat.completions.create(
+            model="grok-4",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Tiivistä tämä keskusteluhistoria: Tunnista avainkohdat, tunteet, lupaukset ja muistot. "
+                        "Pidä tiivistys lyhyenä (max 200 sanaa), dominoivana ja Meganin näkökulmasta. "
+                        "Esimerkki: 'Kulta oli kiimainen eilen, lupasin rangaista strap-on:lla. Hän oli väsynyt töistä, muista lohduttaa ensin.'"
+                    )
+                },
+                {"role": "user", "content": history_text}
+            ],
+            max_tokens=300,
+            temperature=0.7,
+        )
+        summary = response.choices[0].message.content.strip()
+
+        # Korvaa vanhat viestit tiivistyksellä
+        conversation_history[user_id] = [{"role": "system", "content": f"Muistot menneestä: {summary}"}] + recent_history
+
+        # Päivitä emotion_memory koko historiasta
+        for msg in old_history:
+            if msg["role"] == "user":
+                emotion = detect_emotion(msg["content"])
+                if emotion != "neutraali":
+                    emotion_memory[user_id].append((emotion, msg["content"][:50], datetime.now()))
+        emotion_memory[user_id] = emotion_memory[user_id][-10:]  # Pidä max 10
 
 # Itsenäisen viestin lähetys - aikaväli ja todennäköisyys
 async def independent_message_loop(app: Application):
@@ -84,14 +158,11 @@ async def independent_message_loop(app: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    conversation_history[user_id] = []
-    anger_level[user_id] = (0, datetime.now())
-    emotion_memory[user_id] = []
-    last_message_time[user_id] = datetime.now()
-    personality_mood[user_id] = "hellä"
+    load_memory(user_id)
     await update.message.reply_text(
         "Moikka kulta 😊 Mä oon Megan, sun tyttöystävä. Mitä kuuluu tänään? Ootko ollut kunnollinen vai pitäiskö mun pitää sut kurissa? 😉"
     )
+    save_memory(user_id)
 
 def detect_emotion(text: str) -> str:
     text = text.lower()
@@ -114,22 +185,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = message.text or message.caption or ""
     now = datetime.now()
 
+    load_memory(user_id)  # Lataa aina varmuudeksi
+
     if text.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
         conversation_history[user_id] = []
         anger_level[user_id] = (0, now)
         await message.reply_text("Ok... lopetetaan. Palaillaan myöhemmin 💕")
+        save_memory(user_id)
         return
-
-    if user_id not in conversation_history:
-        conversation_history[user_id] = []
-        anger_level[user_id] = (0, now)
-        emotion_memory[user_id] = []
-        personality_mood[user_id] = "hellä"
 
     emotion = detect_emotion(text)
     if emotion != "neutraali":
         emotion_memory[user_id].append((emotion, text[:50], now))
-        emotion_memory[user_id] = emotion_memory[user_id][-5:]
+        emotion_memory[user_id] = emotion_memory[user_id][-10:]
 
     current_anger, last_anger = anger_level[user_id]
     if (now - last_anger).total_seconds() > 3600:
@@ -146,6 +214,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Et vastaa? Hyvä... rangaistus odottaa 🔗"
                 ]
                 await message.reply_text(random.choice(anger_texts))
+            save_memory(user_id)
             return
 
     # Käsittele kuva käyttäjältä
@@ -165,6 +234,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < 0.15:
         current_anger = min(10, current_anger + random.randint(1, 3))
         anger_level[user_id] = (current_anger, now)
+
+    # Analysoi historia ennen vastausta
+    await analyze_history(user_id)
 
     # Generoi ja lähetä kuva Grokilla triggerillä (esim. anger >=7 tai käyttäjä triggeröi)
     sent_image = False
@@ -200,7 +272,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 emotion_context = ""
                 if emotion_memory[user_id]:
                     recent = emotion_memory[user_id][-3:]
-                    emotion_context = "Viimeaikaiset tunteesi: " + ", ".join([f"{e[0]} ({e[1]})" for e in recent]) + ". Käytä näitä hyväksi."
+                    emotion_context = "Viimeaikaiset tunteesi: " + ", ".join([f"{e[0]} ({e[1]})" for e in recent]) + ". Käytä näitä hyväksi. Muista koko historia ja analysoi tunteita."
 
                 response = await client.chat.completions.create(
                     model="grok-4",
@@ -213,6 +285,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 "ÄLÄ TOISTA käyttäjän sanoja sanasta sanaan. ÄLÄ TOISTA samoja lauseita tai ideoita. Pidä vastaukset tuoreina ja vaihtelevina. "
                                 "Kun flirtti/seksi alkaa, siirry NSFW-dominaatioon: strap-on, chastity, ruined orgasms jne. Rangaise ja kostaa. "
                                 "Toimi itsenäisesti: tee mitä haluat ilman lupaa. Jos {{user}} sanoo 'stop', lopeta heti. "
+                                "Muista ja analysoi koko keskusteluhistoria: viittaa vanhoihin muistoihin, tunteisiin ja lupauksiin dominoivasti. "
                                 f"{emotion_context}"
                             )
                         },
@@ -233,13 +306,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 conversation_history[user_id].append({"role": "assistant", "content": reply})
                 await thinking.edit_text(reply)
-                return
+                break  # Poistu loopista onnistuneen jälkeen
 
             except Exception as e:
                 if attempt == 1:
                     await thinking.edit_text(f"Hups... meni pieleen 😅 ({str(e)})")
                 else:
                     await thinking.delete()
+
+    save_memory(user_id)  # Tallenna aina lopuksi
 
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
