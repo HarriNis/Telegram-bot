@@ -46,10 +46,28 @@ def load_memory(user_id):
         with open(file_path, 'r') as f:
             data = json.load(f)
             conversation_history[user_id] = data.get("history", [])
-            anger_level[user_id] = data.get("anger", (0, datetime.now()))
-            emotion_memory[user_id] = data.get("emotions", [])
+            anger = data.get("anger", [0, datetime.now().isoformat()])
+            # Muunna angerin toinen alkio datetime:ksi jos string
+            if isinstance(anger[1], str):
+                anger = (anger[0], datetime.fromisoformat(anger[1]))
+            else:
+                anger = (anger[0], anger[1])
+            anger_level[user_id] = anger
+
+            emotions = data.get("emotions", [])
+            # Muunna emotionien ajat datetime:ksi jos string
+            emotion_memory[user_id] = [
+                (e[0], e[1], datetime.fromisoformat(e[2]) if isinstance(e[2], str) else e[2])
+                for e in emotions
+            ]
+
             personality_mood[user_id] = data.get("mood", "hellä")
-            last_message_time[user_id] = data.get("last_time", datetime.now())
+            last_time = data.get("last_time", datetime.now().isoformat())
+            # Muunna last_time datetime:ksi jos string
+            if isinstance(last_time, str):
+                last_message_time[user_id] = datetime.fromisoformat(last_time)
+            else:
+                last_message_time[user_id] = last_time
     else:
         conversation_history[user_id] = []
         anger_level[user_id] = (0, datetime.now())
@@ -62,13 +80,15 @@ def save_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
     data = {
         "history": conversation_history[user_id],
-        "anger": anger_level[user_id],
-        "emotions": emotion_memory[user_id],
+        "anger": [anger_level[user_id][0], anger_level[user_id][1].isoformat()],
+        "emotions": [
+            [e[0], e[1], e[2].isoformat()] for e in emotion_memory[user_id]
+        ],
         "mood": personality_mood[user_id],
         "last_time": last_message_time[user_id].isoformat()
     }
     with open(file_path, 'w') as f:
-        json.dump(data, f, default=str)
+        json.dump(data, f)
 
 # Analysoi ja tiivistä historia Grokilla (jos pitkä)
 async def analyze_history(user_id):
@@ -186,6 +206,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
 
     load_memory(user_id)  # Lataa aina varmuudeksi
+
+    # Turva vanhoille tiedostoille: Varmista että last_anger on datetime
+    current_anger, last_anger = anger_level[user_id]
+    if isinstance(last_anger, str):
+        last_anger = datetime.fromisoformat(last_anger)
+        anger_level[user_id] = (current_anger, last_anger)
 
     if text.lower() in ["stop", "lopeta", "keskeytä", "ei enää"]:
         conversation_history[user_id] = []
