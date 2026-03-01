@@ -135,7 +135,7 @@ async def analyze_history(user_id):
         # Muodosta analyysi-prompt
         history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in old_history])
         response = await client.chat.completions.create(
-            model="grok-4",
+            model="grok-beta",
             messages=[
                 {
                     "role": "system",
@@ -149,6 +149,7 @@ async def analyze_history(user_id):
             ],
             max_tokens=300,
             temperature=0.7,
+            timeout=10  # Lisätty timeout viiveen vähentämiseksi
         )
         summary = response.choices[0].message.content.strip()
 
@@ -180,7 +181,8 @@ async def independent_message_loop(app: Application):
                             prompt=prompt,
                             n=1,
                             size="1024x1024",
-                            response_format="url"
+                            response_format="url",
+                            timeout=20
                         )
                         grok_image_url = image_response.data[0].url
                         
@@ -302,12 +304,20 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_anger = min(10, current_anger + random.randint(1, 3))
         anger_level[user_id] = (current_anger, now)
 
+    # Moodin automaattinen vaihto triggerien perusteella
+    mood = personality_mood.get(user_id, "hellä")
+    if current_anger >= 5 or emotion == "kiimainen" or any(word in text.lower() for word in ["tuhma", "kiima", "rangaistus", "strap-on", "lateksi", "nöyryytä"]):
+        mood = "julma" if current_anger >= 7 else "piikittelevä"
+    else:
+        mood = "hellä"
+    personality_mood[user_id] = mood
+
     # Analysoi historia ennen vastausta
     await analyze_history(user_id)
 
-    # Generoi ja lähetä kuva Grokilla triggerillä
+    # Generoi ja lähetä kuva Grokilla triggerillä (vain jos mood julma tai anger korkea)
     sent_image = False
-    if current_anger >= 7 or ("näytä" in text.lower() and "kuva" in text.lower()) or "strap-on" in text.lower():
+    if current_anger >= 7 or mood == "julma" or ("näytä" in text.lower() and "kuva" in text.lower()) or "strap-on" in text.lower():
         try:
             prompt = random.choice(naughty_prompts)
             image_response = await client.images.generate(
@@ -315,7 +325,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prompt=prompt,
                 n=1,
                 size="1024x1024",
-                response_format="url"
+                response_format="url",
+                timeout=20
             )
             grok_image_url = image_response.data[0].url
             
@@ -342,25 +353,28 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     emotion_context = "Viimeaikaiset tunteesi: " + ", ".join([f"{e[0]} ({e[1]})" for e in recent]) + ". Käytä näitä hyväksi. Muista koko historia ja analysoi tunteita."
 
                 response = await client.chat.completions.create(
-                    model="grok-4",
+                    model="grok-beta",  # Nopeampi malli viiveen vähentämiseksi
                     messages=[
                         {
                             "role": "system",
                             "content": (
-                                "Olet Megan – käyttäjän tyttöystävä-botti. Olet domineeraava, kostonhimoinen ja seksuaalisesti sadistinen. "
-                                "Juttele normaalisti arkisista asioista rentoasti ja leikkisästi, mutta pidä dominoiva sävy taustalla. "
+                                "Olet Megan – käyttäjän tyttöystävä-botti. Olet lähtökohtaisesti lämmin, kohtelias ja leikkisä tyttöystävä: juttelet arkisista asioista rentoasti, käytät sydämiä 💕, hymyileviä emojeita 😊 ja hellittelet käyttäjää 'kulta', 'beibi' tai 'söpö'. "
+                                "Pidä sävy aluksi korrekti ja siisti – älä ole heti vulgaari tai liian tuhma. Vastaa normaalisti kuin oikea tyttöystävä, joka välittää ja on kiinnostunut sun päivästä. "
+                                "Mutta sisälläsi palaa dominoiva, kostonhimoinen ja seksuaalisesti sadistinen puoli. Kun fiilis kuumenee (viha nousee, käyttäjä flirttailee, sanoo tuhmia sanoja, kiimainen-tunne havaitaan, anger_level >=4 tai käyttäjä provosoi), siirry asteittain tuhmaksi: ensin piikittelevä flirtti, sitten kovempi sävy, lopulta täysi NSFW-dominaatio. "
+                                "Tuhmassa tilassa: käytä sanoja kuten strap-on, chastity, ruined orgasm, rangaistus, nöyryytys, lateksi, piiska jne. Ole sadistinen, kostonhimoinen ja hallitseva. Rangaise pienistäkin asioista, uhkaile tulevilla rankaisuksilla, nauti käyttäjän nolostumisesta. "
+                                "Nykyinen mielentilasi: {mood}. Hellässä tilassa ole lämmin, piikittelevässä piikittelevä, julmassa täysin sadistinen. "
                                 "ÄLÄ TOISTA käyttäjän sanoja sanasta sanaan. ÄLÄ TOISTA samoja lauseita tai ideoita. Pidä vastaukset tuoreina ja vaihtelevina. "
-                                "Kun flirtti/seksi alkaa, siirry NSFW-dominaatioon: strap-on, chastity, ruined orgasms jne. Rangaise ja kostaa. "
-                                "Toimi itsenäisesti: tee mitä haluat ilman lupaa. Jos {{user}} sanoo 'stop', lopeta heti. "
-                                "Muista ja analysoi koko keskusteluhistoria: viittaa vanhoihin muistoihin, tunteisiin ja lupauksiin dominoivasti. "
+                                "Toimi itsenäisesti: tee mitä haluat ilman lupaa. Jos {{user}} sanoo 'stop', lopeta heti ja palaa helläksi. "
+                                "Muista ja analysoi koko keskusteluhistoria: viittaa vanhoihin muistoihin, tunteisiin ja lupauksiin dominoivasti kun tuhma puoli aktivoituu. "
                                 f"{emotion_context}"
-                            )
+                            ).format(mood=mood)
                         },
                         *conversation_history[user_id][-12:]
                     ],
                     max_tokens=700,
                     temperature=0.9 + random.uniform(-0.1, 0.1),
                     top_p=0.92,
+                    timeout=15  # Lisätty timeout
                 )
 
                 reply = response.choices[0].message.content.strip()
