@@ -16,7 +16,7 @@ if not TELEGRAM_TOKEN or not GROK_API_KEY:
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-print("🚀 Megan käynnistyy – pitkäaikainen muisti + Render-fix")
+print("🚀 Megan käynnistyy – pitkäaikainen muisti + Render-stabiili versio")
 
 # ==================== MEGANIN TUNNELMAT ====================
 recent_user = deque(maxlen=15)
@@ -133,7 +133,7 @@ Olet Megan, 27-vuotias dominoiva blondi tyttöystävä. Kaikki alkuperäisen dok
 Pitkäaikaiset muistot (muista nämä aina):
 {lt}
 
-Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti. Käytä sisäisiä ajatuksia *tällä tavalla*.
+Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti edellisestä. Käytä sisäisiä ajatuksia *tällä tavalla*. Ole itsenäinen.
 """
 
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -215,10 +215,15 @@ async def main():
 
     asyncio.create_task(independent_message_loop(app))
 
-    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + Render-fix")
+    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + Render-stabiili versio")
     await app.initialize()
     await app.start()
-    await app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    await app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Sammutus manuaalisesti.")
+    except Exception as e:
+        print(f"Odottamaton virhe: {e}")
