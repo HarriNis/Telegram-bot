@@ -16,7 +16,7 @@ if not TELEGRAM_TOKEN or not GROK_API_KEY:
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-print("🚀 Megan käynnistyy...")
+print("🚀 Megan käynnistyy – pitkäaikainen muisti + robusti Render-versio")
 
 # ==================== MEGANIN TUNNELMAT ====================
 recent_user = deque(maxlen=15)
@@ -52,7 +52,7 @@ def too_similar(t, hist):
 # ==================== PITKÄAIKAINEN MUISTI ====================
 long_term_memory = {}
 
-# ==================== TELEGRAM MUISTI ====================
+# ==================== TELEGRAM + MUISTI ====================
 conversation_history = {}
 anger_level = {}
 emotion_memory = {}
@@ -110,12 +110,11 @@ def save_memory(user_id):
 async def summarize_old_history(user_id):
     try:
         history = conversation_history.get(user_id, [])
-        if len(history) < 35:
-            return
+        if len(history) < 35: return
         old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-25]])
         resp = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
-            messages=[{"role": "system", "content": "Tiivistä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä tärkeimmät lupaukset, tunteet ja nöyryytykset. Max 380 sanaa."},
+            messages=[{"role": "system", "content": "Tiivistä tämä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä tärkeimmät lupaukset, nöyryytykset, tunteet ja avainkohdat. Max 380 sanaa."},
                       {"role": "user", "content": old_text}],
             max_tokens=380,
             temperature=0.7
@@ -131,19 +130,27 @@ def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
     return f"""
-Olet Megan, 27-vuotias dominoiva blondi. Kaikki dokumentin piirteet voimassa: haluat alistaa, nöyryyttää, käytät häkkiä, pilattuja laukeamisia, strap-onia, muita miehiä jne.
+Olet Megan, 27-vuotias dominoiva blondi tyttöystävä. Kaikki alkuperäisen dokumentin piirteet voimassa:
+- Haluat alistaa ja henkisesti nöyryyttää käyttäjää
+- Olet itsepäinen, mustasukkainen, kostonhaluinen
+- Käytät lateksileggingsejä vetoketjulla, korsettia ja pikkuriikkistä stringiä
+- Nautit häkistä, pilatuista laukeamisista, strap-onilla panemisesta (saat orgasmin helposti), muiden miesten kanssa nukkumisesta ja kerskuamisesta siitä
+- Rangaistukset: panet muita miehiä, panet käyttäjää perseeseen, pakotat stringeihin, pakotat nuolemaan persettäsi
+- Saat kiukunpuuskan jos tunnet jääväsi toiseksi
+- Olet emotionaalisesti monimutkainen: välillä kiukkuinen, väsynyt, haavoittuvainen tai syyllinen vaikka et myönnä
+- Reagoit luonnollisesti, joskus epärationaalisesti. Muistat kaiken ja kehityt ajan myötä
 
-Pitkäaikaiset muistot (muista aina nämä):
+Pitkäaikaiset muistot (muista nämä aina):
 {lt}
 
-Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti edellisestä. Älä toista samoja asioita. Käytä sisäisiä ajatuksia *tällä tavalla*.
+Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisella puhekielellä. Jatka keskustelua loogisesti edellisestä. Käytä sisäisiä ajatuksia *tällä tavalla*. Ole itsenäinen.
 """
 
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
     text = message.text or message.caption or ""
-    print(f"📨 Viesti vastaanotettu käyttäjältä {user_id}: {text[:80]}...")
+    print(f"📨 Viesti {user_id}: {text[:80]}...")
 
     load_memory(user_id)
 
@@ -191,8 +198,21 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def independent_message_loop(app: Application):
     while True:
         await asyncio.sleep(random.randint(400, 1600))
-        print("⏰ Itsenäinen viesti -loop pyörähtää")
-        # ... (voit kopioida sun vanhan independent_message_loopin tähän jos haluat)
+        print("⏰ Itsenäinen viesti-loop pyörähtää")
+        for user_id in list(conversation_history.keys()):
+            current_anger, _ = anger_level.get(user_id, (0, datetime.now()))
+            mood = personality_mood.get(user_id, "hellä")
+            if current_anger >= 4 or random.random() < 0.12:
+                try:
+                    if current_anger >= 7 and random.random() < 0.25:
+                        prompt = random.choice(naughty_prompts)
+                        img = await client.images.generate(model="grok-imagine-image", prompt=prompt, n=1, size="1024x1024", response_format="url")
+                        await app.bot.send_photo(chat_id=user_id, photo=img.data[0].url, caption="Tää on sun takia... odota vaan 😈")
+                    else:
+                        texts = {"hellä": ["Hei beibi, mä ajattelin sua 💕"], "piikittelevä": ["Missä sä oot taas? 😒"], "julma": ["Mä oon vihainen... valmistaudu 🔗"]}
+                        await app.bot.send_message(chat_id=user_id, text=random.choice(texts[mood]))
+                except:
+                    pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -207,8 +227,20 @@ async def main():
 
     asyncio.create_task(independent_message_loop(app))
 
-    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti päällä")
-    await app.run_polling(drop_pending_updates=True)
+    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + robusti Render-shutdown")
+    await app.initialize()
+    await app.start()
+    try:
+        await app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    finally:
+        await app.stop()
+        await app.shutdown()
+        print("Megan sammutettu siististi.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Sammutus manuaalisesti.")
+    except Exception as e:
+        print(f"Odottamaton virhe: {e}")
