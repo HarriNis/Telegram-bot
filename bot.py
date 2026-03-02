@@ -1,7 +1,7 @@
-import asyncio
 import os
 import random
 import json
+import asyncio
 from datetime import datetime
 from collections import deque
 from telegram import Update
@@ -12,7 +12,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu!")
+    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu Renderistä!")
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
@@ -208,15 +208,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Moikka kulta 😊 Mä oon Megan. Mitä kuuluu? Ootko ollut kunnollinen vai pitääkö mun pitää sut kurissa? 😉")
     save_memory(user_id)
 
-async def main():
+def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
-    asyncio.create_task(independent_message_loop(app))
+    # Taustatehtävä Telegramin omaan looppiin
+    app.create_task(independent_message_loop(app))
 
     print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + stabiili Render-versio")
-    await app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
