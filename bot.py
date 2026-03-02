@@ -1,7 +1,7 @@
+import asyncio
 import os
 import random
 import json
-import asyncio
 from datetime import datetime
 from collections import deque
 from telegram import Update
@@ -202,22 +202,25 @@ async def independent_message_loop(app: Application):
                 except:
                     pass
 
+async def post_init(app: Application):
+    asyncio.create_task(independent_message_loop(app))
+    print("✅ Taustatehtävä (itsenäiset viestit) käynnistetty")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     load_memory(user_id)
     await update.message.reply_text("Moikka kulta 😊 Mä oon Megan. Mitä kuuluu? Ootko ollut kunnollinen vai pitääkö mun pitää sut kurissa? 😉")
     save_memory(user_id)
 
-def main():
+async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
-    # Taustatehtävä Telegramin omaan looppiin
-    app.create_task(independent_message_loop(app))
+    app.post_init = post_init   # Tämä on se kriittinen fix
 
     print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + stabiili Render-versio")
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    await app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
