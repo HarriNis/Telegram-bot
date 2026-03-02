@@ -79,6 +79,9 @@ def load_memory(user_id):
         long_term_memory[user_id] = ""
 
 def save_memory(user_id):
+    if len(conversation_history.get(user_id, [])) < 4:
+        return  # ei tallenneta turhaan tyhjiä/minimaalisia keskusteluja
+
     file = os.path.join(MEMORY_DIR, f"{user_id}.json")
 
     data = {
@@ -121,7 +124,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
 
     conversation_history.setdefault(user_id, []).append(
-        {"role":"user","content":text}
+        {"role":"user","content":text, "timestamp": datetime.now()}
     )
 
     try:
@@ -141,7 +144,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await thinking.edit_text(reply)
 
         conversation_history[user_id].append(
-            {"role":"assistant","content":reply}
+            {"role":"assistant","content":reply, "timestamp": datetime.now()}
         )
 
         recent_megan.append(reply)
@@ -155,14 +158,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ITSESTÄÄN VIESTIT ====================
 async def independent_loop(app: Application):
 
-    await asyncio.sleep(20)
+    await asyncio.sleep(random.randint(40, 120))  # ensimmäinen viive pidempi
 
     while True:
-        await asyncio.sleep(random.randint(500, 1500))
+        await asyncio.sleep(random.randint(600, 1800))  # 10–30 min
 
-        for user_id in list(conversation_history.keys()):
-            try:
-                if random.random() < 0.12:
+        active_users = [
+            uid for uid, hist in conversation_history.items()
+            if len(hist) > 4 and (datetime.now() - hist[-1].get("timestamp", datetime.min)).total_seconds() < 3600*3
+        ]
+
+        for user_id in random.sample(active_users, min(2, len(active_users))):  # max 2 kerralla
+            if random.random() < 0.20:
+                try:
                     await app.bot.send_message(
                         chat_id=user_id,
                         text=random.choice([
@@ -171,8 +179,8 @@ async def independent_loop(app: Application):
                             "Ajattelin sua."
                         ])
                     )
-            except:
-                pass
+                except:
+                    pass
 
 # ==================== START ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -186,20 +194,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_memory(user_id)
 
 # ==================== MAIN ====================
-async def main():
-
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT, megan_chat))
-
-    asyncio.create_task(independent_loop(application))
-
-    print("✅ Megan toimii Renderissä")
-
-    await application.run_polling(
-        drop_pending_updates=True
+def main():
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(8)           # ← hyvä arvo Renderissä
+        .get_updates_connect_timeout(10)
+        .get_updates_read_timeout(10)
+        .get_updates_write_timeout(10)
+        .build()
     )
 
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, megan_chat))
+
+    # Tärkeä: post_init saa kutsua async-funktion, joka käynnistää taustatehtäviä
+    application.post_init = post_init
+
+    print("🚀 Megan käynnistyy – Render mode")
+
+    # Tämä hoitaa event loopin itse – älä laita tätä awaitiin äläkä asyncio.run:iin
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        # Nämä auttavat Renderin timeout-ongelmissa
+        timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+
+async def post_init(application: Application) -> None:
+    # Tänne kaikki käynnistyksessä suoritettavat async-tehtävät
+    asyncio.create_task(independent_loop(application))
+    # Tänne voi lisätä myöhemmin esim. periodisen muistin siivouksen tms.
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+```​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​
