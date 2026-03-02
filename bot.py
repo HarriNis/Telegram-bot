@@ -12,11 +12,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu Renderistä!")
+    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu!")
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-print("🚀 Megan käynnistyy – pitkäaikainen muisti + Render-stabiili versio")
+print("🚀 Megan käynnistyy – stabiili Render-versio + pitkäaikainen muisti")
 
 # ==================== MEGANIN TUNNELMAT ====================
 recent_user = deque(maxlen=15)
@@ -215,15 +215,8 @@ async def main():
 
     asyncio.create_task(independent_message_loop(app))
 
-    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + Render-stabiili versio")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti + stabiili Render-versio")
+    await app.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Sammutus manuaalisesti.")
-    except Exception as e:
-        print(f"Odottamaton virhe: {e}")
+    asyncio.run(main())
