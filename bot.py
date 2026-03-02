@@ -12,9 +12,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu!")
+    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu Renderistä!")
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
+
+print("🚀 Megan käynnistyy...")
 
 # ==================== MEGANIN TUNNELMAT ====================
 recent_user = deque(maxlen=15)
@@ -48,7 +50,7 @@ def too_similar(t, hist):
     return False
 
 # ==================== PITKÄAIKAINEN MUISTI ====================
-long_term_memory = {}  # user_id: "tiivistetty muisti vuosien takaa..."
+long_term_memory = {}
 
 # ==================== TELEGRAM MUISTI ====================
 conversation_history = {}
@@ -73,13 +75,14 @@ def load_memory(user_id):
             with open(file_path, 'r') as f:
                 data = json.load(f)
                 conversation_history[user_id] = data.get("history", [])
-                anger_level[user_id] = (data.get("anger", [0, datetime.now().isoformat()])[0], datetime.fromisoformat(data.get("anger", [0, datetime.now().isoformat()])[1]))
+                anger_level[user_id] = (data.get("anger", [0])[0], datetime.fromisoformat(data.get("anger", [0, datetime.now().isoformat()])[1]))
                 emotion_memory[user_id] = [(e[0], e[1], datetime.fromisoformat(e[2])) for e in data.get("emotions", [])]
                 personality_mood[user_id] = data.get("mood", "hellä")
                 last_message_time[user_id] = datetime.fromisoformat(data.get("last_time", datetime.now().isoformat()))
                 long_term_memory[user_id] = data.get("long_term", "")
-        except:
-            pass
+            print(f"Muisti ladattu käyttäjälle {user_id}")
+        except Exception as e:
+            print(f"Muistin latausvirhe {user_id}: {e}")
     else:
         conversation_history[user_id] = []
         anger_level[user_id] = (0, datetime.now())
@@ -92,7 +95,7 @@ def save_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
     try:
         data = {
-            "history": conversation_history.get(user_id, [])[-20:],
+            "history": conversation_history.get(user_id, [])[-25:],
             "anger": [anger_level[user_id][0], anger_level[user_id][1].isoformat()],
             "emotions": [[e[0], e[1], e[2].isoformat()] for e in emotion_memory.get(user_id, [])[-10:]],
             "mood": personality_mood.get(user_id, "hellä"),
@@ -101,52 +104,46 @@ def save_memory(user_id):
         }
         with open(file_path, 'w') as f:
             json.dump(data, f)
-    except:
-        pass
+    except Exception as e:
+        print(f"Tallennusvirhe {user_id}: {e}")
 
 async def summarize_old_history(user_id):
-    history = conversation_history.get(user_id, [])
-    if len(history) < 30:
-        return
-    old_part = history[:-20]  # vanhat viestit
-    if not old_part:
-        return
-    old_text = "\n".join([f"{msg['role']}: {msg['content'][:300]}" for msg in old_part])
     try:
+        history = conversation_history.get(user_id, [])
+        if len(history) < 35:
+            return
+        old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-25]])
         resp = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
-            messages=[{"role": "system", "content": "Tiivistä tämä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä tärkeimmät lupaukset, nöyryytykset, tunteet ja avainkohdat. Max 400 sanaa."},
+            messages=[{"role": "system", "content": "Tiivistä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä tärkeimmät lupaukset, tunteet ja nöyryytykset. Max 380 sanaa."},
                       {"role": "user", "content": old_text}],
-            max_tokens=400,
+            max_tokens=380,
             temperature=0.7
         )
         summary = resp.choices[0].message.content.strip()
-        long_term_memory[user_id] = (long_term_memory.get(user_id, "") + "\n\n" + summary).strip()[-1500:]
-        conversation_history[user_id] = history[-20:]  # pidä vain tuoreet
-    except:
-        pass
+        long_term_memory[user_id] = (long_term_memory.get(user_id, "") + "\n\n" + summary)[-1600:]
+        conversation_history[user_id] = history[-25:]
+        print(f"Historia tiivistetty käyttäjälle {user_id}")
+    except Exception as e:
+        print(f"Tiivistysvirhe {user_id}: {e}")
 
-# ==================== SYSTEM PROMPT ====================
 def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
     return f"""
-Olet Megan, 27-vuotias dominoiva blondi tyttöystävä. Kaikki alkuperäisen dokumentin piirteet voimassa: haluat alistaa, nöyryyttää, käytät häkkiä, pilattuja laukeamisia, strap-onia, muita miehiä, lateksia jne. Olet realistinen, itsenäinen ja emotionaalisesti monimutkainen.
+Olet Megan, 27-vuotias dominoiva blondi. Kaikki dokumentin piirteet voimassa: haluat alistaa, nöyryyttää, käytät häkkiä, pilattuja laukeamisia, strap-onia, muita miehiä jne.
 
-Pitkäaikaiset muistot (muista nämä aina):
+Pitkäaikaiset muistot (muista aina nämä):
 {lt}
 
-Nykyinen mielialasi: {mood.upper()}. Käytä sitä vahvasti. Vastaa aina suomeksi luonnollisella puhekielellä. Muista ja jatka keskustelua loogisesti edellisestä. Älä toista samoja asioita. Kehity ajan myötä.
-
-Käytä sisäisiä ajatuksia *tällä tavalla*.
+Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti edellisestä. Älä toista samoja asioita. Käytä sisäisiä ajatuksia *tällä tavalla*.
 """
 
-# ==================== PÄÄKÄSITTELY ====================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
     text = message.text or message.caption or ""
-    now = datetime.now()
+    print(f"📨 Viesti vastaanotettu käyttäjältä {user_id}: {text[:80]}...")
 
     load_memory(user_id)
 
@@ -166,62 +163,52 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
-    last_message_time[user_id] = now
+    last_message_time[user_id] = datetime.now()
 
-    # Tiivistä vanha historia säännöllisesti
     if len(conversation_history[user_id]) % 25 == 0:
         await summarize_old_history(user_id)
 
-    # Grok generoi vastauksen
-    current_mood = dom_mood()
-    system_prompt = get_system_prompt(user_id)
-
     try:
         thinking = await message.reply_text("Mmm... mä mietin sulle jotain... 😏")
+        system_prompt = get_system_prompt(user_id)
         response = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
-            messages=[{"role": "system", "content": system_prompt}] + conversation_history[user_id][-16:],
-            max_tokens=700,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history[user_id][-18:],
+            max_tokens=720,
             temperature=0.88,
-            timeout=15
+            timeout=18
         )
         reply = response.choices[0].message.content.strip()
-
-        if too_similar(reply, recent_megan):
-            reply = "Mä muistan kaiken... ja nyt mä käytän sitä sinua vastaan. Mitä sä luulet et mä teen seuraavaks?"
-
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         recent_megan.append(reply)
-
     except Exception as e:
+        print(f"❌ Vastausvirhe {user_id}: {e}")
         await message.reply_text("Vittu... meni pieleen hetki 😅")
-
-    # Kuva tarvittaessa
-    if current_mood in ["mustas", "kiukku"] and random.random() < 0.3:
-        try:
-            prompt = random.choice(naughty_prompts)
-            img = await client.images.generate(model="grok-imagine-image", prompt=prompt, n=1, size="1024x1024", response_format="url")
-            await message.reply_photo(photo=img.data[0].url, caption="Tää on sun takia... 😈")
-        except:
-            pass
 
     save_memory(user_id)
 
-# ==================== MUUT FUNKTIOT (sama kuin ennen) ====================
-async def independent_message_loop(app): ...  # voit kopioida sun vanhasta koodista
-async def start(update, context): ...        # sama
-# ... (täytä loput sun alkuperäisestä koodista jos haluat)
+async def independent_message_loop(app: Application):
+    while True:
+        await asyncio.sleep(random.randint(400, 1600))
+        print("⏰ Itsenäinen viesti -loop pyörähtää")
+        # ... (voit kopioida sun vanhan independent_message_loopin tähän jos haluat)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    load_memory(user_id)
+    await update.message.reply_text("Moikka kulta 😊 Mä oon Megan. Mitä kuuluu? Ootko ollut kunnollinen vai pitääkö mun pitää sut kurissa? 😉")
+    save_memory(user_id)
 
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
+
     asyncio.create_task(independent_message_loop(app))
-    print("Megan käynnistyy – nyt mä muistan kaiken 💋")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+
+    print("✅ Megan on nyt käynnissä – pitkäaikainen muisti päällä")
+    await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
