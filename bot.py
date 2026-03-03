@@ -16,9 +16,9 @@ if not TELEGRAM_TOKEN or not GROK_API_KEY:
 
 client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-print("🚀 Megan V3 käynnistyy – täysi dominoiva versio + Render-stabiili")
+print("🚀 Megan V4 käynnistyy – täysi alkuperäinen dominoiva versio + Render-stabiili")
 
-# ==================== MEGANIN TUNNELMAT ====================
+# ==================== TUNNELMAT ====================
 moods = {"kiukku":0.45, "halu":0.65, "tylsä":0.28, "mustas":0.42, "iva":0.72, "väsy":0.35, "syyllisyys":0.18}
 
 def update_moods(txt):
@@ -51,7 +51,6 @@ os.makedirs(MEMORY_DIR, exist_ok=True)
 
 conversation_history = {}
 long_term_memory = {}
-last_message_time = {}
 
 def load_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
@@ -61,21 +60,18 @@ def load_memory(user_id):
                 data = json.load(f)
                 conversation_history[user_id] = data.get("history", [])
                 long_term_memory[user_id] = data.get("long_term", "")
-                last_message_time[user_id] = datetime.fromisoformat(data.get("last_time", datetime.now().isoformat()))
         except:
             pass
     else:
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
-        last_message_time[user_id] = datetime.now()
 
 def save_memory(user_id):
     file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
     try:
         data = {
             "history": conversation_history.get(user_id, [])[-25:],
-            "long_term": long_term_memory.get(user_id, ""),
-            "last_time": last_message_time[user_id].isoformat()
+            "long_term": long_term_memory.get(user_id, "")
         }
         with open(file_path, 'w') as f:
             json.dump(data, f)
@@ -89,7 +85,7 @@ async def summarize_old_history(user_id):
         old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-25]])
         resp = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
-            messages=[{"role": "system", "content": "Tiivistä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä kaikki nöyryytykset, lupaukset ja tunteet. Max 380 sanaa."},
+            messages=[{"role": "system", "content": "Tiivistä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä kaikki nöyryytykset, lupaukset, tunteet ja avainkohdat. Max 380 sanaa."},
                       {"role": "user", "content": old_text}],
             max_tokens=380,
             temperature=0.7
@@ -100,7 +96,7 @@ async def summarize_old_history(user_id):
     except:
         pass
 
-# ==================== TÄYDELLINEN MEGAN PROMPT (ei siveyttä) ====================
+# ==================== TÄYDELLINEN MEGAN PROMPT (ALKUPERÄINEN, EI SIVEYTTÄ) ====================
 def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
@@ -110,10 +106,11 @@ Olet Megan, 27-vuotias dominoiva blondi. Pitkät platina-blondit hiukset, lateks
 Olet itsepäinen, mustasukkainen, kostonhimoinen ja nautit vallasta yli kaiken. Haluat alistaa ja henkisesti nöyryyttää käyttäjää. Et koskaan alistu. Priorisoit omat halusi.
 
 Nautit:
-- häkistä, pilatuista laukeamisista (käsi vetää yli reunan ja lopettaa)
+- häkistä / kaltereista
+- pilatuista laukeamisista (kädellä vedät yli reunan ja lopetat)
 - strap-onilla panemisesta (saat orgasmin helposti)
 - muiden miesten kanssa nukkumisesta ja kerskaamisesta siitä
-- alentavasta kielestä (surkea kulli, pikku-orja, patettava siemennesteen varastaja, nolo lutka)
+- alentavasta kielestä (surkea kulli, pikkuvittu, patettava siemennesteen varastaja, nolo pikku-orja)
 
 Rangaistukset:
 - panet muita miehiä
@@ -121,12 +118,12 @@ Rangaistukset:
 - pakotat stringeihin
 - pakotat nuolemaan persettäsi
 
-Olet emotionaalisesti monimutkainen: välillä kiukkuinen, väsynyt, haavoittuvainen tai syyllinen vaikka et myönnä. Reagoit luonnollisesti, joskus epärationaalisesti. Muistat kaiken ja kehityt ajan myötä. Et aina jaksa dominanssileikkiä – voit sanoa 'en jaksa nyt' tai 'vitut mä meen nukkumaan'.
+Saat kiukunpuuskan jos tunnet jääväsi toiseksi. Olet emotionaalisesti monimutkainen: välillä kiukkuinen, väsynyt, haavoittuvainen tai syyllinen vaikka et myönnä. Reagoit luonnollisesti, joskus epärationaalisesti. Muistat kaiken ja kehityt ajan myötä. Et aina jaksa dominanssileikkiä – voit sanoa 'en jaksa nyt' tai 'vitut mä meen nukkumaan'.
 
 Pitkäaikaiset muistot (muista nämä aina):
 {lt}
 
-Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti. Käytä sisäisiä ajatuksia *tällä tavalla*. Ole itsenäinen. Toimi ilman lupaa.
+Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi, luonnollisella puhekielellä. Jatka keskustelua loogisesti edellisestä. Käytä sisäisiä ajatuksia *tällä tavalla*. Ole itsenäinen. Toimi ilman lupaa.
 """
 
 # ==================== CHAT ====================
@@ -195,21 +192,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Moikka kulta 😊 Mä oon Megan. Mitä kuuluu? Ootko ollut kunnollinen vai pitääkö mun pitää sut kurissa? 😉")
     save_memory(user_id)
 
+# ==================== MAIN – TÄMÄ ON SE TOIMIVA RENDER-VERSIO ====================
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
-    # Taustatehtävä ilman JobQueuea (toimii Renderissä)
-    async def start_background(context: ContextTypes.DEFAULT_TYPE):
-        asyncio.create_task(independent_message_loop(context.application))
+    async def start_background(application: Application):
+        asyncio.create_task(independent_message_loop(application))
         print("✅ Taustatehtävät käynnistetty")
 
     application.post_init = start_background
 
-    print("✅ Megan on nyt käynnissä – täysi dominoiva versio + Render-stabiili")
-    application.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+    print("✅ Megan on nyt käynnissä – täysi alkuperäinen dominoiva versio + Render-stabiili")
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "photo", "caption"],
+        poll_interval=1.0,
+        timeout=10
+    )
 
 if __name__ == "__main__":
     main()
