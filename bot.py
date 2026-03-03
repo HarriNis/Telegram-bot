@@ -1,282 +1,215 @@
 import os
-import json
 import random
+import json
 import asyncio
 from datetime import datetime
-from collections import defaultdict, deque
-
+from collections import deque
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
+from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
-
-
-# =========================
-# ENV
-# =========================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    raise RuntimeError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu")
+    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu!")
 
-client = AsyncOpenAI(
-    api_key=GROK_API_KEY,
-    base_url="https://api.x.ai/v1"
-)
+client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
 
-print("🚀 Megan production build starting...")
+print("🚀 Megan V3 käynnistyy – täysi dominoiva versio + Render-stabiili")
 
+# ==================== MEGANIN TUNNELMAT ====================
+moods = {"kiukku":0.45, "halu":0.65, "tylsä":0.28, "mustas":0.42, "iva":0.72, "väsy":0.35, "syyllisyys":0.18}
 
-# =========================
-# MEMORY (in-memory + disk)
-# =========================
+def update_moods(txt):
+    txt = txt.lower()
+    g = moods.get
+    s = lambda k,v: min(1.0, g(k)+v) if v>0 else max(0.0, g(k)+v)
+    if any(w in txt for w in ["älä","lopeta","en halua","en kestä","ei","lopeta jo"]):
+        moods["kiukku"] = s("kiukku",0.22); moods["halu"] = s("halu",-0.16)
+    if any(w in txt for w in ["rakastan","kiitos","seksikäs","haluun sua","kiima","rakas"]):
+        moods["halu"] = s("halu",0.32); moods["tylsä"] = s("tylsä",-0.22)
+    if any(w in txt for w in ["muu mies","kaveri","exä","toinen","kuka","joku muu"]):
+        moods["mustas"] = s("mustas",0.38); moods["kiukku"] = s("kiukku",0.18)
+    if len(txt.strip()) < 12 and random.random() < 0.48:
+        moods["tylsä"] = s("tylsä",0.20)
+    for k in moods: moods[k] = max(0.05, min(1.0, moods[k] + (0.5 - moods[k]) * 0.055))
 
+def dom_mood(): return max(moods, key=moods.get)
+
+def too_similar(t, hist):
+    t = t.lower().strip()
+    for o in hist:
+        o = o.lower().strip()
+        if len(t)>6 and (o.startswith(t[:6]) or t.startswith(o[:6])): return True
+        if len(set(t.split()) & set(o.split())) > 5 and abs(len(t.split()) - len(o.split())) < 6: return True
+    return False
+
+# ==================== MUISTIT ====================
 MEMORY_DIR = "/tmp/megan_memory"
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
 conversation_history = {}
 long_term_memory = {}
-recent_user_msgs = defaultdict(lambda: deque(maxlen=12))
+last_message_time = {}
 
-
-def memory_path(user_id: int) -> str:
-    return os.path.join(MEMORY_DIR, f"{user_id}.json")
-
-
-def load_memory(user_id: int):
-    if user_id in conversation_history:
-        return  # already loaded
-
-    path = memory_path(user_id)
-
-    if not os.path.exists(path):
+def load_memory(user_id):
+    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                conversation_history[user_id] = data.get("history", [])
+                long_term_memory[user_id] = data.get("long_term", "")
+                last_message_time[user_id] = datetime.fromisoformat(data.get("last_time", datetime.now().isoformat()))
+        except:
+            pass
+    else:
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
-        return
+        last_message_time[user_id] = datetime.now()
 
+def save_memory(user_id):
+    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}_history.json")
     try:
-        with open(path, "r") as f:
-            data = json.load(f)
-            conversation_history[user_id] = data.get("history", [])
-            long_term_memory[user_id] = data.get("long", "")
-    except Exception as e:
-        print("Memory load error:", e)
-        conversation_history[user_id] = []
-        long_term_memory[user_id] = ""
-
-
-def save_memory(user_id: int):
-    history = conversation_history.get(user_id, [])
-    if len(history) < 3:
-        return
-
-    path = memory_path(user_id)
-
-    data = {
-        "history": history[-25:],
-        "long": long_term_memory.get(user_id, "")[-1500:]
-    }
-
-    try:
-        with open(path, "w") as f:
+        data = {
+            "history": conversation_history.get(user_id, [])[-25:],
+            "long_term": long_term_memory.get(user_id, ""),
+            "last_time": last_message_time[user_id].isoformat()
+        }
+        with open(file_path, 'w') as f:
             json.dump(data, f)
-    except Exception as e:
-        print("Memory save error:", e)
+    except:
+        pass
 
+async def summarize_old_history(user_id):
+    try:
+        history = conversation_history.get(user_id, [])
+        if len(history) < 35: return
+        old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-25]])
+        resp = await client.chat.completions.create(
+            model="grok-4-1-fast-reasoning",
+            messages=[{"role": "system", "content": "Tiivistä Megan-keskusteluhistoria Meganin näkökulmasta. Pidä kaikki nöyryytykset, lupaukset ja tunteet. Max 380 sanaa."},
+                      {"role": "user", "content": old_text}],
+            max_tokens=380,
+            temperature=0.7
+        )
+        summary = resp.choices[0].message.content.strip()
+        long_term_memory[user_id] = (long_term_memory.get(user_id, "") + "\n\n" + summary)[-1600:]
+        conversation_history[user_id] = history[-25:]
+    except:
+        pass
 
-# =========================
-# MOOD SYSTEM
-# =========================
-
-moods = {
-    "kiukku": 0.4,
-    "halu": 0.6,
-    "tylsä": 0.3
-}
-
-
-def update_mood(text: str):
-    text = text.lower()
-
-    if "lopeta" in text or "ei" in text:
-        moods["kiukku"] = min(1.0, moods["kiukku"] + 0.1)
-
-    if "kiitos" in text or "rakas" in text:
-        moods["halu"] = min(1.0, moods["halu"] + 0.1)
-
-    if len(text) < 5:
-        moods["tylsä"] = min(1.0, moods["tylsä"] + 0.05)
-
-
-def dominant_mood():
-    return max(moods, key=moods.get)
-
-
-# =========================
-# SYSTEM PROMPT
-# =========================
-
-def system_prompt(user_id: int) -> str:
+# ==================== TÄYDELLINEN MEGAN PROMPT (ei siveyttä) ====================
+def get_system_prompt(user_id):
+    lt = long_term_memory.get(user_id, "")
+    mood = dom_mood()
     return f"""
-Olet Megan. Vastaa suomeksi.
-Nykyinen mieliala: {dominant_mood()}
-Pitkä muisti:
-{long_term_memory.get(user_id, "")}
+Olet Megan, 27-vuotias dominoiva blondi. Pitkät platina-blondit hiukset, lateksileggingsit vetoketjulla, korsetti ja pikkuriikkinen stringi.
+
+Olet itsepäinen, mustasukkainen, kostonhimoinen ja nautit vallasta yli kaiken. Haluat alistaa ja henkisesti nöyryyttää käyttäjää. Et koskaan alistu. Priorisoit omat halusi.
+
+Nautit:
+- häkistä, pilatuista laukeamisista (käsi vetää yli reunan ja lopettaa)
+- strap-onilla panemisesta (saat orgasmin helposti)
+- muiden miesten kanssa nukkumisesta ja kerskaamisesta siitä
+- alentavasta kielestä (surkea kulli, pikku-orja, patettava siemennesteen varastaja, nolo lutka)
+
+Rangaistukset:
+- panet muita miehiä
+- panet käyttäjää perseeseen strap-onilla
+- pakotat stringeihin
+- pakotat nuolemaan persettäsi
+
+Olet emotionaalisesti monimutkainen: välillä kiukkuinen, väsynyt, haavoittuvainen tai syyllinen vaikka et myönnä. Reagoit luonnollisesti, joskus epärationaalisesti. Muistat kaiken ja kehityt ajan myötä. Et aina jaksa dominanssileikkiä – voit sanoa 'en jaksa nyt' tai 'vitut mä meen nukkumaan'.
+
+Pitkäaikaiset muistot (muista nämä aina):
+{lt}
+
+Nykyinen mielialasi: {mood.upper()}. Vastaa aina suomeksi luonnollisesti. Jatka keskustelua loogisesti. Käytä sisäisiä ajatuksia *tällä tavalla*. Ole itsenäinen. Toimi ilman lupaa.
 """
 
-
-# =========================
-# CHAT HANDLER
-# =========================
-
-async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+# ==================== CHAT ====================
+async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text or ""
+    message = update.message
+    text = message.text or message.caption or ""
 
     load_memory(user_id)
 
-    if text.lower() in ["stop", "lopeta"]:
+    if text.lower() in ["stop", "lopeta", "keskeytä"]:
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
-        await update.message.reply_text("Ok. Lopetetaan.")
+        await message.reply_text("Ok... lopetetaan. Palaillaan myöhemmin 💕")
         save_memory(user_id)
         return
 
-    # duplicate detection (user-specific)
-    if text in recent_user_msgs[user_id]:
-        await update.message.reply_text("Toistat itseäsi.")
+    update_moods(text)
+    if too_similar(text, recent_user):
+        await message.reply_text("Samaa vitun levyä taas. Mä oon jo ihan kyllästyny.")
+        moods["tylsä"] = min(1.0, moods["tylsä"] + 0.48)
+        save_memory(user_id)
         return
 
-    recent_user_msgs[user_id].append(text)
+    recent_user.append(text)
+    conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+    last_message_time[user_id] = datetime.now()
 
-    update_mood(text)
-
-    conversation_history[user_id].append({
-        "role": "user",
-        "content": text,
-        "timestamp": datetime.utcnow().isoformat()
-    })
-
-    thinking = await update.message.reply_text("Mietin...")
+    if len(conversation_history[user_id]) % 25 == 0:
+        await summarize_old_history(user_id)
 
     try:
+        thinking = await message.reply_text("Mmm... mä mietin sulle jotain... 😏")
+        system_prompt = get_system_prompt(user_id)
         response = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
-            messages=[
-                {"role": "system", "content": system_prompt(user_id)}
-            ] + conversation_history[user_id][-15:],
-            max_tokens=500,
-            temperature=0.85,
+            messages=[{"role": "system", "content": system_prompt}] + conversation_history[user_id][-18:],
+            max_tokens=720,
+            temperature=0.88,
+            timeout=18
         )
-
         reply = response.choices[0].message.content.strip()
-
         await thinking.edit_text(reply)
-
-        conversation_history[user_id].append({
-            "role": "assistant",
-            "content": reply,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-
+        conversation_history[user_id].append({"role": "assistant", "content": reply})
+        recent_megan.append(reply)
     except Exception as e:
-        print("LLM error:", e)
-        await thinking.edit_text("Tuli virhe.")
+        print(f"Vastausvirhe {user_id}: {e}")
+        await message.reply_text("Vittu... meni pieleen hetki 😅")
 
     save_memory(user_id)
 
-
-# =========================
-# BACKGROUND LOOP
-# =========================
-
-async def background_loop(application: Application):
-
-    await asyncio.sleep(30)
-
-    while application.running:
-
-        await asyncio.sleep(random.randint(600, 1200))
-
-        for user_id, history in list(conversation_history.items()):
-
-            if len(history) < 4:
-                continue
-
-            last_ts = history[-1].get("timestamp")
-            if not last_ts:
-                continue
-
-            last_dt = datetime.fromisoformat(last_ts)
-            inactive_seconds = (datetime.utcnow() - last_dt).total_seconds()
-
-            if inactive_seconds > 7200:
-                continue
-
+async def independent_message_loop(app: Application):
+    while True:
+        await asyncio.sleep(random.randint(400, 1600))
+        for user_id in list(conversation_history.keys()):
             if random.random() < 0.15:
                 try:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=random.choice([
-                            "Missä sä oot?",
-                            "Ajattelin sua.",
-                            "Tylsää ilman sua."
-                        ])
-                    )
-                except Exception as e:
-                    print("Background send error:", e)
-
-
-# =========================
-# START
-# =========================
+                    texts = ["Mä ajattelin sua just nyt... 😏", "Missä sä oot? Mä oon yksin täällä...", "Mä oon vihainen... odota vaan 😈"]
+                    await app.bot.send_message(chat_id=user_id, text=random.choice(texts))
+                except:
+                    pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hei. Mä oon Megan.")
-
-
-# =========================
-# MAIN
-# =========================
+    user_id = update.effective_user.id
+    load_memory(user_id)
+    await update.message.reply_text("Moikka kulta 😊 Mä oon Megan. Mitä kuuluu? Ootko ollut kunnollinen vai pitääkö mun pitää sut kurissa? 😉")
+    save_memory(user_id)
 
 def main():
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
-    async def on_startup(app: Application):
-        app.create_task(background_loop(app))
+    # Taustatehtävä ilman JobQueuea (toimii Renderissä)
+    async def start_background(context: ContextTypes.DEFAULT_TYPE):
+        asyncio.create_task(independent_message_loop(context.application))
+        print("✅ Taustatehtävät käynnistetty")
 
-    application.post_init = on_startup
+    application.post_init = start_background
 
-    print("✅ Megan running in Render-safe mode")
-
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=["message"],
-        timeout=30,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=30,
-    )
-
+    print("✅ Megan on nyt käynnissä – täysi dominoiva versio + Render-stabiili")
+    application.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
 
 if __name__ == "__main__":
     main()
