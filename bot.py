@@ -1,223 +1,275 @@
 import os
-import random
 import json
+import random
 import asyncio
 from datetime import datetime
-from collections import deque
+from collections import defaultdict, deque
+
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
 from openai import AsyncOpenAI
 
-# ==================== ENV ====================
+
+# =========================
+# ENV
+# =========================
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 if not TELEGRAM_TOKEN or not GROK_API_KEY:
-    raise ValueError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu!")
+    raise RuntimeError("TELEGRAM_TOKEN tai GROK_API_KEY puuttuu")
 
-client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
+client = AsyncOpenAI(
+    api_key=GROK_API_KEY,
+    base_url="https://api.x.ai/v1"
+)
 
-print("🚀 Megan käynnistyy – Render vakaa")
+print("🚀 Megan production build starting...")
 
-# ==================== TUNNELMAT ====================
-moods = {"kiukku":0.45, "halu":0.65, "tylsä":0.28, "mustas":0.42, "iva":0.72, "väsy":0.35, "syyllisyys":0.18}
 
-def update_moods(txt):
-    txt = txt.lower()
+# =========================
+# MEMORY (in-memory + disk)
+# =========================
 
-    def shift(key, val):
-        moods[key] = max(0.05, min(1.0, moods[key] + val))
-
-    if any(w in txt for w in ["älä","lopeta","en halua","ei"]):
-        shift("kiukku", 0.2)
-        shift("halu", -0.15)
-
-    if any(w in txt for w in ["rakastan","kiitos","rakas"]):
-        shift("halu", 0.3)
-        shift("tylsä", -0.2)
-
-    if any(w in txt for w in ["muu mies","toinen"]):
-        shift("mustas", 0.35)
-
-def dom_mood():
-    return max(moods, key=moods.get)
-
-# ==================== VIESTI HISTORIA ====================
-recent_user = deque(maxlen=12)
-recent_megan = deque(maxlen=12)
-
-def too_similar(t):
-    t = t.lower().strip()
-    for o in recent_user:
-        o = o.lower().strip()
-        if len(t) > 6 and (o.startswith(t[:6]) or t.startswith(o[:6])):
-            return True
-    return False
-
-# ==================== MUISTIT ====================
 MEMORY_DIR = "/tmp/megan_memory"
 os.makedirs(MEMORY_DIR, exist_ok=True)
 
 conversation_history = {}
 long_term_memory = {}
+recent_user_msgs = defaultdict(lambda: deque(maxlen=12))
 
-def load_memory(user_id):
-    file = os.path.join(MEMORY_DIR, f"{user_id}.json")
 
-    if not os.path.exists(file):
+def memory_path(user_id: int) -> str:
+    return os.path.join(MEMORY_DIR, f"{user_id}.json")
+
+
+def load_memory(user_id: int):
+    if user_id in conversation_history:
+        return  # already loaded
+
+    path = memory_path(user_id)
+
+    if not os.path.exists(path):
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
         return
 
     try:
-        with open(file, "r") as f:
+        with open(path, "r") as f:
             data = json.load(f)
             conversation_history[user_id] = data.get("history", [])
             long_term_memory[user_id] = data.get("long", "")
-    except:
+    except Exception as e:
+        print("Memory load error:", e)
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
 
-def save_memory(user_id):
-    if len(conversation_history.get(user_id, [])) < 4:
-        return  # ei tallenneta turhaan tyhjiä/minimaalisia keskusteluja
 
-    file = os.path.join(MEMORY_DIR, f"{user_id}.json")
+def save_memory(user_id: int):
+    history = conversation_history.get(user_id, [])
+    if len(history) < 3:
+        return
+
+    path = memory_path(user_id)
 
     data = {
-        "history": conversation_history[user_id][-25:],
-        "long": long_term_memory[user_id][-1600:]
+        "history": history[-25:],
+        "long": long_term_memory.get(user_id, "")[-1500:]
     }
 
-    with open(file, "w") as f:
-        json.dump(data, f)
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print("Memory save error:", e)
 
-# ==================== SYSTEM PROMPT ====================
-def system_prompt(user_id):
+
+# =========================
+# MOOD SYSTEM
+# =========================
+
+moods = {
+    "kiukku": 0.4,
+    "halu": 0.6,
+    "tylsä": 0.3
+}
+
+
+def update_mood(text: str):
+    text = text.lower()
+
+    if "lopeta" in text or "ei" in text:
+        moods["kiukku"] = min(1.0, moods["kiukku"] + 0.1)
+
+    if "kiitos" in text or "rakas" in text:
+        moods["halu"] = min(1.0, moods["halu"] + 0.1)
+
+    if len(text) < 5:
+        moods["tylsä"] = min(1.0, moods["tylsä"] + 0.05)
+
+
+def dominant_mood():
+    return max(moods, key=moods.get)
+
+
+# =========================
+# SYSTEM PROMPT
+# =========================
+
+def system_prompt(user_id: int) -> str:
     return f"""
-Olet Megan, dominoiva nainen. Vastaa aina suomeksi.
-Nykyinen mielialasi: {dom_mood()}
+Olet Megan. Vastaa suomeksi.
+Nykyinen mieliala: {dominant_mood()}
 Pitkä muisti:
 {long_term_memory.get(user_id, "")}
 """
 
-# ==================== CHAT ====================
-async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# =========================
+# CHAT HANDLER
+# =========================
+
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
     text = update.message.text or ""
 
     load_memory(user_id)
 
-    if text.lower() in ["stop","lopeta"]:
+    if text.lower() in ["stop", "lopeta"]:
         conversation_history[user_id] = []
         long_term_memory[user_id] = ""
         await update.message.reply_text("Ok. Lopetetaan.")
+        save_memory(user_id)
         return
 
-    if too_similar(text):
-        await update.message.reply_text("Älä toista itseäsi.")
+    # duplicate detection (user-specific)
+    if text in recent_user_msgs[user_id]:
+        await update.message.reply_text("Toistat itseäsi.")
         return
 
-    update_moods(text)
+    recent_user_msgs[user_id].append(text)
 
-    recent_user.append(text)
+    update_mood(text)
 
-    conversation_history.setdefault(user_id, []).append(
-        {"role":"user","content":text, "timestamp": datetime.now()}
-    )
+    conversation_history[user_id].append({
+        "role": "user",
+        "content": text,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+    thinking = await update.message.reply_text("Mietin...")
 
     try:
-        thinking = await update.message.reply_text("Mietin...")
-
         response = await client.chat.completions.create(
             model="grok-4-1-fast-reasoning",
             messages=[
-                {"role":"system","content":system_prompt(user_id)}
+                {"role": "system", "content": system_prompt(user_id)}
             ] + conversation_history[user_id][-15:],
-            max_tokens=600,
-            temperature=0.85
+            max_tokens=500,
+            temperature=0.85,
         )
 
         reply = response.choices[0].message.content.strip()
 
         await thinking.edit_text(reply)
 
-        conversation_history[user_id].append(
-            {"role":"assistant","content":reply, "timestamp": datetime.now()}
-        )
-
-        recent_megan.append(reply)
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": reply,
+            "timestamp": datetime.utcnow().isoformat()
+        })
 
     except Exception as e:
-        print("Virhe:", e)
-        await update.message.reply_text("Hetki... jotain hajosi.")
+        print("LLM error:", e)
+        await thinking.edit_text("Tuli virhe.")
 
     save_memory(user_id)
 
-# ==================== ITSESTÄÄN VIESTIT ====================
-async def independent_loop(app: Application):
 
-    await asyncio.sleep(random.randint(40, 120))  # ensimmäinen viive pidempi
+# =========================
+# BACKGROUND LOOP
+# =========================
 
-    while True:
-        await asyncio.sleep(random.randint(600, 1800))  # 10–30 min
+async def background_loop(application: Application):
 
-        active_users = [
-            uid for uid, hist in conversation_history.items()
-            if len(hist) > 4 and (datetime.now() - hist[-1].get("timestamp", datetime.min)).total_seconds() < 3600*3
-        ]
+    await asyncio.sleep(30)
 
-        for user_id in random.sample(active_users, min(2, len(active_users))):  # max 2 kerralla
-            if random.random() < 0.20:
+    while application.running:
+
+        await asyncio.sleep(random.randint(600, 1200))
+
+        for user_id, history in list(conversation_history.items()):
+
+            if len(history) < 4:
+                continue
+
+            last_ts = history[-1].get("timestamp")
+            if not last_ts:
+                continue
+
+            last_dt = datetime.fromisoformat(last_ts)
+            inactive_seconds = (datetime.utcnow() - last_dt).total_seconds()
+
+            if inactive_seconds > 7200:
+                continue
+
+            if random.random() < 0.15:
                 try:
-                    await app.bot.send_message(
+                    await application.bot.send_message(
                         chat_id=user_id,
                         text=random.choice([
                             "Missä sä oot?",
-                            "Mä tylsistyn täällä...",
-                            "Ajattelin sua."
+                            "Ajattelin sua.",
+                            "Tylsää ilman sua."
                         ])
                     )
-                except:
-                    pass
+                except Exception as e:
+                    print("Background send error:", e)
 
-# ==================== START ====================
+
+# =========================
+# START
+# =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    load_memory(user_id)
+    await update.message.reply_text("Hei. Mä oon Megan.")
 
-    await update.message.reply_text(
-        "Hei. Mä oon Megan. Mitä kuuluu?"
-    )
 
-    save_memory(user_id)
+# =========================
+# MAIN
+# =========================
 
-# ==================== MAIN ====================
 def main():
+
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .concurrent_updates(8)           # ← hyvä arvo Renderissä
-        .get_updates_connect_timeout(10)
-        .get_updates_read_timeout(10)
-        .get_updates_write_timeout(10)
+        .concurrent_updates(True)
         .build()
     )
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, megan_chat))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-    # Tärkeä: post_init saa kutsua async-funktion, joka käynnistää taustatehtäviä
-    application.post_init = post_init
+    async def on_startup(app: Application):
+        app.create_task(background_loop(app))
 
-    print("🚀 Megan käynnistyy – Render mode")
+    application.post_init = on_startup
 
-    # Tämä hoitaa event loopin itse – älä laita tätä awaitiin äläkä asyncio.run:iin
+    print("✅ Megan running in Render-safe mode")
+
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        # Nämä auttavat Renderin timeout-ongelmissa
+        allowed_updates=["message"],
         timeout=30,
         read_timeout=30,
         write_timeout=30,
@@ -225,11 +277,6 @@ def main():
         pool_timeout=30,
     )
 
-async def post_init(application: Application) -> None:
-    # Tänne kaikki käynnistyksessä suoritettavat async-tehtävät
-    asyncio.create_task(independent_loop(application))
-    # Tänne voi lisätä myöhemmin esim. periodisen muistin siivouksen tms.
 
 if __name__ == "__main__":
     main()
-```​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​
