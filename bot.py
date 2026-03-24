@@ -36,11 +36,10 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.1 – production memory version (täysi alkuperäinen prompt)")
+print("🚀 Megan 2.2 – production memory + vahva anti-loop + parempi kuvatunnistus")
 
 # ====================== DATABASE ======================
-# Renderissä pysyvä muisti: lisää Disk mount /var/data
-DB_PATH = "/var/data/megan_memory.db"   # uusi, pysyy ikuisesti
+DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -64,10 +63,7 @@ conn.commit()
 
 # ====================== EMBEDDINGS ======================
 async def get_embedding(text):
-    resp = await client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    )
+    resp = await client.embeddings.create(model="text-embedding-3-small", input=text)
     return np.array(resp.data[0].embedding, dtype=np.float32)
 
 def cosine_similarity(a, b):
@@ -76,7 +72,7 @@ def cosine_similarity(a, b):
 # ====================== MEMORY STORE ======================
 async def store_memory(user_id, text):
     try:
-        if len(text) < 25:          # suodatus: ei turhaa roskaa
+        if len(text) < 25:
             return
         emb = await get_embedding(text)
         cursor.execute(
@@ -99,7 +95,7 @@ async def retrieve_memories(user_id, query, limit=5):
         for content, emb_blob in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             score = cosine_similarity(q_emb, emb)
-            if score > 0.78:        # relevanssikynnys
+            if score > 0.78:
                 scored.append((score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
         return [c for _, c in scored[:limit]]
@@ -127,12 +123,7 @@ async def extract_and_store(user_id, text):
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {"role": "system", "content":
-                 "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. "
-                 "Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
-                {"role": "user", "content": text}
-            ],
+            messages=[{"role": "system", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}],
             max_tokens=200,
             temperature=0.3
         )
@@ -145,7 +136,7 @@ async def extract_and_store(user_id, text):
                     for item in parsed[k]:
                         if item not in profile[k]:
                             profile[k].append(item)
-                    profile[k] = profile[k][-20:]   # cap
+                    profile[k] = profile[k][-20:]
             save_profile(user_id, profile)
         except:
             pass
@@ -158,7 +149,7 @@ recent_user = deque(maxlen=12)
 
 moods = {
     "kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22,
-    "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52   # ylimielisyys laskettu inhimillisemmäksi
+    "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52
 }
 
 def update_moods(txt):
@@ -175,17 +166,18 @@ def update_moods(txt):
         moods["kiukku"] = s("kiukku", 0.30)
         moods["sadismi"] = s("sadismi", 0.20)
 
+    # Pehmentävä mood decay joka viestillä (estää ikuisen kiukun)
     for k in moods:
-        moods[k] = max(0.10, min(1.0, moods[k] + (0.45 - moods[k]) * 0.045))
+        moods[k] = max(0.10, min(1.0, moods[k] * 0.93))
 
 def dom_mood():
     return max(moods, key=moods.get)
 
 # ====================== HISTORY & ANTI-LOOP ======================
 conversation_history = {}
-last_replies = {}          # <-- uusi: estää toistuvan saman vastauksen
+last_replies = {}
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -212,42 +204,19 @@ Nykyinen mielialani: {mood.upper()}.
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
-
         enhanced_prompt = (
             f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, "
             f"tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, "
             f"realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
         )
-
-        response = await client.images.generate(
-            model="dall-e-3",
-            prompt=enhanced_prompt,
-            n=1,
-            size="1024x1024",
-            quality="standard"
-        )
-
+        response = await client.images.generate(model="dall-e-3", prompt=enhanced_prompt, n=1, size="1024x1024", quality="standard")
         image_url = response.data[0].url
-
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url, timeout=35) as resp:
-                if resp.status != 200:
-                    raise Exception(f"Download failed")
                 image_data = await resp.read()
-
-        caption = random.choice([
-            "Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈",
-            "Mä tein tän just sulle. Mitä tunteita se herättää? 💦",
-            "No niin... tässä on se. Tykkäätkö? 😉"
-        ])
-
+        caption = random.choice(["Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈", "Mä tein tän just sulle. Mitä tunteita se herättää? 💦", "No niin... tässä on se. Tykkäätkö? 😉"])
         await thinking.edit_text("Lähetän kuvan...")
-        await update.message.reply_photo(
-            photo=BytesIO(image_data),
-            caption=caption,
-            filename="megan_image.png"
-        )
-
+        await update.message.reply_photo(photo=BytesIO(image_data), caption=caption, filename="megan_image.png")
     except Exception as e:
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
@@ -263,8 +232,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
-    # Kuvapyyntö
-    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa", "kuva mulle", "lähetä kuva", "näytä itsesi", "kuva itsestäsi"]
+    # ==== PAREMPI KUVAPYNTÖJEN TUNNISTUS ====
+    image_keywords = [
+        "näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva",
+        "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi",
+        "miltä näytän", "lähetä kuva", "kuva"
+    ]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -282,28 +255,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # === PITKÄAIKAINEN MUISTI (production-parannukset) ===
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({
-                "role": "system",
-                "content": "Muista nämä:\n" + "\n".join(memories)
-            })
+            messages.append({"role": "system", "content": "Muista nämä:\n" + "\n".join(memories)})
 
         profile = load_profile(user_id)
-        messages.append({
-            "role": "system",
-            "content": f"""
-Faktat:
-{chr(10).join(profile['facts'][-10:])}
-
-Mieltymykset:
-{chr(10).join(profile['preferences'][-10:])}
-
-Tapahtumat:
-{chr(10).join(profile['events'][-10:])}
-"""
-        })
+        messages.append({"role": "system", "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\nMieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\nTapahtumat:\n{chr(10).join(profile['events'][-10:])}"})
 
         messages += conversation_history[user_id][-20:]
 
@@ -317,37 +274,31 @@ Tapahtumat:
 
         reply = response.choices[0].message.content.strip()
 
-        # ===== ANTI-LOOP FIX =====
+        # ===== VAHVEMPI ANTI-LOOP =====
         prev = last_replies.get(user_id)
-        if prev and reply.lower() == prev.lower():
-            # pakotetaan erilainen vastaus
+        if prev and (reply.lower() == prev.lower() or "en jaksa nyt" in reply.lower()):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
-                messages=messages + [{
-                    "role": "system",
-                    "content": "Älä toista samaa vastausta. Vastaa eri tavalla tai avaa tunnetta lyhyesti."
-                }],
-                temperature=0.9,
-                max_tokens=120
+                messages=messages + [{"role": "system", "content": "Älä toista samaa vastausta. Vastaa eri tavalla ja avaa tunnetta inhimillisesti."}],
+                temperature=0.95,
+                max_tokens=150
             )
             reply = retry.choices[0].message.content.strip()
 
         last_replies[user_id] = reply
 
-        # ===== INHIMILLINEN KIUKKU/VÄSYNYT SIIRTYMÄ =====
-        # (ei koske promptia – lisätään vastauksen jälkeen inhimillinen varoitus/syy)
+        # ===== INHIMILLINEN KIUKKU-SIIRTYMÄ =====
         current_mood = dom_mood()
-        if current_mood in ["kiukku", "tylsistyminen"] and any(neg in reply.lower() for neg in ["en jaksa", "loppu", "väsynyt", "vituttaa"]):
-            # varoitetaan ensin ja kerrotaan syy
-            transition_phrases = [
-                f"*sigh* Mä oon vaan tosi väsynyt just nyt… {random.choice(['viimeiset viestit vähän ärsytti', 'töissä oli rankka päivä', 'tarviin pienen hetken itselleni'])}.",
-                f"Mä alan olla ihan loppu… anna hetki, mä selitän kohta miksi.",
-                f"*huokaus* Mä en jaksa keskustella just nyt. Syynä on se että {random.choice(['mä oon ihan poikki', 'sä sait mut vähän ärtyneeksi', 'mulla on paljon mielessä'])}."
-            ]
-            reply = random.choice(transition_phrases) + "\n\n" + reply
+        if current_mood in ["kiukku", "tylsistyminen"] and any(x in reply.lower() for x in ["en jaksa", "loppu", "väsynyt", "vituttaa"]):
+            transition = random.choice([
+                f"*huokaus* Mä oon ihan loppu just nyt… {random.choice(['viimeiset viestit vähän ärsytti', 'mulla on paljon mielessä', 'tarviin pienen hetken itselleni'])}.",
+                "Mä alan olla tosi väsynyt… anna hetki, mä selitän kohta miksi.",
+                "*sigh* Ei jaksa keskustella just nyt. Mä oon ihan poikki."
+            ])
+            reply = transition + "\n\n" + reply
 
-        # jos vastauksessa on "en jaksa nyt", korvataan inhimillisemmällä
-        if reply.lower().count("en jaksa nyt") > 0:
+        # Viimeinen varmistus
+        if "en jaksa nyt" in reply.lower():
             reply = random.choice([
                 "…mä oon vaan ihan loppu nyt. Puhutaan myöhemmin.",
                 "Ei nyt jaksa oikeesti. Anna hetki.",
@@ -356,10 +307,7 @@ Tapahtumat:
             ])
 
         await thinking.edit_text(reply)
-
         conversation_history[user_id].append({"role": "assistant", "content": reply})
-
-        # Tallennetaan automaattisesti
         await extract_and_store(user_id, text)
 
     except Exception as e:
@@ -373,14 +321,7 @@ async def independent_message_loop(application: Application):
         for user_id in list(conversation_history.keys()):
             if random.random() < 0.23:
                 try:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=random.choice([
-                            "Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏",
-                            "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?",
-                            "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"
-                        ])
-                    )
+                    await application.bot.send_message(chat_id=user_id, text=random.choice(["Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏", "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?", "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"]))
                 except:
                     pass
 
@@ -393,9 +334,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
@@ -404,15 +343,11 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-
-    print("✅ Megan 2.1 (production-muisti + anti-loop + inhimillinen kiukku-siirtymä) on nyt käynnissä")
+    print("✅ Megan 2.2 (vahva anti-loop + parempi kuvatunnistus) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(application.run_polling(drop_pending_updates=True))
-    finally:
-        loop.close()
+    loop.run_until_complete(application.run_polling(drop_pending_updates=True))
 
 if __name__ == "__main__":
     main()
