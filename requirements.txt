@@ -1,4 +1,5 @@
-aiohttp
-openai
-python-telegram-bot[job-queue]==21.4
 flask
+python-telegram-bot
+openai
+aiohttp
+numpy
