@@ -34,7 +34,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (Render-korjattu)")
+print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (Render-fix)")
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
@@ -259,13 +259,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Moikka kulta 💕 Mä vedin just lateksit jalkaan. Kerro mitä ajattelet nyt? 😉")
     save_memory(user_id)
 
-# ====================== MAIN (Render-korjattu) ======================
+# ====================== MAIN - Render-yhteensopiva ======================
 def main():
-    # Käynnistetään Flask health check
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
 
-    # Luodaan application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -279,9 +277,13 @@ def main():
 
     print("✅ Megan 2.0 on nyt käynnissä – gpt-4.1 + DALL·E 3")
 
-    # Korjattu käynnistys Renderille
-    import asyncio
-    asyncio.run(application.run_polling(drop_pending_updates=True))
+    # Tämä on Renderissä toimiva tapa käynnistää botti
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(application.run_polling(drop_pending_updates=True))
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     main()
