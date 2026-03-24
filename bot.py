@@ -40,7 +40,7 @@ print("🚀 Megan 2.1 – production memory version (täysi alkuperäinen prompt
 
 # ====================== DATABASE ======================
 # Renderissä pysyvä muisti: lisää Disk mount /var/data ja vaihda DB_PATH = "/var/data/megan_memory.db"
-DB_PATH = "megan_memory.db"
+DB_PATH = "/var/data/megan_memory.db"   # uusi, pysyy ikuisesti
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
