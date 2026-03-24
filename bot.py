@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.3 – vahvin anti-loop + tired-streak counter")
+print("🚀 Megan 2.3 – en jaksa nyt poistettu kokonaan")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -163,17 +163,15 @@ def update_moods(txt):
         moods["kiukku"] = s("kiukku", 0.30)
         moods["sadismi"] = s("sadismi", 0.20)
 
-    # Aggressiivisempi mood decay
     for k in moods:
         moods[k] = max(0.10, min(1.0, moods[k] * 0.88))
 
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== HISTORY & ANTI-LOOP ======================
+# ====================== HISTORY & KEVYT ANTI-DUPLICATE ======================
 conversation_history = {}
 last_replies = {}
-consecutive_tired = {}   # <-- uusi: laskee peräkkäiset "en jaksa nyt"
 
 # ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
@@ -226,7 +224,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
-    # Parempi kuvatunnistus
     image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva", "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi", "miltä näytän", "kuva"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
@@ -263,47 +260,18 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
-        # ===== VAHVIN ANTI-LOOP + TIRED COUNTER =====
-        if user_id not in consecutive_tired:
-            consecutive_tired[user_id] = 0
-
-        is_tired_reply = "en jaksa nyt" in reply.lower()
-
-        if is_tired_reply:
-            consecutive_tired[user_id] += 1
-        else:
-            consecutive_tired[user_id] = 0
-
-        # Jos 2 kertaa peräkkäin "en jaksa nyt" → pakotetaan muutos
-        if consecutive_tired[user_id] >= 2:
-            # Resetoidaan moodit neutraaliksi
-            moods["kiukku"] = 0.25
-            moods["tylsistyminen"] = 0.20
-            moods["ylimielisyys"] = 0.40
-
-            # Pakotetaan erilainen vastaus
+        # KEVYT ANTI-DUPLICATE (vain jos sama viesti toistuu)
+        prev = last_replies.get(user_id)
+        if prev and reply.lower() == prev.lower():
             retry = await client.chat.completions.create(
                 model="gpt-4o",
-                messages=messages + [{
-                    "role": "system",
-                    "content": "Älä toista samaa vastausta. Älä sano 'en jaksa nyt'. Vastaa INHIMILLISESTI, vaihda tunnelmaa, ole leikkisä tai hellä tai selitä miksi olit väsynyt mutta nyt jatkat."
-                }],
+                messages=messages + [{"role": "system", "content": "Älä toista samaa lausetta. Vastaa eri tavalla ja jatka keskustelua luonnollisesti."}],
                 temperature=0.95,
                 max_tokens=180
             )
             reply = retry.choices[0].message.content.strip()
-            consecutive_tired[user_id] = 0   # nollataan laskuri
 
         last_replies[user_id] = reply
-
-        # Inhimillinen siirtymä
-        if is_tired_reply and consecutive_tired[user_id] < 2:
-            transition = random.choice([
-                "*huokaus* Mä oon ihan loppu just nyt… anna hetki.",
-                "Mä alan olla tosi väsynyt… mä selitän kohta miksi.",
-                "*sigh* Ei jaksa keskustella just nyt, mutta mä yritän uudelleen."
-            ])
-            reply = transition + "\n\n" + reply
 
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -311,7 +279,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text("…en jaksa nyt.")
+        await thinking.edit_text("Mä oon täällä, kerro vaan mitä sulla on mielessä 💕")   # <-- ei enää koskaan "en jaksa nyt"
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -342,7 +310,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.3 (vahvin anti-loop + tired-streak counter) on nyt käynnissä")
+    print("✅ Megan 2.3 (en jaksa nyt poistettu kokonaan) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
