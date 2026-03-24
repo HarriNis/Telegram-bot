@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.8 – deadlock korjattu (history cleaner + hard override)")
+print("🚀 Megan 2.9 – history cleaner fixed")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -195,7 +195,7 @@ def is_similar(a, b):
     b = normalize(b)
     return a in b or b in a
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -266,7 +266,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # HARD SYSTEM OVERRIDE (aina päällä)
         messages.insert(1, {
             "role": "system",
             "content": (
@@ -284,7 +283,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = load_profile(user_id)
         messages.append({"role": "system", "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\nMieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\nTapahtumat:\n{chr(10).join(profile['events'][-10:])}"})
 
-        # LOW-INPUT PAKOTUS
         if is_low_input:
             messages.append({
                 "role": "system",
@@ -296,7 +294,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             })
 
-        # CLEAN HISTORY (poistaa myrkylliset toistot)
+        # Korjattu history lisäys
         messages += clean_history(conversation_history[user_id])[-20:]
 
         response = await client.chat.completions.create(
@@ -312,7 +310,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
-        # VAHVA ANTI-REPETITION
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
         prev_replies = last_replies[user_id]
@@ -329,7 +326,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prev_replies.append(reply)
 
-        # HARD FAILSAFE
         BAD_PATTERNS = [
             "kerro vaan mitä sulla on mielessä",
             "mitä sulla on mielessä",
@@ -366,6 +362,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
@@ -375,11 +372,14 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.8 (deadlock korjattu – history cleaner + hard override) on nyt käynnissä")
+    print("✅ Megan 2.9 (history cleaner fixed) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.run_polling(drop_pending_updates=True))
+    try:
+        loop.run_until_complete(application.run_polling(drop_pending_updates=True))
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     main()
