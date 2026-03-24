@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.3 – en jaksa nyt poistettu kokonaan")
+print("🚀 Megan 2.4 – toistot poistettu kokonaan + vahva anti-repetition")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -169,9 +169,9 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== HISTORY & KEVYT ANTI-DUPLICATE ======================
+# ====================== HISTORY & VAHVA ANTI-REPETITION ======================
 conversation_history = {}
-last_replies = {}
+last_replies = deque(maxlen=3)  # tallentaa 3 viimeistä vastausta per käyttäjä (dict)
 
 # ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
@@ -253,25 +253,31 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.83,
+            temperature=0.85,
             max_tokens=850,
+            frequency_penalty=0.7,      # estää toistoa
+            presence_penalty=0.6,
             timeout=40
         )
 
         reply = response.choices[0].message.content.strip()
 
-        # KEVYT ANTI-DUPLICATE (vain jos sama viesti toistuu)
-        prev = last_replies.get(user_id)
-        if prev and reply.lower() == prev.lower():
+        # VAHVA ANTI-REPETITION
+        if user_id not in last_replies:
+            last_replies[user_id] = deque(maxlen=3)
+        prev_replies = last_replies[user_id]
+
+        if any(reply.lower() == p.lower() for p in prev_replies):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
-                messages=messages + [{"role": "system", "content": "Älä toista samaa lausetta. Vastaa eri tavalla ja jatka keskustelua luonnollisesti."}],
+                messages=messages + [{"role": "system", "content": "Älä toista mitään aiempaa lausetta. Vastaa täysin eri tavalla ja jatka keskustelua luonnollisesti."}],
                 temperature=0.95,
-                max_tokens=180
+                max_tokens=180,
+                frequency_penalty=1.0
             )
             reply = retry.choices[0].message.content.strip()
 
-        last_replies[user_id] = reply
+        prev_replies.append(reply)
 
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -279,7 +285,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text("Mä oon täällä, kerro vaan mitä sulla on mielessä 💕")   # <-- ei enää koskaan "en jaksa nyt"
+        # Satunnainen viesti ettei koskaan toistu
+        random_fallback = random.choice([
+            "Mä oon täällä 💕 Kerro vaan mitä sulla on mielessä.",
+            "No hei kulta 😉 Mitä sulla on mielessä just nyt?",
+            "Täällä ollaan! Kerro jotain kivaa.",
+            "*hymyilee* No mitä sä haluaisit jutella?"
+        ])
+        await thinking.edit_text(random_fallback)
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -310,7 +323,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.3 (en jaksa nyt poistettu kokonaan) on nyt käynnissä")
+    print("✅ Megan 2.4 (toistot poistettu kokonaan) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
