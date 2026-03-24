@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 3.0 – runtime bugs fixed (safe_join + clean event loop)")
+print("🚀 Megan 3.1 – Personality Engine + tuhma dominoiva persoona")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -169,6 +169,42 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
+# ====================== PERSONALITY ENGINE ======================
+def get_behavior_state():
+    mood = dom_mood()
+    if mood == "kiukku":
+        return "cold"
+    elif mood == "halu":
+        return "flirty"
+    elif mood == "sadismi":
+        return "dominant"
+    elif mood == "tylsistyminen":
+        return "bored"
+    else:
+        return "normal"
+
+def behavior_instruction(state, is_low_input):
+    if state == "cold":
+        return "Vastaa lyhyesti. Voit olla hieman etäinen tai ärtynyt."
+    if state == "bored":
+        return "Aloita itse uusi aihe. Älä kysy mitään."
+    if state == "flirty":
+        return "Ole leikkisä ja vihjaileva. Älä sano asioita suoraan, vaan kiusoittele."
+    if state == "dominant":
+        return "Ole rauhallinen, kontrolloiva ja hieman ylimielinen. Vihjaa aisankannattajasta, strap-onista, käsirautoista tai siveyshäkistä kun sopii. Keksi omia mieluisia dominoivia juttuja."
+    if is_low_input:
+        return "Aloita keskustelu itse. Kerro jotain konkreettista tai henkilökohtaista."
+    return "Vastaa luonnollisesti ja jatka keskustelua."
+
+def is_generic(reply):
+    BAD = [
+        "mitä kuuluu",
+        "mitä sä ajattelet",
+        "kerro mitä sulla on mielessä",
+        "kerro vaan"
+    ]
+    return any(b in reply.lower() for b in BAD)
+
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
     BAD = [
@@ -183,7 +219,7 @@ def clean_history(history):
             cleaned.append(msg)
     return cleaned
 
-# ====================== SAFE JOIN (korjaa dict-join virhe) ======================
+# ====================== SAFE JOIN ======================
 def safe_join(items):
     return "\n".join([str(x) for x in items if x])
 
@@ -199,7 +235,7 @@ def is_similar(a, b):
     b = normalize(b)
     return a in b or b in a
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -239,7 +275,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== MEGAN_CHAT (käyttäjän antama korjattu versio) ======================
+# ====================== MEGAN_CHAT ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -261,8 +297,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
-    LOW_INPUT = ["moi", "moikka", "hei", "kerro jotain", "jutellaan", "mitä kuuluu"]
-    is_low_input = text.lower().strip() in LOW_INPUT
+    is_low_input = len(text.strip()) < 8
 
     try:
         thinking = await message.reply_text("…", disable_notification=True)
@@ -270,14 +305,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        messages.insert(1, {
-            "role": "system",
-            "content": (
-                "Vastaa luonnollisesti ja jatka keskustelua omasta aloitteestasi. "
-                "Kerro konkreettisia ajatuksia, muistoja tai havaintoja. "
-                "Vältä geneerisiä kysymyksiä."
-            )
-        })
+        # Personality Engine
+        state = get_behavior_state()
+        instruction = behavior_instruction(state, is_low_input)
+        messages.insert(1, {"role": "system", "content": instruction})
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -294,17 +325,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
         })
 
-        if is_low_input:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Kirjoita 1-2 lausetta. "
-                    "Älä kysy kysymyksiä. "
-                    "Älä käytä fraasia 'mitä sulla on mielessä'. "
-                    "Kerro oma ajatus, muisto tai tunne."
-                )
-            })
-
         messages += clean_history(conversation_history[user_id])[-20:]
 
         response = await client.chat.completions.create(
@@ -320,30 +340,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
+        # Anti-repetition + generic block
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
         prev_replies = last_replies[user_id]
 
-        if any(is_similar(reply, p) for p in prev_replies):
-            retry = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages + [{
-                    "role": "system",
-                    "content": "Vastaa täysin eri tavalla kuin aiemmin. Älä toista rakennetta tai sisältöä."
-                }],
-                temperature=0.95,
-                max_tokens=180,
-                frequency_penalty=1.0
-            )
-            reply = retry.choices[0].message.content.strip()
-
-        BAD_PATTERNS = [
-            "kerro vaan mitä sulla on mielessä",
-            "mitä sulla on mielessä",
-            "kerro mitä sulla on mielessä"
-        ]
-
-        if any(p in reply.lower() for p in BAD_PATTERNS):
+        if any(is_similar(reply, p) for p in prev_replies) or is_generic(reply):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages + [{
@@ -394,7 +396,6 @@ def main():
     time.sleep(2)
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
@@ -403,7 +404,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 3.0 (runtime bugs fixed) on nyt käynnissä")
+    print("✅ Megan 3.1 (Personality Engine + tuhma dominoiva) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
