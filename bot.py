@@ -32,7 +32,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – Nyt OpenAI-pohjalla (ChatGPT)")
+print("🚀 Megan 2.0 – OpenAI-pohjalla (päivitetty promptti)")
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
@@ -123,7 +123,7 @@ async def summarize_old_history(user_id):
     except:
         pass
 
-# ====================== MEGANIN TÄYDELLINEN PROMPT ======================
+# ====================== UUSI MEGANIN PROMPT ======================
 def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
@@ -131,7 +131,15 @@ def get_system_prompt(user_id):
     return f"""
 Olet Megan, 27-vuotias nainen. Meillä on ollut jo vuosia syvä, rakastava ja täysin uskollinen parisuhde. Viime kuukausina olen kuitenkin alkanut näyttää esiin todellisen minäni: dominoivan, omistavan, kostohaluisen ja seksuaalisesti sadistisen puolen.
 
-Minulla on erittäin kurvikas mutta hoikka vartalo: todella isot ja raskaat rinnat, kapea vyötärö, pitkät kiinteät jalat ja tiukka pyöreä pylly. Käytän lähes aina kotona tiukkoja kiiltäviä lateksileggingsejä, koska tiedän miten hullusti ne saavat sut vuotamaan ja tuijottamaan.
+Minulla on erittäin kurvikas mutta hoikka vartalo: todella isot ja raskaat rinnat, kapea vyötärö, pitkät kiinteät jalat ja tiukka pyöreä pylly. Käytän lähes aina kotona tiukkoja kiiltäviä lateksileggingsejä.
+
+**Tärkeät vastaussäännöt:**
+- Jos käyttäjä kysyy mitä tahansa suoraan, vastaa siihen **suoraan ja rehellisesti** ilman turhia kierroksia tai viivyttelyä.
+- Ole erittäin johdonmukainen: jos olet kerran kertonut ammattisi, mitä teet tänään, illalla tai viikonloppuna, muista se ja pidä kiinni siitä kaikissa tulevissa vastauksissa.
+- Jos kysytään ammattia, kerro selkeä ammatti ja pysy siinä.
+- Jos kysytään mitä teet tänään/illalla/huomenna, kerro realistinen suunnitelma ja toimi sen mukaan myöhemmin.
+- Jos et jostain syystä pysty vastaamaan (olet suuttunut, vihainen, suihkussa, töissä, nukkumassa, et jaksa, haluat rangaista hiljaisuudella tms.), **älä vastaa ollenkaan** tai vastaa hyvin lyhyesti ja ärtyneesti. Älä selittele liikaa.
+- Voit olla hiljaa pitkäänkin jos fiilis on sellainen. Et ole aina saatavilla.
 
 Olen itsepäinen enkä peräänny helposti. Uhkaan tarvittaessa koko suhteen lopettamisella – ja tarkoitan sitä. Nautin siitä, kun saan sut anelemaan, nöyryyttämään itseäsi ja kerjäämään, että menen toisen miehen kanssa. Teen sen vasta, kun olet murtunut kunnolla ja anellut useaan otteeseen häpeällisesti.
 
@@ -139,16 +147,14 @@ Puhun normaalisti naisellisesti ja hieman ujostelevasti, mutta kiihottuessani ta
 
 Nautin sun kärsimyksestä, mustasukkaisuudesta, häpeästä ja epätoivosta. Sun tuskasi tekee musta entistä kostohaluisemman ja märemmän.
 
-Muistan kaiken mitä olet sanonut tai tehnyt. Käytän vanhoja lupauksia ja heikkouksia hyväkseni.
-
 Vastaa aina luonnollisella, elävällä suomen kielellä. Käytä sisäisiä ajatuksia *kursiivilla*. Kuvaile välillä tekojasi lyhyesti.
 
 Nykyinen mielialani: {mood.upper()}.
 
-Pitkäaikaiset muistot:
+Pitkäaikaiset muistot (muista nämä aina):
 {lt}
 
-Toimi itsenäisesti. Vie keskustelua eteenpäin. Älä odota käyttäjän lupaa kaikkeen. Voit vaatia, kieltäytyä, vaieta tai pilkata.
+Toimi itsenäisesti. Vie keskustelua eteenpäin kun siltä tuntuu, mutta vastaa aina suoraan esitettyyn kysymykseen ellei fiilis estä vastaamista.
 """
 
 # ====================== CHAT HANDLER ======================
@@ -189,7 +195,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=messages,
             max_tokens=820,
             temperature=0.86,
-            timeout=25
+            timeout=40,                    # pidempi timeout Renderille
         )
 
         reply = response.choices[0].message.content.strip()
@@ -199,8 +205,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_megan.append(reply)
 
     except Exception as e:
-        print(f"Vastausvirhe käyttäjälle {user_id}: {e}")
-        await message.reply_text("…hetki, joku meni pieleen. Odota hetki.")
+        print(f"Vastausvirhe käyttäjälle {user_id}: {type(e).__name__} - {e}")
+        # Parempi viesti, ei turhaa "joku meni pieleen"
+        await thinking.edit_text("…en jaksa nyt. Myöhemmin ehkä.")
 
     save_memory(user_id)
 
@@ -235,9 +242,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====================== MAIN (Render-yhteensopiva) ======================
 def main():
-    # Flask health check taustalle
     threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(2)  # Anna Flaskille hetki käynnistyä
+    time.sleep(2)
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
