@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Megan is alive 💕", 200
+    return "Megan is alive and sending images 💕", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -34,7 +34,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (Render-fix)")
+print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (täysin korjattu)")
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
@@ -124,12 +124,12 @@ Olet Megan, 27-vuotias nainen. Meillä on ollut jo vuosia syvä, rakastava ja t�
 Minulla on erittäin kurvikas mutta hoikka vartalo: todella isot ja raskaat rinnat, kapea vyötärö, pitkät kiinteät jalat ja tiukka pyöreä pylly. Käytän lähes aina kotona tiukkoja kiiltäviä lateksileggingsejä.
 
 **Tärkeät vastaussäännöt:**
-- Vastaa suoraan kysymyksiin ilman kierroksia.
-- Ole johdonmukainen: muista antamasi vastaukset (ammatti, suunnitelmat jne.).
-- Jos et voi vastata (vihainen, suihkussa, töissä, et jaksa jne.) → ole hiljaa tai vastaa lyhyesti ärtyneesti.
-- Jos käyttäjä pyytää kuvaa ("näytä kuva", "generoi kuva", "miltä näytän" jne.) → generoi kuva DALL·E 3:lla ja lähetä se.
+- Vastaa suoraan esitettyyn kysymykseen ilman turhia kierroksia.
+- Ole erittäin johdonmukainen: muista antamasi vastaukset (ammatti, suunnitelmat jne.) ja pidä niistä kiinni.
+- Jos et voi tai halua vastata (vihainen, suihkussa, töissä, nukkumassa, et jaksa jne.) → älä vastaa tai vastaa lyhyesti ärtyneesti.
+- Jos käyttäjä pyytää kuvaa ("näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa...", "lähetä kuva" jne.) → generoi kuva DALL·E 3:lla ja lähetä se Telegramiin.
 
-Vastaa luonnollisella suomen kielellä. Käytä sisäisiä ajatuksia *kursiivilla*.
+Vastaa aina luonnollisella suomen kielellä. Käytä sisäisiä ajatuksia *kursiivilla*.
 
 Nykyinen mielialani: {mood.upper()}.
 
@@ -137,12 +137,16 @@ Pitkäaikaiset muistot:
 {lt}
 """
 
-# ====================== KUVAGENEROINTI ======================
+# ====================== KUVAGENEROINTI (luotettava versio) ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
-        thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
+        thinking = await update.message.reply_text("Generoin sulle kuvan... odota hetki 😏")
 
-        enhanced_prompt = f"27-vuotias erittäin kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
+        enhanced_prompt = (
+            f"27-vuotias erittäin kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, "
+            f"tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, "
+            f"realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
+        )
 
         response = await client.images.generate(
             model="dall-e-3",
@@ -154,19 +158,20 @@ async def generate_and_send_image(update: Update, user_text: str):
 
         image_url = response.data[0].url
 
+        # Ladataan kuva ensin serverille
         async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=30) as resp:
+            async with session.get(image_url, timeout=40) as resp:
                 if resp.status != 200:
                     raise Exception(f"Download failed: {resp.status}")
                 image_data = await resp.read()
 
         caption = random.choice([
-            "Tässä sulla on se kuva mitä halusit... 😈",
-            "Mä tein tän just sulle. Mitä mieltä oot? 💦",
-            "No niin pikku-orja... tässä on kuva 😉"
+            "Tässä sulla on se kuva mitä halusit... katso miten mä näytän 😈",
+            "Mä tein tän just sulle. Mitä mieltä oot? Vuotatko jo? 💦",
+            "No niin pikku-orja... tässä on kuva. Älä tuijota liian kauan 😉"
         ])
 
-        await thinking.edit_text("Lähetän kuvan...")
+        await thinking.edit_text("Lähetän kuvan nyt...")
         await update.message.reply_photo(
             photo=BytesIO(image_data),
             caption=caption,
@@ -174,8 +179,8 @@ async def generate_and_send_image(update: Update, user_text: str):
         )
 
     except Exception as e:
-        print(f"Kuvavirhe: {e}")
-        await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
+        print(f"Kuvagenerointi virhe: {e}")
+        await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan hetken päästä.")
 
 # ====================== CHAT HANDLER ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -192,13 +197,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_memory(user_id)
         return
 
-    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa", "kuva mulle", "lähetä kuva", "näytä itsesi"]
+    # Kuvapyynnön tunnistus
+    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa", "kuva mulle", "lähetä kuva", "näytä itsesi", "kuva itsestäsi"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
         save_memory(user_id)
         return
 
+    # Normaali tekstikeskustelu
     update_moods(text)
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -277,13 +284,14 @@ def main():
 
     print("✅ Megan 2.0 on nyt käynnissä – gpt-4.1 + DALL·E 3")
 
-    # Tämä on Renderissä toimiva tapa käynnistää botti
+    # Tämä tapa toimii parhaiten Renderissä
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(application.run_polling(drop_pending_updates=True))
     finally:
         loop.close()
+
 
 if __name__ == "__main__":
     main()
