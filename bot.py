@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.7 – deadlock korjattu (history filter + hard override)")
+print("🚀 Megan 2.8 – deadlock korjattu (history cleaner + hard override)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -169,6 +169,20 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
+# ====================== HISTORY CLEANER ======================
+def clean_history(history):
+    BAD = [
+        "kerro vaan mitä sulla on mielessä",
+        "mitä sulla on mielessä",
+        "kerro mitä sulla on mielessä"
+    ]
+    cleaned = []
+    for msg in history:
+        content = msg.get("content", "").lower()
+        if not any(b in content for b in BAD):
+            cleaned.append(msg)
+    return cleaned
+
 # ====================== HISTORY & ANTI-REPETITION ======================
 conversation_history = {}
 last_replies = {}
@@ -180,19 +194,6 @@ def is_similar(a, b):
     a = normalize(a)
     b = normalize(b)
     return a in b or b in a
-
-# ====================== CLEAN HISTORY (poistaa myrkylliset toistot) ======================
-def clean_history(history):
-    BAD = [
-        "kerro vaan mitä sulla on mielessä",
-        "mitä sulla on mielessä",
-        "kerro mitä sulla on mielessä"
-    ]
-    cleaned = []
-    for msg in history:
-        if not any(b in msg["content"].lower() for b in BAD):
-            cleaned.append(msg)
-    return cleaned
 
 # ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
@@ -271,7 +272,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "content": (
                 "Älä koskaan käytä lausetta 'kerro mitä sulla on mielessä' "
                 "tai mitään sen variaatiota. "
-                "Aloita keskustelua itse."
+                "Älä myöskään kysy käyttäjältä mitä hän ajattelee. "
+                "Aloita keskustelua itse kun input on lyhyt."
             )
         })
 
@@ -282,13 +284,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = load_profile(user_id)
         messages.append({"role": "system", "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\nMieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\nTapahtumat:\n{chr(10).join(profile['events'][-10:])}"})
 
-        # LOW-INPUT PAKOTUS (vahvempi)
+        # LOW-INPUT PAKOTUS
         if is_low_input:
             messages.append({
                 "role": "system",
                 "content": (
                     "Kirjoita 1-2 lausetta. "
                     "Älä kysy kysymyksiä. "
+                    "Älä käytä fraasia 'mitä sulla on mielessä'. "
                     "Kerro oma ajatus, muisto tai tunne."
                 )
             })
@@ -326,7 +329,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prev_replies.append(reply)
 
-        # HARD FAILSAFE (deterministinen)
+        # HARD FAILSAFE
         BAD_PATTERNS = [
             "kerro vaan mitä sulla on mielessä",
             "mitä sulla on mielessä",
@@ -372,7 +375,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.7 (deadlock korjattu – history filter + hard override) on nyt käynnissä")
+    print("✅ Megan 2.8 (deadlock korjattu – history cleaner + hard override) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
