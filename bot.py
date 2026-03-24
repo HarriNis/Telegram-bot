@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.9 – history cleaner fixed")
+print("🚀 Megan 3.0 – deadlock korjattu (käyttäjän antama megan_chat)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -195,7 +195,7 @@ def is_similar(a, b):
     b = normalize(b)
     return a in b or b in a
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -235,7 +235,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== CHAT HANDLER ======================
+# ====================== KORJATTU MEGAN_CHAT (käyttäjän antama versio) ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -246,7 +246,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
-    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva", "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi", "miltä näytän", "kuva"]
+    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva", "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi", "miltä näytän"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -266,22 +266,30 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
+        # HARD SYSTEM OVERRIDE
         messages.insert(1, {
             "role": "system",
             "content": (
                 "Älä koskaan käytä lausetta 'kerro mitä sulla on mielessä' "
                 "tai mitään sen variaatiota. "
-                "Älä myöskään kysy käyttäjältä mitä hän ajattelee. "
-                "Aloita keskustelua itse kun input on lyhyt."
+                "Älä myöskään kysy käyttäjältä mitä hän ajattelee."
             )
         })
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({"role": "system", "content": "Muista nämä:\n" + "\n".join(memories)})
+            messages.append({
+                "role": "system",
+                "content": "Muista nämä:\n" + "\n".join(memories)
+            })
 
         profile = load_profile(user_id)
-        messages.append({"role": "system", "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\nMieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\nTapahtumat:\n{chr(10).join(profile['events'][-10:])}"})
+        messages.append({
+            "role": "system",
+            "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\n"
+                       f"Mieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\n"
+                       f"Tapahtumat:\n{chr(10).join(profile['events'][-10:])}"
+        })
 
         if is_low_input:
             messages.append({
@@ -294,7 +302,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             })
 
-        # Korjattu history lisäys
+        # CLEAN HISTORY
         messages += clean_history(conversation_history[user_id])[-20:]
 
         response = await client.chat.completions.create(
@@ -310,37 +318,62 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
+        # ANTI-REPETITION
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
         prev_replies = last_replies[user_id]
 
+        def normalize(txt):
+            return txt.lower().replace("💕", "").replace("❤️", "").replace(" ", "").strip()
+
+        def is_similar(a, b):
+            a = normalize(a)
+            b = normalize(b)
+            return a in b or b in a
+
         if any(is_similar(reply, p) for p in prev_replies):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
-                messages=messages + [{"role": "system", "content": "Älä toista mitään aiempaa lausetta. Vastaa täysin eri tavalla ja jatka keskustelua luonnollisesti."}],
+                messages=messages + [{
+                    "role": "system",
+                    "content": "Vastaa täysin eri tavalla kuin aiemmin. Älä toista rakennetta tai sisältöä."
+                }],
                 temperature=0.95,
                 max_tokens=180,
                 frequency_penalty=1.0
             )
             reply = retry.choices[0].message.content.strip()
 
-        prev_replies.append(reply)
-
+        # HARD BLOCK BAD PHRASES
         BAD_PATTERNS = [
             "kerro vaan mitä sulla on mielessä",
             "mitä sulla on mielessä",
             "kerro mitä sulla on mielessä"
         ]
+
         if any(p in reply.lower() for p in BAD_PATTERNS):
-            reply = "No… mä olin just hiljaa ja mietin yhtä juttua."
+            reply = random.choice([
+                "No… mä olin just ajatuksissani.",
+                "*huokaa kevyesti* vähän outo fiilis tänään.",
+                "Hmm… en tiedä mistä aloittaisin.",
+                "Mä olin hetken ihan hiljaa ja mietin.",
+            ])
+
+        prev_replies.append(reply)
 
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
+
         await extract_and_store(user_id, text)
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text("No… mä olin just hiljaa ja mietin yhtä juttua.")
+
+        await thinking.edit_text(random.choice([
+            "No… mä olin just ajatuksissani.",
+            "*huokaa kevyesti* vähän outo fiilis tänään.",
+            "Hmm… en tiedä mistä aloittaisin.",
+        ]))
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -349,7 +382,14 @@ async def independent_message_loop(application: Application):
         for user_id in list(conversation_history.keys()):
             if random.random() < 0.23:
                 try:
-                    await application.bot.send_message(chat_id=user_id, text=random.choice(["Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏", "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?", "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"]))
+                    await application.bot.send_message(
+                        chat_id=user_id,
+                        text=random.choice([
+                            "Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏",
+                            "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?",
+                            "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"
+                        ])
+                    )
                 except:
                     pass
 
@@ -372,7 +412,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.9 (history cleaner fixed) on nyt käynnissä")
+    print("✅ Megan 3.0 (käyttäjän antama megan_chat + kaikki muistot) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
