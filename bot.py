@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.4 – toistot poistettu kokonaan + vahva anti-repetition")
+print("🚀 Megan 2.5 – conversation deadlock korjattu (low-input + vahva anti-repeat)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -171,9 +171,12 @@ def dom_mood():
 
 # ====================== HISTORY & VAHVA ANTI-REPETITION ======================
 conversation_history = {}
-last_replies = deque(maxlen=3)  # tallentaa 3 viimeistä vastausta per käyttäjä (dict)
+last_replies = {}
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON) ======================
+def normalize(txt):
+    return txt.lower().replace("💕", "").replace("❤️", "").replace(" ", "").strip()
+
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -224,6 +227,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
+    # Parempi kuvatunnistus
     image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva", "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi", "miltä näytän", "kuva"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
@@ -234,6 +238,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_moods(text)
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+
+    # === LOW-INPUT TUNNISTUS (conversation deadlockin esto) ===
+    LOW_INPUT = ["moi", "moikka", "hei", "kerro jotain", "jutellaan", "mitä kuuluu"]
+    is_low_input = text.lower().strip() in LOW_INPUT
 
     try:
         thinking = await message.reply_text("…", disable_notification=True)
@@ -248,6 +256,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = load_profile(user_id)
         messages.append({"role": "system", "content": f"Faktat:\n{chr(10).join(profile['facts'][-10:])}\n\nMieltymykset:\n{chr(10).join(profile['preferences'][-10:])}\n\nTapahtumat:\n{chr(10).join(profile['events'][-10:])}"})
 
+        # Jos käyttäjä antaa vain lyhyen tervehdyksen → pakotetaan botti aloittamaan itse
+        if is_low_input:
+            messages.append({
+                "role": "system",
+                "content": "Aloita keskustelu itse. Älä pyydä käyttäjää kertomaan mitään. Sano jotain konkreettista, henkilökohtaista tai kiinnostavaa."
+            })
+
         messages += conversation_history[user_id][-20:]
 
         response = await client.chat.completions.create(
@@ -255,19 +270,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=messages,
             temperature=0.85,
             max_tokens=850,
-            frequency_penalty=0.7,      # estää toistoa
+            frequency_penalty=0.7,
             presence_penalty=0.6,
             timeout=40
         )
 
         reply = response.choices[0].message.content.strip()
 
-        # VAHVA ANTI-REPETITION
+        # VAHVA ANTI-REPETITION (normalisoitu)
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
         prev_replies = last_replies[user_id]
 
-        if any(reply.lower() == p.lower() for p in prev_replies):
+        if any(normalize(reply) == normalize(p) for p in prev_replies):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages + [{"role": "system", "content": "Älä toista mitään aiempaa lausetta. Vastaa täysin eri tavalla ja jatka keskustelua luonnollisesti."}],
@@ -279,20 +294,22 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prev_replies.append(reply)
 
+        # HARD FAILSAFE – estää ikuisen "kerro vaan mitä sulla on mielessä" -lauseen
+        if "kerro vaan mitä sulla on mielessä" in reply.lower():
+            reply = random.choice([
+                "No okei… mä olin just miettimässä yhtä juttua tänään.",
+                "Tiiäks mitä… mä ajattelin sua aiemmin tänään aika paljon.",
+                "Hmm… haluutko kuulla mitä mulle tapahtui tänään?",
+                "Mä voin aloittaa. Tänään oli vähän outo päivä..."
+            ])
+
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        # Satunnainen viesti ettei koskaan toistu
-        random_fallback = random.choice([
-            "Mä oon täällä 💕 Kerro vaan mitä sulla on mielessä.",
-            "No hei kulta 😉 Mitä sulla on mielessä just nyt?",
-            "Täällä ollaan! Kerro jotain kivaa.",
-            "*hymyilee* No mitä sä haluaisit jutella?"
-        ])
-        await thinking.edit_text(random_fallback)
+        await thinking.edit_text("Mä oon täällä 💕 Kerro vaan mitä sulla on mielessä.")
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -323,7 +340,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 2.4 (toistot poistettu kokonaan) on nyt käynnissä")
+    print("✅ Megan 2.5 (conversation deadlock korjattu) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
