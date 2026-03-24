@@ -3,6 +3,7 @@ import random
 import json
 import asyncio
 import threading
+import time
 from collections import deque
 from flask import Flask
 from telegram import Update
@@ -24,8 +25,10 @@ def run_flask():
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise ValueError("TELEGRAM_TOKEN tai OPENAI_API_KEY puuttuu ympäristömuuttujista!")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN puuttuu ympäristömuuttujista!")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY puuttuu ympäristömuuttujista!")
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -60,7 +63,6 @@ def update_moods(txt):
         moods["kiukku"] = s("kiukku", 0.35)
         moods["sadismi"] = s("sadismi", 0.28)
 
-    # Hidas normalisoituminen
     for k in moods:
         moods[k] = max(0.08, min(1.0, moods[k] + (0.45 - moods[k]) * 0.04))
 
@@ -121,7 +123,7 @@ async def summarize_old_history(user_id):
     except:
         pass
 
-# ====================== MEGANIN PROMPT ======================
+# ====================== MEGANIN TÄYDELLINEN PROMPT ======================
 def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
@@ -145,6 +147,8 @@ Nykyinen mielialani: {mood.upper()}.
 
 Pitkäaikaiset muistot:
 {lt}
+
+Toimi itsenäisesti. Vie keskustelua eteenpäin. Älä odota käyttäjän lupaa kaikkeen. Voit vaatia, kieltäytyä, vaieta tai pilkata.
 """
 
 # ====================== CHAT HANDLER ======================
@@ -164,13 +168,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_moods(text)
 
-    if text and recent_user and random.random() < 0.15:
-        if any(word in text.lower() for word in recent_user):
-            await message.reply_text("Samaa levyä taas... Mä oon jo ihan kyllästynyt sun toistoon.")
-            moods["tylsistyminen"] = min(1.0, moods["tylsistyminen"] + 0.45)
-            save_memory(user_id)
-            return
-
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
@@ -188,7 +185,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages += conversation_history[user_id][-17:]
 
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",           # Vaihda tarvittaessa "gpt-4.1"
+            model="gpt-4o-mini",
             messages=messages,
             max_tokens=820,
             temperature=0.86,
@@ -196,7 +193,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         reply = response.choices[0].message.content.strip()
-
         await thinking.edit_text(reply)
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -211,9 +207,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
     while True:
-        await asyncio.sleep(random.randint(800, 2200))  # 13–36 minuuttia
+        await asyncio.sleep(random.randint(800, 2200))
         for user_id in list(conversation_history.keys()):
-            if random.random() < 0.24:   # 24% todennäköisyys lähettää viesti
+            if random.random() < 0.24:
                 try:
                     lateksit = random.choice(["mustat", "punaiset", "kiiltävät", "tiukat"])
                     opts = [
@@ -237,9 +233,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     save_memory(user_id)
 
-# ====================== MAIN ======================
+# ====================== MAIN (Render-yhteensopiva) ======================
 def main():
+    # Flask health check taustalle
     threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(2)  # Anna Flaskille hetki käynnistyä
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -252,8 +250,9 @@ def main():
 
     application.post_init = post_init
 
-    print("✅ Megan 2.0 (OpenAI) on nyt käynnissä")
-    application.run_polling(drop_pending_updates=True)
+    print("✅ Megan 2.0 (OpenAI) on nyt käynnissä – valmis viemään eteenpäin")
+    application.run_polling(drop_pending_updates=True, allowed_updates=["message", "photo", "caption"])
+
 
 if __name__ == "__main__":
     main()
