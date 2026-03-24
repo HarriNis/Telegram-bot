@@ -36,9 +36,10 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – inhimillisempi versio + DALL·E 3 + pitkäaikainen muisti")
+print("🚀 Megan 2.1 – production memory version (täysi alkuperäinen prompt)")
 
-# ====================== PITKÄAIKAINEN MUISTI (SQLite + Embeddings) ======================
+# ====================== DATABASE ======================
+# Renderissä pysyvä muisti: lisää Disk mount /var/data ja vaihda DB_PATH = "/var/data/megan_memory.db"
 DB_PATH = "megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -49,7 +50,6 @@ CREATE TABLE IF NOT EXISTS memories (
     user_id TEXT,
     content TEXT,
     embedding BLOB,
-    type TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
+# ====================== EMBEDDINGS ======================
 async def get_embedding(text):
     resp = await client.embeddings.create(
         model="text-embedding-3-small",
@@ -72,17 +73,21 @@ async def get_embedding(text):
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-async def store_memory(user_id, text, mtype="general"):
+# ====================== MEMORY STORE ======================
+async def store_memory(user_id, text):
     try:
+        if len(text) < 25:          # suodatus: ei turhaa roskaa
+            return
         emb = await get_embedding(text)
         cursor.execute(
-            "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-            (str(user_id), text, emb.tobytes(), mtype)
+            "INSERT INTO memories (user_id, content, embedding) VALUES (?, ?, ?)",
+            (str(user_id), text, emb.tobytes())
         )
         conn.commit()
     except Exception as e:
         print("Memory store error:", e)
 
+# ====================== MEMORY RETRIEVAL ======================
 async def retrieve_memories(user_id, query, limit=5):
     try:
         q_emb = await get_embedding(query)
@@ -94,13 +99,15 @@ async def retrieve_memories(user_id, query, limit=5):
         for content, emb_blob in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             score = cosine_similarity(q_emb, emb)
-            scored.append((score, content))
+            if score > 0.78:        # relevanssikynnys
+                scored.append((score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
         return [c for _, c in scored[:limit]]
     except Exception as e:
         print("Memory retrieval error:", e)
         return []
 
+# ====================== PROFILE ======================
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
     row = cursor.fetchone()
@@ -115,12 +122,15 @@ def save_profile(user_id, profile):
     )
     conn.commit()
 
+# ====================== PROFILE EXTRACTION ======================
 async def extract_and_store(user_id, text):
     try:
         resp = await client.chat.completions.create(
             model="gpt-4.1",
             messages=[
-                {"role": "system", "content": "Poimi tekstistä tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\": [...], \"preferences\": [...], \"events\": [...] }"},
+                {"role": "system", "content":
+                 "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. "
+                 "Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
                 {"role": "user", "content": text}
             ],
             max_tokens=200,
@@ -131,8 +141,11 @@ async def extract_and_store(user_id, text):
         try:
             parsed = json.loads(data)
             for k in ["facts", "preferences", "events"]:
-                if k in parsed and isinstance(parsed[k], list):
-                    profile[k].extend(parsed[k])
+                if k in parsed:
+                    for item in parsed[k]:
+                        if item not in profile[k]:
+                            profile[k].append(item)
+                    profile[k] = profile[k][-20:]   # cap
             save_profile(user_id, profile)
         except:
             pass
@@ -142,7 +155,6 @@ async def extract_and_store(user_id, text):
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
-recent_megan = deque(maxlen=12)
 
 moods = {
     "kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22,
@@ -169,10 +181,10 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== KESKUSTELU HISTORIA (lyhyt muisti) ======================
+# ====================== HISTORY ======================
 conversation_history = {}
 
-# ====================== INHIMILLINEN MEGAN PROMPT (alkuperäinen, ei muutoksia) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -269,28 +281,36 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # === UUSI PITKÄAIKAINEN MUISTI INJEKTOIDAAN TÄHÄN ===
-        relevant_memories = await retrieve_memories(user_id, text)
-        if relevant_memories:
+        # === PITKÄAIKAINEN MUISTI (production-parannukset) ===
+        memories = await retrieve_memories(user_id, text)
+        if memories:
             messages.append({
                 "role": "system",
-                "content": "Muista nämä aiemmat asiat:\n" + "\n".join(relevant_memories)
+                "content": "Muista nämä:\n" + "\n".join(memories)
             })
 
         profile = load_profile(user_id)
         messages.append({
             "role": "system",
-            "content": f"Käyttäjäprofiili:\n{json.dumps(profile, ensure_ascii=False)}"
+            "content": f"""
+Faktat:
+{chr(10).join(profile['facts'][-10:])}
+
+Mieltymykset:
+{chr(10).join(profile['preferences'][-10:])}
+
+Tapahtumat:
+{chr(10).join(profile['events'][-10:])}
+"""
         })
 
-        # Viimeisimmät keskustelut (lyhyt muisti)
         messages += conversation_history[user_id][-20:]
 
         response = await client.chat.completions.create(
             model="gpt-4.1",
             messages=messages,
-            max_tokens=850,
             temperature=0.83,
+            max_tokens=850,
             timeout=40
         )
 
@@ -299,7 +319,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
 
-        # Tallennetaan automaattisesti faktat + muisti
+        # Tallennetaan automaattisesti
         await extract_and_store(user_id, text)
 
     except Exception as e:
@@ -345,7 +365,7 @@ def main():
 
     application.post_init = post_init
 
-    print("✅ Megan 2.0 (pitkäaikaisella muistilla + semanttisella haulla) on nyt käynnissä")
+    print("✅ Megan 2.1 (production-muisti + täysin alkuperäinen prompt) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
