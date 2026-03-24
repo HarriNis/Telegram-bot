@@ -39,7 +39,7 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 print("🚀 Megan 2.1 – production memory version (täysi alkuperäinen prompt)")
 
 # ====================== DATABASE ======================
-# Renderissä pysyvä muisti: lisää Disk mount /var/data ja vaihda DB_PATH = "/var/data/megan_memory.db"
+# Renderissä pysyvä muisti: lisää Disk mount /var/data
 DB_PATH = "/var/data/megan_memory.db"   # uusi, pysyy ikuisesti
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -126,7 +126,7 @@ def save_profile(user_id, profile):
 async def extract_and_store(user_id, text):
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content":
                  "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. "
@@ -158,7 +158,7 @@ recent_user = deque(maxlen=12)
 
 moods = {
     "kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22,
-    "ylimielisyys": 0.70, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52
+    "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52   # ylimielisyys laskettu inhimillisemmäksi
 }
 
 def update_moods(txt):
@@ -181,8 +181,9 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== HISTORY ======================
+# ====================== HISTORY & ANTI-LOOP ======================
 conversation_history = {}
+last_replies = {}          # <-- uusi: estää toistuvan saman vastauksen
 
 # ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
 def get_system_prompt(user_id):
@@ -307,7 +308,7 @@ Tapahtumat:
         messages += conversation_history[user_id][-20:]
 
         response = await client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-4o",
             messages=messages,
             temperature=0.83,
             max_tokens=850,
@@ -315,6 +316,45 @@ Tapahtumat:
         )
 
         reply = response.choices[0].message.content.strip()
+
+        # ===== ANTI-LOOP FIX =====
+        prev = last_replies.get(user_id)
+        if prev and reply.lower() == prev.lower():
+            # pakotetaan erilainen vastaus
+            retry = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages + [{
+                    "role": "system",
+                    "content": "Älä toista samaa vastausta. Vastaa eri tavalla tai avaa tunnetta lyhyesti."
+                }],
+                temperature=0.9,
+                max_tokens=120
+            )
+            reply = retry.choices[0].message.content.strip()
+
+        last_replies[user_id] = reply
+
+        # ===== INHIMILLINEN KIUKKU/VÄSYNYT SIIRTYMÄ =====
+        # (ei koske promptia – lisätään vastauksen jälkeen inhimillinen varoitus/syy)
+        current_mood = dom_mood()
+        if current_mood in ["kiukku", "tylsistyminen"] and any(neg in reply.lower() for neg in ["en jaksa", "loppu", "väsynyt", "vituttaa"]):
+            # varoitetaan ensin ja kerrotaan syy
+            transition_phrases = [
+                f"*sigh* Mä oon vaan tosi väsynyt just nyt… {random.choice(['viimeiset viestit vähän ärsytti', 'töissä oli rankka päivä', 'tarviin pienen hetken itselleni'])}.",
+                f"Mä alan olla ihan loppu… anna hetki, mä selitän kohta miksi.",
+                f"*huokaus* Mä en jaksa keskustella just nyt. Syynä on se että {random.choice(['mä oon ihan poikki', 'sä sait mut vähän ärtyneeksi', 'mulla on paljon mielessä'])}."
+            ]
+            reply = random.choice(transition_phrases) + "\n\n" + reply
+
+        # jos vastauksessa on "en jaksa nyt", korvataan inhimillisemmällä
+        if reply.lower().count("en jaksa nyt") > 0:
+            reply = random.choice([
+                "…mä oon vaan ihan loppu nyt. Puhutaan myöhemmin.",
+                "Ei nyt jaksa oikeesti. Anna hetki.",
+                "Mulla ei oo energiaa tähän just nyt…",
+                "Voidaanko palata tähän myöhemmin?"
+            ])
+
         await thinking.edit_text(reply)
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -365,7 +405,7 @@ def main():
 
     application.post_init = post_init
 
-    print("✅ Megan 2.1 (production-muisti + täysin alkuperäinen prompt) on nyt käynnissä")
+    print("✅ Megan 2.1 (production-muisti + anti-loop + inhimillinen kiukku-siirtymä) on nyt käynnissä")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
