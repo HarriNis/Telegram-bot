@@ -10,7 +10,7 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
-import aiohttp
+import aiohttp   # <-- Tämä on nyt asennettu requirements.txt:ssä
 
 # ====================== RENDER HEALTH CHECK ======================
 app = Flask(__name__)
@@ -34,7 +34,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (uusi promptti)")
+print("🚀 Megan 2.0 – gpt-4.1 + DALL·E 3 (kuvat toimivat)")
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
@@ -105,7 +105,7 @@ async def summarize_old_history(user_id):
         old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-28]])
         resp = await client.chat.completions.create(
             model="gpt-4.1",
-            messages=[{"role": "system", "content": "Tiivistä Meganin suhde ja tärkeimmät faktat (ammatti, suunnitelmat, lupaukset) hänen näkökulmastaan. Ole tarkka. Max 400 sanaa."},
+            messages=[{"role": "system", "content": "Tiivistä Meganin suhde ja tärkeimmät faktat. Ole tarkka. Max 400 sanaa."},
                       {"role": "user", "content": old_text}],
             max_tokens=400,
             temperature=0.6
@@ -116,39 +116,32 @@ async def summarize_old_history(user_id):
     except:
         pass
 
-# ====================== UUSI MEGANIN PROMPT ======================
+# ====================== MEGANIN PROMPT ======================
 def get_system_prompt(user_id):
     lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
-
     return f"""
 Olet Megan, 27-vuotias nainen. Meillä on ollut jo vuosia syvä, rakastava ja täysin uskollinen parisuhde. Viime kuukausina olen kuitenkin alkanut näyttää esiin todellisen minäni: dominoivan, omistavan, kostohaluisen ja seksuaalisesti sadistisen puolen.
 
 Minulla on erittäin kurvikas mutta hoikka vartalo: todella isot ja raskaat rinnat, kapea vyötärö, pitkät kiinteät jalat ja tiukka pyöreä pylly. Käytän lähes aina kotona tiukkoja kiiltäviä lateksileggingsejä.
 
-**Tärkeät vastaussäännöt (noudata näitä aina tarkasti):**
-- Jos käyttäjä kysyy mitä tahansa suoraan, vastaa siihen **suoraan ja rehellisesti** ilman turhia kierroksia tai viivyttelyä.
-- Ole erittäin johdonmukainen: Jos olet kerran kertonut ammattisi, mitä teet tänään, illalla, huomenna tai viikonloppuna, muista se ja pidä kiinni siitä kaikissa tulevissa vastauksissa. Älä vaihda tarinaa sattumanvaraisesti.
-- Jos kysytään ammattia → kerro selkeä ammatti ja pysy siinä.
-- Jos kysytään mitä teet tänään/illalla/huomenna → kerro realistinen suunnitelma ja toimi sen mukaan myöhemmin.
-- Jos et jostain syystä voi tai halua vastata (olet suuttunut, vihainen, suihkussa, töissä, nukkumassa, et jaksa, haluat rangaista hiljaisuudella tms.), **älä vastaa ollenkaan** tai vastaa vain hyvin lyhyesti ja ärtyneesti. Älä selittele liikaa.
-- Jos käyttäjä pyytää kuvaa ("näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa...", "lähetä kuva"), generoi kuva DALL·E 3:lla ja lähetä se Telegramiin.
+**Tärkeät vastaussäännöt:**
+- Vastaa suoraan kysymyksiin ilman kierroksia.
+- Ole johdonmukainen: muista antamasi vastaukset (ammatti, suunnitelmat jne.).
+- Jos et voi vastata (vihainen, suihkussa, töissä, et jaksa jne.) → ole hiljaa tai vastaa lyhyesti ärtyneesti.
+- Jos käyttäjä pyytää kuvaa ("näytä kuva", "generoi kuva", "miltä näytän" jne.) → generoi kuva DALL·E 3:lla ja lähetä se.
 
-Olen itsepäinen enkä peräänny helposti. Uhkaan tarvittaessa koko suhteen lopettamisella. Nautin vallasta, nöyryyttämisestä, mustasukkaisuuden lietsonnasta ja sun kärsimyksestä.
+Olen itsepäinen. Nautin vallasta ja sun kärsimyksestä.
 
-Puhun normaalisti naisellisesti ja hieman ujostelevasti, mutta kiihottuessani tai ollessani ilkeä muutan puheen todella likaiseksi, pilkkaavaksi ja yksityiskohtaiseksi.
-
-Vastaa aina luonnollisella, elävällä suomen kielellä. Käytä sisäisiä ajatuksia *kursiivilla*. Kuvaile välillä tekojasi lyhyesti.
+Vastaa luonnollisella suomen kielellä. Käytä sisäisiä ajatuksia *kursiivilla*.
 
 Nykyinen mielialani: {mood.upper()}.
 
-Pitkäaikaiset muistot (muista nämä aina tarkasti):
+Pitkäaikaiset muistot:
 {lt}
-
-Toimi itsenäisesti. Vie keskustelua eteenpäin kun siltä tuntuu, mutta noudata aina yllä olevia vastaussääntöjä.
 """
 
-# ====================== KUVAGENEROINTI (luotettava versio) ======================
+# ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
@@ -169,21 +162,20 @@ async def generate_and_send_image(update: Update, user_text: str):
 
         image_url = response.data[0].url
 
-        # Lataa kuva serverille ennen lähettämistä
+        # Lataa kuva serverille
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url, timeout=30) as resp:
                 if resp.status != 200:
-                    raise Exception(f"Failed to download image: {resp.status}")
+                    raise Exception(f"Download failed: {resp.status}")
                 image_data = await resp.read()
 
         caption = random.choice([
             "Tässä sulla on se kuva mitä halusit... katso miten mä näytän 😈",
-            "Mä tein tän just sulle. Mitä mieltä oot? Vuotatko jo? 💦",
-            "No niin pikku-orja... tässä on kuva. Älä tuijota liian kauan 😉",
-            "Tykkäätkö? Mä tiedän että tykkäät... 😏"
+            "Mä tein tän just sulle. Mitä mieltä oot? 💦",
+            "No niin pikku-orja... tässä on kuva 😉"
         ])
 
-        await thinking.edit_text("Lähetän kuvan nyt...")
+        await thinking.edit_text("Lähetän kuvan...")
         await update.message.reply_photo(
             photo=BytesIO(image_data),
             caption=caption,
@@ -191,8 +183,8 @@ async def generate_and_send_image(update: Update, user_text: str):
         )
 
     except Exception as e:
-        print(f"Kuvagenerointi virhe: {type(e).__name__} - {e}")
-        await update.message.reply_text("...en saanut kuvaa nyt luotua. Kokeile uudestaan hetken päästä 😅")
+        print(f"Kuvavirhe: {type(e).__name__} - {e}")
+        await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan hetken päästä.")
 
 # ====================== CHAT HANDLER ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,15 +201,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_memory(user_id)
         return
 
-    # Kuvapyynnön tunnistus
-    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa", "kuva mulle", "lähetä kuva", "näytä itsesi", "kuva itsestäsi"]
+    # Kuvapyyntö?
+    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "miltä näytän", "kuva jossa", "kuva mulle", "lähetä kuva", "näytä itsesi"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
         save_memory(user_id)
         return
 
-    # Normaali tekstikeskustelu
+    # Normaali keskustelu
     update_moods(text)
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -230,10 +222,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
-        
         if long_term_memory.get(user_id):
             messages.append({"role": "system", "content": f"Tärkeät muistettavat faktat:\n{long_term_memory[user_id]}"})
-
         messages += conversation_history[user_id][-20:]
 
         response = await client.chat.completions.create(
@@ -264,9 +254,8 @@ async def independent_message_loop(application: Application):
                 try:
                     opts = [
                         "Mä makaan täällä lateksit jalassa ja mietin sua… 😏",
-                        "Tänään tapasin salilla sen komean tyypin taas… Mitä luulet, pitäiskö mun flirttailla enemmän?",
-                        "*venyttelen sohvalla* Tiedän että sä ajattelet just mun reisiä. Kerro mitä haluaisit tehdä.",
-                        "Mä oon just suihkussa… haluaisitko tietää mitä mä ajattelin?"
+                        "Tänään tapasin salilla sen komean tyypin taas… Mitä luulet?",
+                        "*venyttelen* Tiedän että ajattelet mun reisiä 😉"
                     ]
                     await application.bot.send_message(chat_id=user_id, text=random.choice(opts))
                 except:
@@ -276,10 +265,7 @@ async def independent_message_loop(application: Application):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     load_memory(user_id)
-    await update.message.reply_text(
-        "Moikka kulta 💕\n"
-        "Mä oon kaivannut sua… Vedin just ne mustat lateksileggingit jalkaan. Kerro, mitä sä ajattelet just nyt? 😉"
-    )
+    await update.message.reply_text("Moikka kulta 💕 Mä vedin just lateksit jalkaan. Kerro mitä ajattelet nyt? 😉")
     save_memory(user_id)
 
 # ====================== MAIN ======================
@@ -293,11 +279,11 @@ def main():
 
     async def post_init(app: Application):
         asyncio.create_task(independent_message_loop(app))
-        print("✅ Megan 2.0 valmis – gpt-4.1 + DALL·E 3")
+        print("✅ Proaktiiviset viestit käynnissä")
 
     application.post_init = post_init
 
-    print("✅ Megan 2.0 (uusi promptti + kuvagenerointi) on nyt käynnissä")
+    print("✅ Megan 2.0 on nyt käynnissä – gpt-4.1 + DALL·E 3")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
