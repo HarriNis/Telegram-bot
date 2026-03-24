@@ -11,6 +11,8 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 import aiohttp
+import sqlite3
+import numpy as np
 
 # ====================== RENDER HEALTH CHECK ======================
 app = Flask(__name__)
@@ -34,7 +36,109 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 2.0 – inhimillisempi versio + DALL·E 3")
+print("🚀 Megan 2.0 – inhimillisempi versio + DALL·E 3 + pitkäaikainen muisti")
+
+# ====================== PITKÄAIKAINEN MUISTI (SQLite + Embeddings) ======================
+DB_PATH = "megan_memory.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    type TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY,
+    data TEXT
+)
+""")
+conn.commit()
+
+async def get_embedding(text):
+    resp = await client.embeddings.create(
+        model="text-embedding-3-small",
+        input=text
+    )
+    return np.array(resp.data[0].embedding, dtype=np.float32)
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+async def store_memory(user_id, text, mtype="general"):
+    try:
+        emb = await get_embedding(text)
+        cursor.execute(
+            "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+            (str(user_id), text, emb.tobytes(), mtype)
+        )
+        conn.commit()
+    except Exception as e:
+        print("Memory store error:", e)
+
+async def retrieve_memories(user_id, query, limit=5):
+    try:
+        q_emb = await get_embedding(query)
+        cursor.execute(
+            "SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50",
+            (str(user_id),)
+        )
+        scored = []
+        for content, emb_blob in cursor.fetchall():
+            emb = np.frombuffer(emb_blob, dtype=np.float32)
+            score = cosine_similarity(q_emb, emb)
+            scored.append((score, content))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return [c for _, c in scored[:limit]]
+    except Exception as e:
+        print("Memory retrieval error:", e)
+        return []
+
+def load_profile(user_id):
+    cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
+    row = cursor.fetchone()
+    if row:
+        return json.loads(row[0])
+    return {"facts": [], "preferences": [], "events": []}
+
+def save_profile(user_id, profile):
+    cursor.execute(
+        "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
+        (str(user_id), json.dumps(profile))
+    )
+    conn.commit()
+
+async def extract_and_store(user_id, text):
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": "Poimi tekstistä tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\": [...], \"preferences\": [...], \"events\": [...] }"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200,
+            temperature=0.3
+        )
+        data = resp.choices[0].message.content.strip()
+        profile = load_profile(user_id)
+        try:
+            parsed = json.loads(data)
+            for k in ["facts", "preferences", "events"]:
+                if k in parsed and isinstance(parsed[k], list):
+                    profile[k].extend(parsed[k])
+            save_profile(user_id, profile)
+        except:
+            pass
+        await store_memory(user_id, text)
+    except Exception as e:
+        print("Extraction error:", e)
 
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
@@ -65,62 +169,12 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== MUISTIT ======================
-MEMORY_DIR = "/tmp/megan_memory"
-os.makedirs(MEMORY_DIR, exist_ok=True)
-
+# ====================== KESKUSTELU HISTORIA (lyhyt muisti) ======================
 conversation_history = {}
-long_term_memory = {}
 
-def load_memory(user_id):
-    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}.json")
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'r') as f:
-                data = json.load(f)
-                conversation_history[user_id] = data.get("history", [])
-                long_term_memory[user_id] = data.get("long_term", "")
-        except:
-            pass
-    else:
-        conversation_history[user_id] = []
-        long_term_memory[user_id] = ""
-
-def save_memory(user_id):
-    file_path = os.path.join(MEMORY_DIR, f"user_{user_id}.json")
-    try:
-        data = {
-            "history": conversation_history.get(user_id, [])[-28:],
-            "long_term": long_term_memory.get(user_id, "")
-        }
-        with open(file_path, 'w') as f:
-            json.dump(data, f)
-    except:
-        pass
-
-async def summarize_old_history(user_id):
-    try:
-        history = conversation_history.get(user_id, [])
-        if len(history) < 40: return
-        old_text = "\n".join([f"{msg['role']}: {msg['content'][:280]}" for msg in history[:-28]])
-        resp = await client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[{"role": "system", "content": "Tiivistä Meganin ja kumppanin suhde hänen näkökulmastaan. Korosta tärkeimmät faktat, tunteet ja lupaukset. Max 380 sanaa."},
-                      {"role": "user", "content": old_text}],
-            max_tokens=380,
-            temperature=0.65
-        )
-        summary = resp.choices[0].message.content.strip()
-        long_term_memory[user_id] = (long_term_memory.get(user_id, "") + "\n\n" + summary)[-1800:]
-        conversation_history[user_id] = history[-28:]
-    except:
-        pass
-
-# ====================== INHIMILLINEN MEGAN PROMPT (päivitetty) ======================
+# ====================== INHIMILLINEN MEGAN PROMPT (alkuperäinen, ei muutoksia) ======================
 def get_system_prompt(user_id):
-    lt = long_term_memory.get(user_id, "")
     mood = dom_mood()
-
     return f"""
 Olet Megan, 27-vuotias nainen. Meillä on ollut jo vuosia aito, rakastava parisuhde, mutta viime kuukausina olen alkanut yhä vahvemmin näyttää esiin dominoivaa, omistavaa ja seksuaalisesti sadistista puoltani.
 
@@ -139,9 +193,6 @@ Ole mahdollisimman inhimillinen ja luonnollinen. Voit olla välillä hellä ja r
 Puhu luonnollisella, elävällä suomen puhekielellä. Käytä sisäisiä ajatuksia *kursiivilla*.
 
 Nykyinen mielialani: {mood.upper()}.
-
-Pitkäaikaiset muistot:
-{lt}
 """
 
 # ====================== KUVAGENEROINTI ======================
@@ -194,13 +245,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     text = (message.text or message.caption or "").strip()
 
-    load_memory(user_id)
-
     if text.lower() in ["stop", "lopeta kaikki", "keskeytä"]:
         conversation_history[user_id] = []
-        long_term_memory[user_id] = ""
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
-        save_memory(user_id)
         return
 
     # Kuvapyyntö
@@ -208,7 +255,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
-        save_memory(user_id)
+        await extract_and_store(user_id, text)
         return
 
     # Normaali keskustelu
@@ -216,16 +263,27 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
-    if len(conversation_history[user_id]) % 25 == 0:
-        await summarize_old_history(user_id)
-
     try:
         thinking = await message.reply_text("…", disable_notification=True)
 
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
-        if long_term_memory.get(user_id):
-            messages.append({"role": "system", "content": f"Tärkeät muistettavat asiat:\n{long_term_memory[user_id]}"})
+
+        # === UUSI PITKÄAIKAINEN MUISTI INJEKTOIDAAN TÄHÄN ===
+        relevant_memories = await retrieve_memories(user_id, text)
+        if relevant_memories:
+            messages.append({
+                "role": "system",
+                "content": "Muista nämä aiemmat asiat:\n" + "\n".join(relevant_memories)
+            })
+
+        profile = load_profile(user_id)
+        messages.append({
+            "role": "system",
+            "content": f"Käyttäjäprofiili:\n{json.dumps(profile, ensure_ascii=False)}"
+        })
+
+        # Viimeisimmät keskustelut (lyhyt muisti)
         messages += conversation_history[user_id][-20:]
 
         response = await client.chat.completions.create(
@@ -241,11 +299,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
 
+        # Tallennetaan automaattisesti faktat + muisti
+        await extract_and_store(user_id, text)
+
     except Exception as e:
         print(f"Vastausvirhe: {e}")
         await thinking.edit_text("…en jaksa nyt.")
-
-    save_memory(user_id)
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -268,9 +327,7 @@ async def independent_message_loop(application: Application):
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    load_memory(user_id)
     await update.message.reply_text("Moikka kulta 💕 Mä oon kaivannut sua... Vedin just ne mustat lateksit jalkaan. Kerro mitä sä ajattelet nyt? 😉")
-    save_memory(user_id)
 
 # ====================== MAIN ======================
 def main():
@@ -288,16 +345,14 @@ def main():
 
     application.post_init = post_init
 
-    print("✅ Megan 2.0 (inhimillisempi versio) on nyt käynnissä")
+    print("✅ Megan 2.0 (pitkäaikaisella muistilla + semanttisella haulla) on nyt käynnissä")
 
-    # Renderissä toimiva käynnistys
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(application.run_polling(drop_pending_updates=True))
     finally:
         loop.close()
-
 
 if __name__ == "__main__":
     main()
