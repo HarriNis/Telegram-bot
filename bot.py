@@ -5,6 +5,7 @@ import asyncio
 import threading
 import time
 import copy
+import re
 from collections import deque
 from io import BytesIO
 from flask import Flask
@@ -193,9 +194,10 @@ def clean_history(history):
     ]
     cleaned = []
     for msg in history:
-        content = msg.get("content", "").lower()
-        if not any(b in content for b in BAD):
-            cleaned.append(msg)
+        content = msg.get("content", "")
+        if any(is_similar(content, bad) for bad in BAD):
+            continue
+        cleaned.append(msg)
     return cleaned
 
 # ====================== SAFE JOIN ======================
@@ -207,7 +209,10 @@ conversation_history = {}
 last_replies = {}
 
 def normalize(txt):
-    return txt.lower().replace("💕", "").replace("❤️", "").strip()   # <-- korjattu
+    txt = txt.lower()
+    txt = re.sub(r'[^\w\s]', '', txt)   # poista kaikki merkit
+    txt = re.sub(r'\s+', ' ', txt)      # normalisoi whitespace
+    return txt.strip()
 
 def is_similar(a, b):
     a = normalize(a)
@@ -260,14 +265,6 @@ async def generate_proactive_message(user_id):
         max_tokens=120
     )
     text = resp.choices[0].message.content.strip()
-
-    # Anti-repetition proaktiivisille viesteille
-    if user_id not in last_replies:
-        last_replies[user_id] = deque(maxlen=3)
-    if any(is_similar(text, p) for p in last_replies[user_id]):
-        text = "…mä en viitti sanoa samaa uudestaan."
-    last_replies[user_id].append(text)
-
     return text
 
 # ====================== KUVAGENEROINTI ======================
@@ -310,7 +307,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_low_input = len(text.strip()) < 8
 
     try:
-        # User-viesti lisätään vasta try-lohkoon
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
         thinking = await message.reply_text("…", disable_notification=True)
@@ -340,7 +336,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 })
 
-        # RANDOMIZE SYSTEM BEHAVIOR + inertia
         mode_options = ["lead", "tease", "cold", "affection"]
         last_mode = context.chat_data.get("last_mode")
         if random.random() < 0.6 and last_mode in mode_options:
@@ -375,7 +370,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "system", "content": "User gave very little input. Start the conversation yourself."})
 
-        messages += clean_history(conversation_history[user_id])[-8:]
+        # Korjattu history (dokumentin ohje)
+        history = clean_history(conversation_history[user_id])
+        filtered = []
+        for msg in reversed(history):
+            if len(filtered) >= 5:
+                break
+            filtered.append(msg)
+        messages += list(reversed(filtered))
 
         messages.append({
             "role": "system",
@@ -388,8 +390,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             temperature=0.92,
             top_p=0.92,
             max_tokens=850,
-            frequency_penalty=0.6,
-            presence_penalty=0.5,
+            frequency_penalty=0.3,      # dokumentin korjaus
+            presence_penalty=0.2,       # dokumentin korjaus
             timeout=40
         )
 
@@ -409,13 +411,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             retry = await client.chat.completions.create(
                 model="gpt-4.1",
                 messages=retry_messages,
-                temperature=1.2,
+                temperature=0.9,        # dokumentin korjaus
                 max_tokens=180
             )
             reply = retry.choices[0].message.content.strip()
 
         # BREAK PATTERN FAILSAFE
         BAD = ["mä olin just", "ajattelin sua", "outo fiilis"]
+        is_fallback = False
         if any(b in reply.lower() for b in BAD):
             reply = random.choice([
                 "…mä en jaksa nyt olla kiltti.",
@@ -423,6 +426,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "älä luule että mä unohdin mitä sanoit.",
                 "hmm… sä teit just jotain mitä mä en ihan sulata."
             ])
+            is_fallback = True
 
         # Edge case fallback
         if not reply or len(reply) < 3:
@@ -431,12 +435,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "*hiljenee vähän*",
                 "en jaksa vastata siihen nyt kunnolla."
             ])
+            is_fallback = True
 
-        # TÄRKEÄ: append vasta kaikien muokkausten jälkeen
+        # Tallennetaan historiaan VAIN jos ei fallback
+        if not is_fallback:
+            conversation_history[user_id].append({"role": "assistant", "content": reply})
+
         prev_replies.append(reply)
 
         await thinking.edit_text(reply)
-        conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
 
     except Exception as e:
@@ -456,7 +463,7 @@ async def independent_message_loop(application: Application):
                 try:
                     text = await generate_proactive_message(user_id)
                     await application.bot.send_message(chat_id=user_id, text=text)
-                    conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
+                    # EI lisätä proaktiivista viestiä historyyn (dokumentin korjaus)
                 except:
                     pass
 
