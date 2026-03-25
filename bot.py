@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import time
+import copy
 from collections import deque
 from io import BytesIO
 from flask import Flask
@@ -182,7 +183,14 @@ def dom_mood():
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
-    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä"]
+    BAD = [
+        "kerro vaan mitä sulla on mielessä",
+        "mitä sulla on mielessä",
+        "kerro mitä sulla on mielessä",
+        "mä olin just ajatuksissani",
+        "mä en jaksa nyt olla kiltti",
+        "sä tiedät kyllä miksi mä oon hiljaa"
+    ]
     cleaned = []
     for msg in history:
         content = msg.get("content", "").lower()
@@ -199,9 +207,8 @@ conversation_history = {}
 last_replies = {}
 
 def normalize(txt):
-    return txt.lower().replace("💕", "").replace("❤️", "").replace(" ", "").strip()
+    return txt.lower().replace("💕", "").replace("❤️", "").strip()   # <-- korjattu
 
-# Vahvempi is_similar (dokumentin ohjeen mukaan)
 def is_similar(a, b):
     a = normalize(a)
     b = normalize(b)
@@ -235,7 +242,7 @@ Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 My current mood: {mood.upper()}.
 """
 
-# ====================== PROAKTIIVINEN VIESTI (dynaaminen) ======================
+# ====================== PROAKTIIVINEN VIESTI ======================
 async def generate_proactive_message(user_id):
     history = conversation_history.get(user_id, [])[-6:]
     recent_text = "\n".join([
@@ -252,7 +259,16 @@ async def generate_proactive_message(user_id):
         temperature=1.0,
         max_tokens=120
     )
-    return resp.choices[0].message.content.strip()
+    text = resp.choices[0].message.content.strip()
+
+    # Anti-repetition proaktiivisille viesteille
+    if user_id not in last_replies:
+        last_replies[user_id] = deque(maxlen=3)
+    if any(is_similar(text, p) for p in last_replies[user_id]):
+        text = "…mä en viitti sanoa samaa uudestaan."
+    last_replies[user_id].append(text)
+
+    return text
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
@@ -291,19 +307,17 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_moods(text)
     recent_user.append(text)
-
-    # User-viesti lisätään vasta try-lohkoon (dokumentin ohje)
-    conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
-
     is_low_input = len(text.strip()) < 8
 
     try:
+        # User-viesti lisätään vasta try-lohkoon
+        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+
         thinking = await message.reply_text("…", disable_notification=True)
 
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # SENSITIVE MEMORY + KIUKKUINEN JULMUUS (pehmennetty)
         sensitive = get_sensitive_memories(user_id)
         if sensitive:
             if dom_mood() == "kiukku":
@@ -326,12 +340,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 })
 
-        # RANDOMIZE SYSTEM BEHAVIOR (state shift)
+        # RANDOMIZE SYSTEM BEHAVIOR + inertia
         mode_options = ["lead", "tease", "cold", "affection"]
         last_mode = context.chat_data.get("last_mode")
-        if last_mode in mode_options:
-            mode_options.remove(last_mode)
-        mode = random.choice(mode_options)
+        if random.random() < 0.6 and last_mode in mode_options:
+            mode = last_mode
+        else:
+            if last_mode in mode_options:
+                mode_options.remove(last_mode)
+            mode = random.choice(mode_options)
         context.chat_data["last_mode"] = mode
 
         if mode == "lead":
@@ -378,13 +395,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
-        # ANTI-REPETITION (vahvempi versio)
+        # ANTI-REPETITION
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
         prev_replies = last_replies[user_id]
 
         if any(is_similar(reply, p) for p in prev_replies):
-            retry_messages = messages.copy()
+            retry_messages = copy.deepcopy(messages)
             retry_messages.append({
                 "role": "system",
                 "content": "Completely change tone, structure and intent. Do NOT resemble previous reply."
@@ -397,8 +414,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             reply = retry.choices[0].message.content.strip()
 
-        prev_replies.append(reply)
-
         # BREAK PATTERN FAILSAFE
         BAD = ["mä olin just", "ajattelin sua", "outo fiilis"]
         if any(b in reply.lower() for b in BAD):
@@ -409,15 +424,30 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "hmm… sä teit just jotain mitä mä en ihan sulata."
             ])
 
+        # Edge case fallback
+        if not reply or len(reply) < 3:
+            reply = random.choice([
+                "…mä mietin hetken.",
+                "*hiljenee vähän*",
+                "en jaksa vastata siihen nyt kunnolla."
+            ])
+
+        # TÄRKEÄ: append vasta kaikien muokkausten jälkeen
+        prev_replies.append(reply)
+
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text("No… mä olin just ajatuksissani.")
+        await thinking.edit_text(random.choice([
+            "…mä jäin hetkeksi hiljaiseksi.",
+            "*huokaa kevyesti* en jaksa vastata nätisti just nyt.",
+            "hmm… mä mietin vielä mitä sanoisin."
+        ]))
 
-# ====================== PROAKTIIVISET VIESTIT (dynaaminen) ======================
+# ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
     while True:
         await asyncio.sleep(random.randint(900, 2400))
