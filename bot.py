@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.2 – kiukkuinen julma + sensitive memory")
+print("🚀 Megan 4.2 – FINAL LOOP-FIX versio")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -70,7 +70,7 @@ async def get_embedding(text):
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# ====================== MEMORY (sensitive tagging) ======================
+# ====================== MEMORY ======================
 async def store_memory(user_id, text):
     try:
         if len(text) < 25:
@@ -201,10 +201,16 @@ last_replies = {}
 def normalize(txt):
     return txt.lower().replace("💕", "").replace("❤️", "").replace(" ", "").strip()
 
+# Vahvempi is_similar (dokumentin ohjeen mukaan)
 def is_similar(a, b):
     a = normalize(a)
     b = normalize(b)
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    a_words = set(a.split())
+    b_words = set(b.split())
+    overlap = len(a_words & b_words) / max(1, len(a_words))
+    return overlap > 0.6
 
 # ====================== ENGLISH SYSTEM PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
@@ -228,6 +234,25 @@ Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
 My current mood: {mood.upper()}.
 """
+
+# ====================== PROAKTIIVINEN VIESTI (dynaaminen) ======================
+async def generate_proactive_message(user_id):
+    history = conversation_history.get(user_id, [])[-6:]
+    recent_text = "\n".join([
+        f"{m['role']}: {m['content']}"
+        for m in history if isinstance(m, dict) and "role" in m and "content" in m
+    ])
+    resp = await client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": get_system_prompt(user_id)},
+            {"role": "system", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
+            {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
+        ],
+        temperature=1.0,
+        max_tokens=120
+    )
+    return resp.choices[0].message.content.strip()
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
@@ -266,6 +291,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_moods(text)
     recent_user.append(text)
+
+    # User-viesti lisätään vasta try-lohkoon (dokumentin ohje)
     conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
     is_low_input = len(text.strip()) < 8
@@ -276,7 +303,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # SENSITIVE MEMORY + KIUKKUINEN JULMUUS
+        # SENSITIVE MEMORY + KIUKKUINEN JULMUUS (pehmennetty)
         sensitive = get_sensitive_memories(user_id)
         if sensitive:
             if dom_mood() == "kiukku":
@@ -284,8 +311,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "role": "system",
                     "content": (
                         "You know the user's deepest fantasies, shame points and vulnerabilities. "
-                        "When you are angry or in a bad mood, you may use them cruelly, mockingly and dominantly to hurt or humiliate them. "
-                        "Be vicious, teasing and psychologically sharp.\n\n"
+                        "Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\n"
                         "Known sensitive points:\n" + "\n".join(sensitive)
                     )
                 })
@@ -299,6 +325,23 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Known sensitive points:\n" + "\n".join(sensitive)
                     )
                 })
+
+        # RANDOMIZE SYSTEM BEHAVIOR (state shift)
+        mode_options = ["lead", "tease", "cold", "affection"]
+        last_mode = context.chat_data.get("last_mode")
+        if last_mode in mode_options:
+            mode_options.remove(last_mode)
+        mode = random.choice(mode_options)
+        context.chat_data["last_mode"] = mode
+
+        if mode == "lead":
+            messages.append({"role": "system", "content": "Take control."})
+        elif mode == "tease":
+            messages.append({"role": "system", "content": "Be playful and teasing."})
+        elif mode == "cold":
+            messages.append({"role": "system", "content": "Be short and distant."})
+        elif mode == "affection":
+            messages.append({"role": "system", "content": "Be warm and close."})
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -315,7 +358,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "system", "content": "User gave very little input. Start the conversation yourself."})
 
-        messages += clean_history(conversation_history[user_id])[-20:]
+        messages += clean_history(conversation_history[user_id])[-8:]
 
         messages.append({
             "role": "system",
@@ -335,6 +378,37 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
+        # ANTI-REPETITION (vahvempi versio)
+        if user_id not in last_replies:
+            last_replies[user_id] = deque(maxlen=3)
+        prev_replies = last_replies[user_id]
+
+        if any(is_similar(reply, p) for p in prev_replies):
+            retry_messages = messages.copy()
+            retry_messages.append({
+                "role": "system",
+                "content": "Completely change tone, structure and intent. Do NOT resemble previous reply."
+            })
+            retry = await client.chat.completions.create(
+                model="gpt-4.1",
+                messages=retry_messages,
+                temperature=1.2,
+                max_tokens=180
+            )
+            reply = retry.choices[0].message.content.strip()
+
+        prev_replies.append(reply)
+
+        # BREAK PATTERN FAILSAFE
+        BAD = ["mä olin just", "ajattelin sua", "outo fiilis"]
+        if any(b in reply.lower() for b in BAD):
+            reply = random.choice([
+                "…mä en jaksa nyt olla kiltti.",
+                "*katsoo sua pitkään* sä tiedät kyllä miksi mä oon hiljaa.",
+                "älä luule että mä unohdin mitä sanoit.",
+                "hmm… sä teit just jotain mitä mä en ihan sulata."
+            ])
+
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
@@ -343,21 +417,16 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Vastausvirhe: {e}")
         await thinking.edit_text("No… mä olin just ajatuksissani.")
 
-# ====================== PROAKTIIVISET VIESTIT ======================
+# ====================== PROAKTIIVISET VIESTIT (dynaaminen) ======================
 async def independent_message_loop(application: Application):
     while True:
         await asyncio.sleep(random.randint(900, 2400))
         for user_id in list(conversation_history.keys()):
             if random.random() < 0.23:
                 try:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=random.choice([
-                            "Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏",
-                            "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?",
-                            "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"
-                        ])
-                    )
+                    text = await generate_proactive_message(user_id)
+                    await application.bot.send_message(chat_id=user_id, text=text)
+                    conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
                 except:
                     pass
 
@@ -380,7 +449,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.2 (kiukkuinen julma + sensitive memory) on nyt käynnissä")
+    print("✅ Megan 4.2 (FINAL LOOP-FIX) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
