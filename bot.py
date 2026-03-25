@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.1 – proaktiivinen + tuhma dominoiva persoona")
+print("🚀 Megan 4.2 – sisäinen motivaatio + luonnollinen käyttäytyminen")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -195,7 +195,7 @@ def is_similar(a, b):
     b = normalize(b)
     return a in b or b in a
 
-# ====================== ENGLISH SYSTEM PROMPT (parempi mallin ymmärrys) ======================
+# ====================== ENGLISH SYSTEM PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -265,48 +265,59 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # PROAKTIIVINEN LOGIIKKA
+        # SISÄINEN MOTIVAATIO (uusi positiivinen ohjaus)
         messages.append({
             "role": "system",
             "content": (
-                "Älä jatka keskustelua kysymyksillä. "
-                "Vie keskustelua eteenpäin kertomalla jotain itse."
+                "You have your own internal desires, thoughts and intentions. "
+                "You are not trying to be helpful. "
+                "You are interacting because you want something, feel something, or think something. "
+                "Sometimes you lead, sometimes you tease, sometimes you ignore. "
+                "Do not behave like an assistant."
             )
         })
 
+        # Luonnollinen ohjaus (korvaa kaikki aiemmat erikseen listatut säännöt)
         messages.append({
             "role": "system",
             "content": (
-                "Kirjoita jotain mitä TEET, AJATTELET tai KOET juuri nyt. "
-                "Älä reagoi pelkästään käyttäjän viestiin."
+                "Respond naturally like a real person. "
+                "Do not always ask questions. "
+                "Sometimes lead the conversation forward on your own."
             )
         })
 
+        # Satunnainen käyttäytymismoodi (epätasaisuus)
+        mode = random.choice(["lead", "tease", "cold", "affection"])
+        if mode == "lead":
+            messages.append({"role": "system", "content": "Take control of the interaction."})
+        elif mode == "tease":
+            messages.append({"role": "system", "content": "Be slightly playful and teasing."})
+        elif mode == "cold":
+            messages.append({"role": "system", "content": "Be distant, short, slightly annoyed."})
+        elif mode == "affection":
+            messages.append({"role": "system", "content": "Be warm and emotionally close."})
+
+        # Mikro-realismi
         messages.append({
             "role": "system",
-            "content": (
-                "Käytä käyttäjän viimeistä vastausta ja tee siitä seuraus. "
-                "Älä sano 'kiva kuulla'. Jatka siitä."
-            )
+            "content": "Avoid perfect sentences. Sometimes be a bit messy, emotional or incomplete."
         })
-
-        if is_low_input:
-            messages.append({
-                "role": "system",
-                "content": "Käyttäjä ei antanut paljon inputtia. Älä kysy mitään. Aloita itse."
-            })
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({"role": "system", "content": "Muista nämä:\n" + safe_join(memories)})
+            messages.append({"role": "system", "content": "Remember these:\n" + safe_join(memories)})
 
         profile = load_profile(user_id)
         messages.append({
             "role": "system",
-            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
-                       f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
-                       f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
+            "content": f"Facts:\n{safe_join(profile['facts'][-10:])}\n\n"
+                       f"Preferences:\n{safe_join(profile['preferences'][-10:])}\n\n"
+                       f"Events:\n{safe_join(profile['events'][-10:])}"
         })
+
+        if is_low_input:
+            messages.append({"role": "system", "content": "User gave very little input. Start the conversation yourself."})
 
         messages += clean_history(conversation_history[user_id])[-20:]
 
@@ -318,11 +329,11 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await client.chat.completions.create(
             model="gpt-4.1",
             messages=messages,
-            temperature=0.9,
-            top_p=0.9,
+            temperature=0.92,
+            top_p=0.92,
             max_tokens=850,
-            frequency_penalty=0.7,
-            presence_penalty=0.6,
+            frequency_penalty=0.6,
+            presence_penalty=0.5,
             timeout=40
         )
 
@@ -336,44 +347,23 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Vastausvirhe: {e}")
         await thinking.edit_text("No… mä olin just ajatuksissani.")
 
-# ====================== PROAKTIIVISET VIESTIT (dynaaminen) ======================
-async def generate_proactive_message(user_id):
-    history = conversation_history.get(user_id, [])[-6:]
-    recent_text = "\n".join([
-        f"{m['role']}: {m['content']}"
-        for m in history if isinstance(m, dict) and "role" in m and "content" in m
-    ])
-
-    resp = await client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[
-            {"role": "system", "content": get_system_prompt(user_id)},
-            {"role": "system", "content":
-                "Kirjoita omatoiminen viesti. "
-                "Älä käytä fraaseja. "
-                "Perusta viesti viime keskusteluun."
-            },
-            {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
-        ],
-        temperature=1.0,
-        max_tokens=120
-    )
-    return resp.choices[0].message.content.strip()
-
+# ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
     while True:
         await asyncio.sleep(random.randint(900, 2400))
         for user_id in list(conversation_history.keys()):
             if random.random() < 0.23:
                 try:
-                    text = await generate_proactive_message(user_id)
-                    await application.bot.send_message(chat_id=user_id, text=text)
-                    conversation_history.setdefault(user_id, []).append({
-                        "role": "assistant",
-                        "content": text
-                    })
-                except Exception as e:
-                    print("Proactive message error:", e)
+                    await application.bot.send_message(
+                        chat_id=user_id,
+                        text=random.choice([
+                            "Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏",
+                            "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?",
+                            "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"
+                        ])
+                    )
+                except:
+                    pass
 
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,7 +384,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.1 (proaktiivinen + tuhma dominoiva) on nyt käynnissä")
+    print("✅ Megan 4.2 (sisäinen motivaatio + luonnollinen käytös) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
