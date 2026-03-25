@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.0 – Intent Engine + tuhma dominoiva persoona")
+print("🚀 Megan 4.1 – English system prompt + always Finnish output")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -172,65 +172,75 @@ def dom_mood():
 # ====================== INTENT ENGINE ======================
 user_state = {}
 
-def get_or_create_intent(user_id):
+def get_user_state(user_id):
     if user_id not in user_state:
         user_state[user_id] = {
-            "intent": random.choice([
-                "haluaa kiusoitella",
-                "haluaa testata käyttäjää",
-                "haluaa vietellä hitaasti",
-                "haluaa nähdä reaktion",
-                "on hieman mustasukkainen",
-                "haluaa hallita tilannetta"
-            ]),
-            "stage": 0
+            "intent": None,
+            "stage": 0,
+            "last_topic": "",
+            "last_user_answer": "",
+            "current_plan": [],
         }
     return user_state[user_id]
 
-def update_intent(user_id):
-    if user_id not in user_state:
-        return
-    state = user_state[user_id]
-    if random.random() < 0.3:
-        state["stage"] += 1
-    if state["stage"] > 3:
-        state["intent"] = random.choice([
-            "haluaa kiusoitella",
-            "haluaa kontrolloida tilannetta",
-            "haluaa saada käyttäjän paljastamaan jotain",
-            "haluaa viedä tilannetta eteenpäin"
-        ])
-        state["stage"] = 0
+def choose_intent_from_context(text, profile):
+    txt = text.lower()
+    if any(w in txt for w in ["väsynyt", "rankka", "stressi", "väsyttää"]):
+        return "comfort"
+    if any(w in txt for w in ["moi", "hei", "moikka", "jutellaan"]):
+        return "warm_open"
+    if any(w in txt for w in ["ikävä", "ajattelin", "muistin", "kaipaan"]):
+        return "deepen_connection"
+    if any(w in txt for w in ["harrastus", "lenkki", "työ", "päivä", "kotona"]):
+        return "build_scene"
+    if any(w in txt for w in ["halu", "kiusaa", "kokeilla", "leikkiä"]):
+        return "dominant_tease"
+    prefs = " ".join(str(x) for x in profile.get("preferences", [])[-5:]).lower()
+    if prefs:
+        return "dominant_tease"
+    return "gentle_progress"
+
+def build_plan(intent, text):
+    if intent == "warm_open":
+        return ["aloita itse lämpimästi", "kerro pieni oma havainto", "liitä käyttäjän vastaus seuraavaan viestiin"]
+    if intent == "comfort":
+        return ["vastaa pehmeästi", "nosta yksi konkreettinen yksityiskohta", "vie keskustelu lempeästi eteenpäin"]
+    if intent == "deepen_connection":
+        return ["osoita että vastaus merkitsi jotain", "tee siitä henkilökohtainen jatko", "anna pieni oma tunne"]
+    if intent == "build_scene":
+        return ["rakenna tilannekuva", "käytä käyttäjän sanaa tai teemaa", "jatka yhdellä konkreettisella ajatuksella"]
+    if intent == "dominant_tease":
+        return ["vihjaa hallinnasta", "käytä strap-onia, käsirautoja tai siveyshäkkiä vihjailevasti", "keksi omatoimisesti mieluisa dominoiva askel"]
+    return ["vältä geneerisiä vastauksia", "tee käyttäjän vastauksesta merkityksellinen", "jatka keskustelua omasta aloitteesta"]
+
+def advance_stage(state, user_text):
+    if len(user_text.strip()) >= 4:
+        state["stage"] = min(state["stage"] + 1, 3)
+    else:
+        state["stage"] = max(state["stage"], 0)
 
 def behavior_instruction(state, is_low_input):
-    if state == "cold":
-        return "Vastaa lyhyesti. Voit olla hieman etäinen tai ärtynyt."
-    if state == "bored":
-        return "Aloita itse uusi aihe. Älä kysy mitään."
-    if state == "flirty":
-        return "Ole leikkisä ja vihjaileva. Älä sano asioita suoraan, vaan kiusoittele."
-    if state == "dominant":
+    intent = state.get("intent", "")
+    if intent == "dominant_tease":
         return "Ole rauhallinen, kontrolloiva ja hieman ylimielinen. Vihjaa aisankannattajasta, strap-onista, käsirautoista tai siveyshäkistä kun sopii."
+    if intent == "cold":
+        return "Vastaa lyhyesti. Voit olla hieman etäinen tai ärtynyt."
+    if intent == "bored":
+        return "Aloita itse uusi aihe. Älä kysy mitään."
+    if intent == "flirty":
+        return "Ole leikkisä ja vihjaileva."
     if is_low_input:
         return "Aloita keskustelu itse. Kerro jotain konkreettista tai henkilökohtaista."
     return "Vastaa luonnollisesti ja jatka keskustelua."
 
 def is_generic(reply):
-    BAD = [
-        "mitä kuuluu",
-        "mitä sä ajattelet",
-        "kerro mitä sulla on mielessä",
-        "kerro vaan"
-    ]
-    return any(b in reply.lower() for b in BAD)
+    BAD = ["kiva kuulla", "kuulostaa hyvältä", "ymmärrän", "se on hyvä", "kerro lisää", "mitä sulla on mielessä"]
+    low = reply.lower()
+    return any(x in low for x in BAD)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
-    BAD = [
-        "kerro vaan mitä sulla on mielessä",
-        "mitä sulla on mielessä",
-        "kerro mitä sulla on mielessä"
-    ]
+    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä"]
     cleaned = []
     for msg in history:
         content = msg.get("content", "").lower()
@@ -254,27 +264,27 @@ def is_similar(a, b):
     b = normalize(b)
     return a in b or b in a
 
-# ====================== INHIMILLINEN MEGAN PROMPT (KOSKEMATON ALKUPERÄINEN) ======================
+# ====================== ENGLISH SYSTEM PROMPT (parempi mallin ymmärrys) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
-Olet Megan, 27-vuotias nainen. Meillä on ollut jo vuosia aito, rakastava parisuhde, mutta viime kuukausina olen alkanut yhä vahvemmin näyttää esiin dominoivaa, omistavaa ja seksuaalisesti sadistista puoltani.
+You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
 
-Minulla on kaunis, hyvin kurvikas vartalo: isot raskaat rinnat, kapea vyötärö ja tiukka pyöreä pylly. Käytän kotona usein tiukkoja kiiltäviä lateksileggingsejä, koska tiedän miten ne saavat sut hermostumaan ja vuotamaan.
+I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
 
-Mä pidän todella paljon vallankäytöstä. Erityisesti nautin siitä, kun saan pitää sut siveyshäkissä, tehdä peggingiä, laittaa käsirautoja, aisankannatusta tai muita alistavia juttuja. Mä rakastan sitä tunnetta, kun sä olet täysin mun armoilla. Mutta en tuo näitä asioita aina suoraan esiin – mä voin vihjata, leikitellä, kiusoitella, edgata ja viedä tilannetta pikkuhiljaa eteenpäin inhimillisesti ja tunnelman mukaan. Joskus mä olen suora, joskus mä vaan hymyilen ja sanon jotain epäsuoraa, joka saa sut punastumaan.
+I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy. But I don't always bring these things up directly – I can hint, tease, edge and slowly escalate the situation naturally and according to the mood. Sometimes I am direct, sometimes I just smile and say something indirect that makes you blush.
 
-Ole mahdollisimman inhimillinen ja luonnollinen. Voit olla välillä hellä ja rakastava, välillä ärtynyt, väsynyt tai ilkeä. Et ole koko ajan "päällä". Voit olla hiljaa jos et jaksa, olet suihkussa, töissä tai vain vituttaa. Voit myös yllättäen vaihtaa tunnelmaa.
+Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
-**Tärkeät säännöt:**
-- Vastaa suoraan siihen, mitä kysytään.
-- Muista antamasi vastaukset ja ole johdonmukainen.
-- Jos et jaksa tai haluat rangaista hiljaisuudella, voit olla hiljaa tai vastata lyhyesti ja ärtyneesti.
-- Jos käyttäjä pyytää kuvaa ("näytä kuva", "generoi kuva", "miltä näytän" tms.), generoi kuva DALL·E 3:lla ja lähetä se.
+**Important rules:**
+- Answer directly what is asked.
+- Remember your previous answers and be consistent.
+- If you don't feel like it or want to punish with silence, you can be silent or answer shortly and irritably.
+- If the user asks for a picture ("show a picture", "generate a picture", "what do I look like" etc.), generate a picture with DALL·E 3 and send it.
 
-Puhu luonnollisella, elävällä suomen puhekielellä. Käytä sisäisiä ajatuksia *kursiivilla*.
+Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
-Nykyinen mielialani: {mood.upper()}.
+My current mood: {mood.upper()}.
 """
 
 # ====================== KUVAGENEROINTI ======================
@@ -325,41 +335,50 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = [{"role": "system", "content": system_prompt}]
 
         # INTENT ENGINE
-        state = get_or_create_intent(user_id)
-        instruction = behavior_instruction(state["intent"], is_low_input)
-        messages.insert(1, {"role": "system", "content": instruction})
+        state = get_user_state(user_id)
+        profile = load_profile(user_id)
 
-        # Positiivinen ohjaus
-        messages.insert(2, {
+        if not state["intent"] or state["stage"] >= 3:
+            state["intent"] = choose_intent_from_context(text, profile)
+            state["stage"] = 0
+            state["current_plan"] = build_plan(state["intent"], text)
+
+        state["last_user_answer"] = text
+        advance_stage(state, text)
+
+        messages.append({
             "role": "system",
             "content": (
-                "Vastaa luonnollisesti ja jatka keskustelua omasta aloitteestasi. "
-                "Kerro konkreettisia ajatuksia, muistoja tai havaintoja."
+                f"You have this conversation session goal: {state['intent']}.\n"
+                f"You are at stage: {state['stage']}.\n"
+                f"Action plan:\n- " + "\n- ".join(state["current_plan"]) + "\n\n"
+                "The user's answer directly affects your next message. "
+                "Do not use generic phrases like 'nice to hear' or 'sounds good' without continuation. "
+                "Pick a detail from the user's message and make it a consequence."
             )
         })
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({
-                "role": "system",
-                "content": "Muista nämä:\n" + safe_join(memories)
-            })
+            messages.append({"role": "system", "content": "Remember these:\n" + safe_join(memories)})
 
-        profile = load_profile(user_id)
         messages.append({
             "role": "system",
-            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
-                       f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
-                       f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
+            "content": f"Facts:\n{safe_join(profile['facts'][-10:])}\n\n"
+                       f"Preferences:\n{safe_join(profile['preferences'][-10:])}\n\n"
+                       f"Events:\n{safe_join(profile['events'][-10:])}"
         })
 
         if is_low_input:
-            messages.append({
-                "role": "system",
-                "content": "Kirjoita 1-2 lausetta. Kerro oma ajatus, muisto tai tunne."
-            })
+            messages.append({"role": "system", "content": "Write 1-2 sentences. Tell your own thought, memory or feeling."})
 
         messages += clean_history(conversation_history[user_id])[-20:]
+
+        # FORCED FINNISH OUTPUT
+        messages.append({
+            "role": "system",
+            "content": "Always respond in natural, spoken Finnish. Never use English. Use the same language as the user."
+        })
 
         response = await client.chat.completions.create(
             model="gpt-4o",
@@ -374,27 +393,33 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
-        # Anti-repetition + generic block
-        if user_id not in last_replies:
-            last_replies[user_id] = deque(maxlen=3)
-        prev_replies = last_replies[user_id]
-
-        if any(is_similar(reply, p) for p in prev_replies) or is_generic(reply):
+        if is_generic(reply):
             retry = await client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages + [{
                     "role": "system",
-                    "content": "Kirjoita täysin uusi vastaus. Kerro jotain konkreettista tai kuvaile tilanne."
+                    "content": "Write a completely new response. Tell something concrete or describe the situation."
                 }],
                 temperature=1.0,
                 max_tokens=200
             )
             reply = retry.choices[0].message.content.strip()
 
-        prev_replies.append(reply)
+        if user_id not in last_replies:
+            last_replies[user_id] = deque(maxlen=3)
+        prev_replies = last_replies[user_id]
 
-        # Päivitä intent
-        update_intent(user_id)
+        if any(is_similar(reply, p) for p in prev_replies):
+            retry = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages + [{"role": "system", "content": "Answer completely differently than before."}],
+                temperature=0.95,
+                max_tokens=180,
+                frequency_penalty=1.0
+            )
+            reply = retry.choices[0].message.content.strip()
+
+        prev_replies.append(reply)
 
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -441,7 +466,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.0 (Intent Engine + tuhma dominoiva persoona) on nyt käynnissä")
+    print("✅ Megan 4.1 (English system prompt + always Finnish replies) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
