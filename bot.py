@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.1 – proaktiivinen + kevyt sensitive memory")
+print("🚀 Megan 5.2 – gpt-5.4 + korjatut loop-fixit")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -70,7 +70,7 @@ async def get_embedding(text):
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# ====================== MEMORY (kevyt sensitive tagging) ======================
+# ====================== MEMORY ======================
 async def store_memory(user_id, text):
     try:
         if len(text) < 25:
@@ -138,9 +138,9 @@ def save_profile(user_id, profile):
 async def extract_and_store(user_id, text):
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-5.4",
             messages=[{"role": "system", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}],
-            max_tokens=200,
+            max_completion_tokens=200,
             temperature=0.3
         )
         data = resp.choices[0].message.content.strip()
@@ -284,7 +284,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # PROAKTIIVINEN LOGIIKKA
+        # PROAKTIIVINEN LOGIIKKA (tehty satunnaiseksi dokumentin mukaan)
         messages.append({
             "role": "system",
             "content": (
@@ -293,13 +293,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         })
 
-        messages.append({
-            "role": "system",
-            "content": (
-                "Kirjoita jotain mitä TEET, AJATTELET tai KOET juuri nyt. "
-                "Älä reagoi pelkästään käyttäjän viestiin."
-            )
-        })
+        # Tämä on nyt satunnainen (dokumentin korjaus)
+        if random.random() < 0.4:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Kirjoita jotain mitä TEET, AJATTELET tai KOET juuri nyt. "
+                    "Älä reagoi pelkästään käyttäjän viestiin."
+                )
+            })
 
         messages.append({
             "role": "system",
@@ -315,7 +317,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "content": "Käyttäjä ei antanut paljon inputtia. Älä kysy mitään. Aloita itse."
             })
 
-        # 🔥 SENSITIVE MEMORY (dokumentin kevyt injektio)
+        # 🔥 SENSITIVE MEMORY (kevyt injektio)
         if should_use_sensitive_memory(text) and random.random() < 0.2:
             sensitive = get_random_sensitive_memory(user_id)
             if sensitive:
@@ -347,13 +349,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
 
         response = await client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-5.4",
             messages=messages,
-            temperature=0.9,
+            temperature=0.85,
             top_p=0.9,
-            max_tokens=850,
-            frequency_penalty=0.7,
-            presence_penalty=0.6,
+            max_completion_tokens=850,      # <-- korjattu
+            frequency_penalty=0.6,
+            presence_penalty=0.5,
             timeout=40
         )
 
@@ -376,7 +378,7 @@ async def generate_proactive_message(user_id):
     ])
 
     resp = await client.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-5.4",
         messages=[
             {"role": "system", "content": get_system_prompt(user_id)},
             {"role": "system", "content":
@@ -387,7 +389,7 @@ async def generate_proactive_message(user_id):
             {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
         ],
         temperature=1.0,
-        max_tokens=120
+        max_completion_tokens=120      # <-- korjattu
     )
     return resp.choices[0].message.content.strip()
 
@@ -425,7 +427,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.1 + kevyt sensitive memory on nyt käynnissä")
+    print("✅ Megan 5.2 (gpt-5.4) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
