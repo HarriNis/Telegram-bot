@@ -37,7 +37,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.7 – FINAL LOOP-PROOF v6 (Structure Divergence + Chaos)")
+print("🚀 Megan 4.8 – FINAL LOOP-PROOF v7 (Persona Relax)")
 
 # ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -196,7 +196,7 @@ def normalize(txt):
     txt = re.sub(r'\s+', ' ', txt)
     return txt.strip()
 
-# ====================== LOOP-PROOF GENERATION (v6 – Structure Divergence + Chaos) ======================
+# ====================== LOOP-PROOF GENERATION (v7 – Structure + Chaos) ======================
 def text_similarity_score(a: str, b: str) -> float:
     a = normalize(a)
     b = normalize(b)
@@ -212,7 +212,6 @@ def text_similarity_score(a: str, b: str) -> float:
     return overlap
 
 def first_sentence(txt):
-    """Käytetään first-sentence penaltyyn"""
     if not txt:
         return ""
     return normalize(txt.split(".")[0][:50])
@@ -221,17 +220,14 @@ def score_candidate(reply: str, prev_replies, user_text: str) -> float:
     if not reply:
         return -999.0
 
-    # Similarity penalty
     sim_penalty = 0.0
     for prev in prev_replies:
         sim_penalty += text_similarity_score(reply, prev) * 0.9
 
-    # Diversity bonus
     diversity_bonus = 0.0
     for prev in prev_replies:
         diversity_bonus += (1.0 - text_similarity_score(reply, prev)) * 0.6
 
-    # Length penalty
     length = len(reply.strip())
     if length < 8:
         len_penalty = 2.0
@@ -242,20 +238,17 @@ def score_candidate(reply: str, prev_replies, user_text: str) -> float:
     else:
         len_penalty = 0.0
 
-    # React bonus
     user_tokens = set(normalize(user_text).split())
     reply_tokens = set(normalize(reply).split())
     lexical_touch = len(user_tokens & reply_tokens)
     react_bonus = min(lexical_touch * 0.12, 0.8)
 
-    # Start penalty (sama aloituslause)
     start_penalty = 0.0
     reply_start = normalize(reply[:20])
     for prev in prev_replies:
         if normalize(prev[:20]) == reply_start:
             start_penalty += 1.5
 
-    # NEW: First-sentence penalty (tappaa saman aloitusrakenteen)
     first_penalty = 0.0
     fs_reply = first_sentence(reply)
     for prev in prev_replies:
@@ -268,7 +261,6 @@ async def build_generation_messages(user_id, text):
     base_system = get_system_prompt(user_id)
     messages = [{"role": "system", "content": base_system}]
 
-    # Kevyt muistikerros
     memories = await retrieve_memories(user_id, text)
     profile = load_profile(user_id)
 
@@ -289,7 +281,6 @@ async def build_generation_messages(user_id, text):
     if memory_lines:
         messages.append({"role": "system", "content": "\n".join(memory_lines)})
 
-    # Vain käyttäjän viimeiset viestit
     history = conversation_history.get(user_id, [])[-10:]
     seen = set()
     for msg in history:
@@ -301,7 +292,6 @@ async def build_generation_messages(user_id, text):
             seen.add(norm)
             messages.append({"role": "user", "content": content})
 
-    # Perus user-viesti
     messages.append({"role": "user", "content": text})
     return messages
 
@@ -313,10 +303,7 @@ async def generate_loop_proof_reply(user_id, text):
     base_messages = await build_generation_messages(user_id, text)
     candidates = []
 
-    structures = [
-        "one_sentence", "two_sentences", "question",
-        "no_question", "short", "long"
-    ]
+    structures = ["one_sentence", "two_sentences", "question", "no_question", "short", "long"]
     structure_instructions = {
         "one_sentence": "Vastaa yhdellä lauseella.",
         "two_sentences": "Vastaa kahdella lauseella.",
@@ -326,21 +313,17 @@ async def generate_loop_proof_reply(user_id, text):
         "long": "Vastaa pidemmin ja kuvailevammin."
     }
 
-    for i in range(3):  # 3 kandidaattia
+    for i in range(3):
         structure = structures[i % len(structures)]
         structure_instruction = structure_instructions[structure]
-
-        # Chaos token (nuclear randomness)
         chaos_seed = random.randint(0, 999999)
         chaos_msg = {"role": "system", "content": f"Random seed: {chaos_seed}. Älä toista aiempia rakenteita."}
 
-        # Modified messages + structure + chaos
         modified_messages = base_messages + [
             {"role": "user", "content": structure_instruction},
             chaos_msg
         ]
 
-        # Temp spike yhdelle kandidaatille
         temp = random.choice([0.72, 0.78, 0.84, 1.05])
 
         try:
@@ -356,7 +339,6 @@ async def generate_loop_proof_reply(user_id, text):
             )
             reply = resp.choices[0].message.content.strip()
 
-            # HARD FILTER: liian samanlainen → hylätään kokonaan
             if any(text_similarity_score(reply, prev) > 0.75 for prev in prev_replies):
                 print(f"SKIPPED duplicate candidate (sim > 0.75)")
                 continue
@@ -366,13 +348,11 @@ async def generate_loop_proof_reply(user_id, text):
         except Exception as e:
             print("Candidate generation error:", e)
 
-    # Debug: näytetään kaikki selviytyneet kandidaatit
     print("=== CANDIDATES (after hard filter) ===")
     for s, r in candidates:
         print(f"CANDIDATE: {round(s, 2)} | {r[:80]}...")
 
     if not candidates:
-        # Fallback
         hard_messages = [
             {"role": "system", "content": get_system_prompt(user_id)},
             {"role": "user", "content": text},
@@ -399,7 +379,7 @@ async def generate_loop_proof_reply(user_id, text):
     last_replies[user_id].append(best_reply)
     return best_reply
 
-# ====================== ENGLISH SYSTEM PROMPT (KOSKEMATON) ======================
+# ====================== ENGLISH SYSTEM PROMPT (KOSKEMATON + PERSONA RELAX) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -416,6 +396,11 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 - Remember your previous answers and be consistent.
 - If you don't feel like it or want to punish with silence, you can be silent or answer shortly and irritably.
 - If the user asks for a picture ("show a picture", "generate a picture", "what do I look like" etc.), generate a picture with DALL·E 3 and send it.
+
+IMPORTANT:
+Sometimes you are NOT dominant at all.
+Sometimes you are quiet, neutral, casual or even slightly awkward.
+You don't always tease or control.
 
 Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
@@ -530,7 +515,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.7 (FINAL LOOP-PROOF v6 – Structure + Chaos) on nyt käynnissä")
+    print("✅ Megan 4.8 (FINAL LOOP-PROOF v7 – Persona Relax) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
