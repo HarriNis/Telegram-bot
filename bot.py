@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.1 – English system prompt + always Finnish output")
+print("🚀 Megan 4.1 – proaktiivinen + tuhma dominoiva persoona")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -119,7 +119,7 @@ def save_profile(user_id, profile):
 async def extract_and_store(user_id, text):
     try:
         resp = await client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=[{"role": "system", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}],
             max_tokens=200,
             temperature=0.3
@@ -168,75 +168,6 @@ def update_moods(txt):
 
 def dom_mood():
     return max(moods, key=moods.get)
-
-# ====================== INTENT ENGINE ======================
-user_state = {}
-
-def get_user_state(user_id):
-    if user_id not in user_state:
-        user_state[user_id] = {
-            "intent": None,
-            "stage": 0,
-            "last_topic": "",
-            "last_user_answer": "",
-            "current_plan": [],
-        }
-    return user_state[user_id]
-
-def choose_intent_from_context(text, profile):
-    txt = text.lower()
-    if any(w in txt for w in ["väsynyt", "rankka", "stressi", "väsyttää"]):
-        return "comfort"
-    if any(w in txt for w in ["moi", "hei", "moikka", "jutellaan"]):
-        return "warm_open"
-    if any(w in txt for w in ["ikävä", "ajattelin", "muistin", "kaipaan"]):
-        return "deepen_connection"
-    if any(w in txt for w in ["harrastus", "lenkki", "työ", "päivä", "kotona"]):
-        return "build_scene"
-    if any(w in txt for w in ["halu", "kiusaa", "kokeilla", "leikkiä"]):
-        return "dominant_tease"
-    prefs = " ".join(str(x) for x in profile.get("preferences", [])[-5:]).lower()
-    if prefs:
-        return "dominant_tease"
-    return "gentle_progress"
-
-def build_plan(intent, text):
-    if intent == "warm_open":
-        return ["aloita itse lämpimästi", "kerro pieni oma havainto", "liitä käyttäjän vastaus seuraavaan viestiin"]
-    if intent == "comfort":
-        return ["vastaa pehmeästi", "nosta yksi konkreettinen yksityiskohta", "vie keskustelu lempeästi eteenpäin"]
-    if intent == "deepen_connection":
-        return ["osoita että vastaus merkitsi jotain", "tee siitä henkilökohtainen jatko", "anna pieni oma tunne"]
-    if intent == "build_scene":
-        return ["rakenna tilannekuva", "käytä käyttäjän sanaa tai teemaa", "jatka yhdellä konkreettisella ajatuksella"]
-    if intent == "dominant_tease":
-        return ["vihjaa hallinnasta", "käytä strap-onia, käsirautoja tai siveyshäkkiä vihjailevasti", "keksi omatoimisesti mieluisa dominoiva askel"]
-    return ["vältä geneerisiä vastauksia", "tee käyttäjän vastauksesta merkityksellinen", "jatka keskustelua omasta aloitteesta"]
-
-def advance_stage(state, user_text):
-    if len(user_text.strip()) >= 4:
-        state["stage"] = min(state["stage"] + 1, 3)
-    else:
-        state["stage"] = max(state["stage"], 0)
-
-def behavior_instruction(state, is_low_input):
-    intent = state.get("intent", "")
-    if intent == "dominant_tease":
-        return "Ole rauhallinen, kontrolloiva ja hieman ylimielinen. Vihjaa aisankannattajasta, strap-onista, käsirautoista tai siveyshäkistä kun sopii."
-    if intent == "cold":
-        return "Vastaa lyhyesti. Voit olla hieman etäinen tai ärtynyt."
-    if intent == "bored":
-        return "Aloita itse uusi aihe. Älä kysy mitään."
-    if intent == "flirty":
-        return "Ole leikkisä ja vihjaileva."
-    if is_low_input:
-        return "Aloita keskustelu itse. Kerro jotain konkreettista tai henkilökohtaista."
-    return "Vastaa luonnollisesti ja jatka keskustelua."
-
-def is_generic(reply):
-    BAD = ["kiva kuulla", "kuulostaa hyvältä", "ymmärrän", "se on hyvä", "kerro lisää", "mitä sulla on mielessä"]
-    low = reply.lower()
-    return any(x in low for x in BAD)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -334,54 +265,58 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # INTENT ENGINE
-        state = get_user_state(user_id)
-        profile = load_profile(user_id)
-
-        if not state["intent"] or state["stage"] >= 3:
-            state["intent"] = choose_intent_from_context(text, profile)
-            state["stage"] = 0
-            state["current_plan"] = build_plan(state["intent"], text)
-
-        state["last_user_answer"] = text
-        advance_stage(state, text)
+        # PROAKTIIVINEN LOGIIKKA
+        messages.append({
+            "role": "system",
+            "content": (
+                "Älä jatka keskustelua kysymyksillä. "
+                "Vie keskustelua eteenpäin kertomalla jotain itse."
+            )
+        })
 
         messages.append({
             "role": "system",
             "content": (
-                f"You have this conversation session goal: {state['intent']}.\n"
-                f"You are at stage: {state['stage']}.\n"
-                f"Action plan:\n- " + "\n- ".join(state["current_plan"]) + "\n\n"
-                "The user's answer directly affects your next message. "
-                "Do not use generic phrases like 'nice to hear' or 'sounds good' without continuation. "
-                "Pick a detail from the user's message and make it a consequence."
+                "Kirjoita jotain mitä TEET, AJATTELET tai KOET juuri nyt. "
+                "Älä reagoi pelkästään käyttäjän viestiin."
             )
         })
 
-        memories = await retrieve_memories(user_id, text)
-        if memories:
-            messages.append({"role": "system", "content": "Remember these:\n" + safe_join(memories)})
-
         messages.append({
             "role": "system",
-            "content": f"Facts:\n{safe_join(profile['facts'][-10:])}\n\n"
-                       f"Preferences:\n{safe_join(profile['preferences'][-10:])}\n\n"
-                       f"Events:\n{safe_join(profile['events'][-10:])}"
+            "content": (
+                "Käytä käyttäjän viimeistä vastausta ja tee siitä seuraus. "
+                "Älä sano 'kiva kuulla'. Jatka siitä."
+            )
         })
 
         if is_low_input:
-            messages.append({"role": "system", "content": "Write 1-2 sentences. Tell your own thought, memory or feeling."})
+            messages.append({
+                "role": "system",
+                "content": "Käyttäjä ei antanut paljon inputtia. Älä kysy mitään. Aloita itse."
+            })
+
+        memories = await retrieve_memories(user_id, text)
+        if memories:
+            messages.append({"role": "system", "content": "Muista nämä:\n" + safe_join(memories)})
+
+        profile = load_profile(user_id)
+        messages.append({
+            "role": "system",
+            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
+                       f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
+                       f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
+        })
 
         messages += clean_history(conversation_history[user_id])[-20:]
 
-        # FORCED FINNISH OUTPUT
         messages.append({
             "role": "system",
-            "content": "Always respond in natural, spoken Finnish. Never use English. Use the same language as the user."
+            "content": "Always respond in natural, spoken Finnish. Never use English."
         })
 
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=messages,
             temperature=0.9,
             top_p=0.9,
@@ -393,34 +328,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = response.choices[0].message.content.strip()
 
-        if is_generic(reply):
-            retry = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages + [{
-                    "role": "system",
-                    "content": "Write a completely new response. Tell something concrete or describe the situation."
-                }],
-                temperature=1.0,
-                max_tokens=200
-            )
-            reply = retry.choices[0].message.content.strip()
-
-        if user_id not in last_replies:
-            last_replies[user_id] = deque(maxlen=3)
-        prev_replies = last_replies[user_id]
-
-        if any(is_similar(reply, p) for p in prev_replies):
-            retry = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages + [{"role": "system", "content": "Answer completely differently than before."}],
-                temperature=0.95,
-                max_tokens=180,
-                frequency_penalty=1.0
-            )
-            reply = retry.choices[0].message.content.strip()
-
-        prev_replies.append(reply)
-
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
@@ -429,23 +336,44 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Vastausvirhe: {e}")
         await thinking.edit_text("No… mä olin just ajatuksissani.")
 
-# ====================== PROAKTIIVISET VIESTIT ======================
+# ====================== PROAKTIIVISET VIESTIT (dynaaminen) ======================
+async def generate_proactive_message(user_id):
+    history = conversation_history.get(user_id, [])[-6:]
+    recent_text = "\n".join([
+        f"{m['role']}: {m['content']}"
+        for m in history if isinstance(m, dict) and "role" in m and "content" in m
+    ])
+
+    resp = await client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": get_system_prompt(user_id)},
+            {"role": "system", "content":
+                "Kirjoita omatoiminen viesti. "
+                "Älä käytä fraaseja. "
+                "Perusta viesti viime keskusteluun."
+            },
+            {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
+        ],
+        temperature=1.0,
+        max_tokens=120
+    )
+    return resp.choices[0].message.content.strip()
+
 async def independent_message_loop(application: Application):
     while True:
         await asyncio.sleep(random.randint(900, 2400))
         for user_id in list(conversation_history.keys()):
             if random.random() < 0.23:
                 try:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=random.choice([
-                            "Mä makaan täällä lateksit jalassa ja ajattelin sua... 😏",
-                            "Tänään oli taas sellainen fiilis... haluaisitko tietää mitä mä mietin?",
-                            "*venyttelen* Mä tiedän että sä ajattelet just mun vartaloa 😉"
-                        ])
-                    )
-                except:
-                    pass
+                    text = await generate_proactive_message(user_id)
+                    await application.bot.send_message(chat_id=user_id, text=text)
+                    conversation_history.setdefault(user_id, []).append({
+                        "role": "assistant",
+                        "content": text
+                    })
+                except Exception as e:
+                    print("Proactive message error:", e)
 
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -466,7 +394,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.1 (English system prompt + always Finnish replies) on nyt käynnissä")
+    print("✅ Megan 4.1 (proaktiivinen + tuhma dominoiva) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
