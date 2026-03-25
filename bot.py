@@ -37,7 +37,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.6 – LOOP-PROOF v5 (Diversity Scoring Fix)")
+print("🚀 Megan 4.7 – FINAL LOOP-PROOF v6 (Structure Divergence + Chaos)")
 
 # ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -196,7 +196,7 @@ def normalize(txt):
     txt = re.sub(r'\s+', ' ', txt)
     return txt.strip()
 
-# ====================== LOOP-PROOF GENERATION (v5 – Fixed Scoring) ======================
+# ====================== LOOP-PROOF GENERATION (v6 – Structure Divergence + Chaos) ======================
 def text_similarity_score(a: str, b: str) -> float:
     a = normalize(a)
     b = normalize(b)
@@ -211,21 +211,27 @@ def text_similarity_score(a: str, b: str) -> float:
     overlap = len(a_words & b_words) / max(1, len(a_words | b_words))
     return overlap
 
+def first_sentence(txt):
+    """Käytetään first-sentence penaltyyn"""
+    if not txt:
+        return ""
+    return normalize(txt.split(".")[0][:50])
+
 def score_candidate(reply: str, prev_replies, user_text: str) -> float:
     if not reply:
         return -999.0
 
-    # 1. Similarity penalty (laskettu radikaalisti 2.5 → 0.9)
+    # Similarity penalty
     sim_penalty = 0.0
     for prev in prev_replies:
         sim_penalty += text_similarity_score(reply, prev) * 0.9
 
-    # 2. Diversity bonus (uusi – palkitsee erilaisuuden)
+    # Diversity bonus
     diversity_bonus = 0.0
     for prev in prev_replies:
         diversity_bonus += (1.0 - text_similarity_score(reply, prev)) * 0.6
 
-    # 3. Length penalty
+    # Length penalty
     length = len(reply.strip())
     if length < 8:
         len_penalty = 2.0
@@ -236,26 +242,33 @@ def score_candidate(reply: str, prev_replies, user_text: str) -> float:
     else:
         len_penalty = 0.0
 
-    # 4. React bonus (lexical touch)
+    # React bonus
     user_tokens = set(normalize(user_text).split())
     reply_tokens = set(normalize(reply).split())
     lexical_touch = len(user_tokens & reply_tokens)
     react_bonus = min(lexical_touch * 0.12, 0.8)
 
-    # 5. Start penalty (sama aloituslause → rangaistus)
+    # Start penalty (sama aloituslause)
     start_penalty = 0.0
     reply_start = normalize(reply[:20])
     for prev in prev_replies:
         if normalize(prev[:20]) == reply_start:
             start_penalty += 1.5
 
-    return 1.0 + react_bonus + diversity_bonus - sim_penalty - len_penalty - start_penalty
+    # NEW: First-sentence penalty (tappaa saman aloitusrakenteen)
+    first_penalty = 0.0
+    fs_reply = first_sentence(reply)
+    for prev in prev_replies:
+        if first_sentence(prev) == fs_reply:
+            first_penalty += 2.0
+
+    return 1.0 + react_bonus + diversity_bonus - sim_penalty - len_penalty - start_penalty - first_penalty
 
 async def build_generation_messages(user_id, text):
     base_system = get_system_prompt(user_id)
     messages = [{"role": "system", "content": base_system}]
 
-    # Kevyt muistikerros (yksi system-viesti)
+    # Kevyt muistikerros
     memories = await retrieve_memories(user_id, text)
     profile = load_profile(user_id)
 
@@ -274,10 +287,7 @@ async def build_generation_messages(user_id, text):
         memory_lines.extend(profile["events"][-6:])
 
     if memory_lines:
-        messages.append({
-            "role": "system",
-            "content": "\n".join(memory_lines)
-        })
+        messages.append({"role": "system", "content": "\n".join(memory_lines)})
 
     # Vain käyttäjän viimeiset viestit
     history = conversation_history.get(user_id, [])[-10:]
@@ -291,20 +301,8 @@ async def build_generation_messages(user_id, text):
             seen.add(norm)
             messages.append({"role": "user", "content": content})
 
-    # Rakenteellinen vaihtelu
-    structure_hint = random.choice([
-        "Vastaa yhdellä napakalla kappaleella.",
-        "Vastaa kahdella lyhyellä virkkeellä.",
-        "Vastaa ensin reaktiolla ja sitten yhdellä jatkokysymyksellä.",
-        "Vastaa ilman kysymystä.",
-        "Vastaa vähän pehmeämmin kuin tavallisesti.",
-        "Vastaa vähän kylmemmin kuin tavallisesti."
-    ])
-    messages.append({
-        "role": "user",
-        "content": f"{text}\n\nLisäohje: {structure_hint}"
-    })
-
+    # Perus user-viesti
+    messages.append({"role": "user", "content": text})
     return messages
 
 async def generate_loop_proof_reply(user_id, text):
@@ -314,14 +312,42 @@ async def generate_loop_proof_reply(user_id, text):
 
     base_messages = await build_generation_messages(user_id, text)
     candidates = []
-    candidate_count = 3
 
-    for _ in range(candidate_count):
+    structures = [
+        "one_sentence", "two_sentences", "question",
+        "no_question", "short", "long"
+    ]
+    structure_instructions = {
+        "one_sentence": "Vastaa yhdellä lauseella.",
+        "two_sentences": "Vastaa kahdella lauseella.",
+        "question": "Vastaa kysymyksellä.",
+        "no_question": "Älä esitä kysymyksiä.",
+        "short": "Vastaa hyvin lyhyesti.",
+        "long": "Vastaa pidemmin ja kuvailevammin."
+    }
+
+    for i in range(3):  # 3 kandidaattia
+        structure = structures[i % len(structures)]
+        structure_instruction = structure_instructions[structure]
+
+        # Chaos token (nuclear randomness)
+        chaos_seed = random.randint(0, 999999)
+        chaos_msg = {"role": "system", "content": f"Random seed: {chaos_seed}. Älä toista aiempia rakenteita."}
+
+        # Modified messages + structure + chaos
+        modified_messages = base_messages + [
+            {"role": "user", "content": structure_instruction},
+            chaos_msg
+        ]
+
+        # Temp spike yhdelle kandidaatille
+        temp = random.choice([0.72, 0.78, 0.84, 1.05])
+
         try:
             resp = await client.chat.completions.create(
                 model="gpt-5.4",
-                messages=base_messages,
-                temperature=random.choice([0.72, 0.78, 0.84]),
+                messages=modified_messages,
+                temperature=temp,
                 top_p=random.choice([0.82, 0.88, 0.92]),
                 max_tokens=260,
                 frequency_penalty=0.25,
@@ -329,17 +355,24 @@ async def generate_loop_proof_reply(user_id, text):
                 timeout=40
             )
             reply = resp.choices[0].message.content.strip()
+
+            # HARD FILTER: liian samanlainen → hylätään kokonaan
+            if any(text_similarity_score(reply, prev) > 0.75 for prev in prev_replies):
+                print(f"SKIPPED duplicate candidate (sim > 0.75)")
+                continue
+
             score = score_candidate(reply, prev_replies, text)
             candidates.append((score, reply))
         except Exception as e:
             print("Candidate generation error:", e)
 
-    # Debug: näytetään kaikki kandidaatit konsolissa
-    print("=== CANDIDATES ===")
+    # Debug: näytetään kaikki selviytyneet kandidaatit
+    print("=== CANDIDATES (after hard filter) ===")
     for s, r in candidates:
         print(f"CANDIDATE: {round(s, 2)} | {r[:80]}...")
 
     if not candidates:
+        # Fallback
         hard_messages = [
             {"role": "system", "content": get_system_prompt(user_id)},
             {"role": "user", "content": text},
@@ -348,11 +381,11 @@ async def generate_loop_proof_reply(user_id, text):
         resp = await client.chat.completions.create(
             model="gpt-5.4",
             messages=hard_messages,
-            temperature=0.8,
+            temperature=0.9,
             top_p=0.9,
             max_tokens=220,
-            frequency_penalty=0.2,
-            presence_penalty=0.1,
+            frequency_penalty=0.3,
+            presence_penalty=0.2,
             timeout=40
         )
         reply = resp.choices[0].message.content.strip()
@@ -360,36 +393,8 @@ async def generate_loop_proof_reply(user_id, text):
         return reply
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-
-    # Random valinta top-2:sta (ei aina paras)
     top_k = candidates[:2]
     best_reply = random.choice(top_k)[1]
-
-    # Jos silti liian samanlainen → hard reset
-    if any(text_similarity_score(best_reply, prev) > 0.55 for prev in prev_replies):
-        try:
-            hard_reset_messages = [
-                {"role": "system", "content": get_system_prompt(user_id)},
-                {"role": "user", "content": text},
-                {"role": "system", "content": "Vastaa samaan asiaan eri rytmillä ja eri sanavalinnoilla, mutta pysy omana itsenäsi."}
-            ]
-            resp = await client.chat.completions.create(
-                model="gpt-5.4",
-                messages=hard_reset_messages,
-                temperature=0.9,
-                top_p=0.9,
-                max_tokens=220,
-                frequency_penalty=0.3,
-                presence_penalty=0.2,
-                timeout=40
-            )
-            retry_reply = resp.choices[0].message.content.strip()
-            retry_score = score_candidate(retry_reply, prev_replies, text)
-            best_score = score_candidate(best_reply, prev_replies, text)
-            if retry_score > best_score:
-                best_reply = retry_reply
-        except Exception as e:
-            print("Hard reset retry error:", e)
 
     last_replies[user_id].append(best_reply)
     return best_reply
@@ -463,7 +468,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        # Loop-proof generation (uusi scoring)
         reply = await generate_loop_proof_reply(user_id, text)
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -526,7 +530,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.6 (LOOP-PROOF v5 – Diversity Scoring) on nyt käynnissä")
+    print("✅ Megan 4.7 (FINAL LOOP-PROOF v6 – Structure + Chaos) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
