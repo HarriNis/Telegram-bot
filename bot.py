@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 3.1 – Personality Engine + tuhma dominoiva persoona")
+print("🚀 Megan 4.0 – Intent Engine + tuhma dominoiva persoona")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -169,19 +169,38 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== PERSONALITY ENGINE ======================
-def get_behavior_state():
-    mood = dom_mood()
-    if mood == "kiukku":
-        return "cold"
-    elif mood == "halu":
-        return "flirty"
-    elif mood == "sadismi":
-        return "dominant"
-    elif mood == "tylsistyminen":
-        return "bored"
-    else:
-        return "normal"
+# ====================== INTENT ENGINE ======================
+user_state = {}
+
+def get_or_create_intent(user_id):
+    if user_id not in user_state:
+        user_state[user_id] = {
+            "intent": random.choice([
+                "haluaa kiusoitella",
+                "haluaa testata käyttäjää",
+                "haluaa vietellä hitaasti",
+                "haluaa nähdä reaktion",
+                "on hieman mustasukkainen",
+                "haluaa hallita tilannetta"
+            ]),
+            "stage": 0
+        }
+    return user_state[user_id]
+
+def update_intent(user_id):
+    if user_id not in user_state:
+        return
+    state = user_state[user_id]
+    if random.random() < 0.3:
+        state["stage"] += 1
+    if state["stage"] > 3:
+        state["intent"] = random.choice([
+            "haluaa kiusoitella",
+            "haluaa kontrolloida tilannetta",
+            "haluaa saada käyttäjän paljastamaan jotain",
+            "haluaa viedä tilannetta eteenpäin"
+        ])
+        state["stage"] = 0
 
 def behavior_instruction(state, is_low_input):
     if state == "cold":
@@ -191,7 +210,7 @@ def behavior_instruction(state, is_low_input):
     if state == "flirty":
         return "Ole leikkisä ja vihjaileva. Älä sano asioita suoraan, vaan kiusoittele."
     if state == "dominant":
-        return "Ole rauhallinen, kontrolloiva ja hieman ylimielinen. Vihjaa aisankannattajasta, strap-onista, käsirautoista tai siveyshäkistä kun sopii. Keksi omia mieluisia dominoivia juttuja."
+        return "Ole rauhallinen, kontrolloiva ja hieman ylimielinen. Vihjaa aisankannattajasta, strap-onista, käsirautoista tai siveyshäkistä kun sopii."
     if is_low_input:
         return "Aloita keskustelu itse. Kerro jotain konkreettista tai henkilökohtaista."
     return "Vastaa luonnollisesti ja jatka keskustelua."
@@ -305,10 +324,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # Personality Engine
-        state = get_behavior_state()
-        instruction = behavior_instruction(state, is_low_input)
+        # INTENT ENGINE
+        state = get_or_create_intent(user_id)
+        instruction = behavior_instruction(state["intent"], is_low_input)
         messages.insert(1, {"role": "system", "content": instruction})
+
+        # Positiivinen ohjaus
+        messages.insert(2, {
+            "role": "system",
+            "content": (
+                "Vastaa luonnollisesti ja jatka keskustelua omasta aloitteestasi. "
+                "Kerro konkreettisia ajatuksia, muistoja tai havaintoja."
+            )
+        })
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -324,6 +352,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
                        f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
         })
+
+        if is_low_input:
+            messages.append({
+                "role": "system",
+                "content": "Kirjoita 1-2 lausetta. Kerro oma ajatus, muisto tai tunne."
+            })
 
         messages += clean_history(conversation_history[user_id])[-20:]
 
@@ -358,6 +392,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = retry.choices[0].message.content.strip()
 
         prev_replies.append(reply)
+
+        # Päivitä intent
+        update_intent(user_id)
 
         await thinking.edit_text(reply)
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -404,7 +441,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 3.1 (Personality Engine + tuhma dominoiva) on nyt käynnissä")
+    print("✅ Megan 4.0 (Intent Engine + tuhma dominoiva persoona) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
