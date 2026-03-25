@@ -38,13 +38,14 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.2 – LOOP-FIX versio (2026)")
+print("🚀 Megan 4.3 – LOOP-FIX v2 (2026)")
 
-# ====================== DATABASE ======================
+# ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
+# Luodaan taulu (vanha versio ilman type-saraketta)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +56,17 @@ CREATE TABLE IF NOT EXISTS memories (
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
+
+# MIGRATION: Lisätään 'type' sarake jos sitä ei ole (vanha DB)
+cursor.execute("PRAGMA table_info(memories)")
+columns = [info[1] for info in cursor.fetchall()]
+if 'type' not in columns:
+    print("🛠️ Migrating database: adding missing 'type' column...")
+    cursor.execute("ALTER TABLE memories ADD COLUMN type TEXT DEFAULT 'general'")
+    # Asetetaan vanhoille riveille default-arvo
+    cursor.execute("UPDATE memories SET type = 'general' WHERE type IS NULL")
+    conn.commit()
+    print("✅ Migration complete")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS profiles (
@@ -108,11 +120,15 @@ async def retrieve_memories(user_id, query, limit=5):
         return []
 
 def get_sensitive_memories(user_id):
-    cursor.execute(
-        "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
-        (str(user_id),)
-    )
-    return [row[0] for row in cursor.fetchall()]
+    try:
+        cursor.execute(
+            "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
+            (str(user_id),)
+        )
+        return [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        print("Sensitive memory error (should not happen anymore):", e)
+        return []
 
 # ====================== PROFILE ======================
 def load_profile(user_id):
@@ -242,7 +258,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== MEGAN_CHAT (korjattu LOOP-FIX) ======================
+# ====================== MEGAN_CHAT (4.3 LOOP-FIX v2) ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -262,59 +278,36 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_moods(text)
     recent_user.append(text)
-    is_low_input = len(text.strip()) < 8
 
     try:
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
-        # Historia hallintaan (tärkein loopinesto)
         if len(conversation_history[user_id]) > 30:
             conversation_history[user_id] = conversation_history[user_id][-30:]
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        # Yksi pääsystem-prompt
         base_system = get_system_prompt(user_id)
         messages = [{"role": "system", "content": base_system}]
 
-        # Sensitive-muistot (koskematon)
+        # Sensitive-muistot
         sensitive = get_sensitive_memories(user_id)
         if sensitive:
             if dom_mood() == "kiukku":
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "You know the user's deepest fantasies, shame points and vulnerabilities. "
-                        "Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\n"
-                        "Known sensitive points:\n" + "\n".join(sensitive)
-                    )
-                })
+                messages.append({"role": "system", "content": "You know the user's deepest fantasies, shame points and vulnerabilities. Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\nKnown sensitive points:\n" + "\n".join(sensitive)})
             else:
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "You know the user's emotional weak points and private desires. "
-                        "You may sometimes reference them subtly in a teasing, controlling or dominant way. "
-                        "Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\n"
-                        "Known sensitive points:\n" + "\n".join(sensitive)
-                    )
-                })
+                messages.append({"role": "system", "content": "You know the user's emotional weak points and private desires. You may sometimes reference them subtly in a teasing, controlling or dominant way. Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\nKnown sensitive points:\n" + "\n".join(sensitive)})
 
-        # Muistit + profiili yhdessä
+        # Muistit + profiili
         memories = await retrieve_memories(user_id, text)
         profile = load_profile(user_id)
-
         context_info = "Muista nämä asiat käyttäjästä:\n"
         if memories:
             context_info += "Viimeaikaiset muistot:\n" + "\n".join(memories) + "\n\n"
-        context_info += (
-            f"Faktat:\n" + "\n".join(profile['facts'][-12:]) + "\n\n"
-            f"Mieltymykset:\n" + "\n".join(profile['preferences'][-12:]) + "\n\n"
-            f"Tapahtumat:\n" + "\n".join(profile['events'][-12:])
-        )
+        context_info += f"Faktat:\n" + "\n".join(profile['facts'][-12:]) + "\n\nMieltymykset:\n" + "\n".join(profile['preferences'][-12:]) + "\n\nTapahtumat:\n" + "\n".join(profile['events'][-12:])
         messages.append({"role": "system", "content": context_info})
 
-        # Historia (12 viimeistä viestiä, puhdistettuna duplikaateista) → VAIN USER-VIESTIT (tärkein loopinesto)
+        # 🔴 VAIN USER-VIESTIT historiasta (tämä on kriittisin loopinesto)
         history = conversation_history[user_id][-12:]
         seen = set()
         clean_history = []
@@ -324,75 +317,62 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if norm not in seen:
                 seen.add(norm)
                 clean_history.append(msg)
-
         messages += [m for m in clean_history if m["role"] == "user"]
 
-        # 🔪 RIKO PERSONA joka viestissä (style breaker)
+        # 🔥 VAHVEMPI STYLE BREAK joka kerta
         style_break = random.choice([
-            "Puhu lyhyesti ja töksähtäen.",
-            "Puhu hitaasti ja pehmeästi.",
-            "Ole täysin välinpitämätön.",
-            "Ole leikkisä ja kevyt.",
-            "Ole outo ja arvaamaton.",
-            "Älä johda tilannetta, vaan reagoi."
+            "Puhu lyhyesti ja töksähtäen, melkein ärtyneesti.",
+            "Puhu hitaasti, pehmeästi ja viettelevästi.",
+            "Ole täysin välinpitämätön ja kylmä.",
+            "Ole leikkisä, kevyt ja nauraen.",
+            "Ole outo, arvaamaton ja hiukan hullu.",
+            "Älä johda, vaan reagoi vain siihen mitä käyttäjä sanoi.",
+            "Ole rakastava mutta samalla hallitseva.",
+            "Ole ärtynyt ja väsynyt."
         ])
-        messages.append({
-            "role": "system",
-            "content": f"Vaihda täysin tyyliä tähän viestiin: {style_break}"
-        })
+        messages.append({"role": "system", "content": f"VAIHDA TÄYSIN TYYLIÄ tähän viestiin: {style_break} Älä käytä samaa rytmiä tai aloitusta kuin koskaan ennen."})
 
-        # 🧨 Anti-style anchor
-        messages.append({
-            "role": "system",
-            "content": "Älä käytä samaa rytmiä tai rakennetta kuin edellisessä vastauksessasi. Vältä erityisesti samanlaisia aloituksia."
-        })
+        # Extra anti-style
+        messages.append({"role": "system", "content": "Älä koskaan aloita viestiä samalla tavalla kuin edellisissä vastauksissasi. Vaihda rakennetta, pituutta ja sävyä radikaalisti."})
 
         # Viimeinen ohje
-        messages.append({
-            "role": "system",
-            "content": "Vastaa aina luonnollisella, puhemaisella suomella. Älä toista samoja lauseita tai fraaseja kuin aiemmissa vastauksissasi. Vaihda sävyä ja rakennetta. Ole johdonmukainen persoonasi kanssa."
-        })
+        messages.append({"role": "system", "content": "Vastaa aina luonnollisella, puhemaisella suomella. Ole johdonmukainen persoonasi kanssa mutta vaihda tyyliä jatkuvasti."})
 
-        # Kutsu GPT-5.4:llä vahvemmilla anti-repetition -arvoilla (laskettu temperature + top_p)
+        # Kutsu (entistä tiukempi anti-loop)
         response = await client.chat.completions.create(
             model="gpt-5.4",
             messages=messages,
-            temperature=0.75,
-            top_p=0.85,
+            temperature=0.70,
+            top_p=0.82,
             max_tokens=850,
-            frequency_penalty=0.75,
-            presence_penalty=0.45,
+            frequency_penalty=1.15,      # nostettu
+            presence_penalty=0.65,
             timeout=45
         )
 
         reply = response.choices[0].message.content.strip()
 
-        # Anti-repetition + retry tarvittaessa
+        # Anti-repetition + hard retry
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=5)
         prev_replies = last_replies[user_id]
 
         if any(is_similar(reply, p) for p in prev_replies):
-            # Hard reset retry: vain base system + user messages
-            retry_messages = [messages[0]] + [
-                m for m in messages if m["role"] == "user"
-            ]
-            retry_messages.append({
-                "role": "system",
-                "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."
-            })
+            print(f"🔄 Anti-loop trigger: reply too similar → hard reset")
+            # Täysi reset retryyn
+            retry_messages = [messages[0]] + [m for m in messages if m["role"] == "user"]
+            retry_messages.append({"role": "system", "content": "Unohda kokonaan aiempi keskustelun tyyli. Vastaa TÄYSIN eri tavalla, eri sanoilla, eri rytmillä. Älä toista mitään fraasia."})
             retry = await client.chat.completions.create(
                 model="gpt-5.4",
                 messages=retry_messages,
-                temperature=0.75,
-                top_p=0.85,
-                max_tokens=300,
-                frequency_penalty=1.0,
-                presence_penalty=0.7
+                temperature=0.85,
+                top_p=0.88,
+                max_tokens=400,
+                frequency_penalty=1.4,
+                presence_penalty=0.9
             )
             reply = retry.choices[0].message.content.strip()
 
-        # Tallennetaan vastaus aina
         conversation_history[user_id].append({"role": "assistant", "content": reply})
         prev_replies.append(reply)
 
@@ -407,25 +387,21 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "hmm… mä mietin vielä."
         ]))
 
-# ====================== PROAKTIIVINEN VIESTI (korjattu) ======================
+# ====================== PROAKTIIVINEN VIESTI ======================
 async def generate_proactive_message(user_id):
     history = conversation_history.get(user_id, [])[-10:]
-    recent_text = "\n".join([
-        f"{m['role']}: {m['content']}"
-        for m in history if isinstance(m, dict) and "role" in m and "content" in m
-    ])
+    recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "content" in m])
     resp = await client.chat.completions.create(
         model="gpt-5.4",
         messages=[
             {"role": "system", "content": get_system_prompt(user_id)},
-            {"role": "system", "content": "Kirjoita lyhyt, luonnollinen omatoiminen viesti. Älä käytä vanhoja fraaseja. Perusta viesti viimeiseen keskusteluun. Vaihda aina sävyä."},
+            {"role": "system", "content": "Kirjoita lyhyt, luonnollinen omatoiminen viesti. Vaihda aina sävyä radikaalisti. Älä käytä vanhoja fraaseja."},
             {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
         ],
-        temperature=1.05,
+        temperature=1.1,
         max_tokens=140
     )
-    text = resp.choices[0].message.content.strip()
-    return text
+    return resp.choices[0].message.content.strip()
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def independent_message_loop(application: Application):
@@ -458,7 +434,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.2 (LOOP-FIX) on nyt käynnissä")
+    print("✅ Megan 4.3 (LOOP-FIX v2) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
