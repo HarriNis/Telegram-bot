@@ -37,7 +37,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.5 – LOOP-PROOF v4 (Candidate Scoring)")
+print("🚀 Megan 4.6 – LOOP-PROOF v5 (Diversity Scoring Fix)")
 
 # ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -196,7 +196,7 @@ def normalize(txt):
     txt = re.sub(r'\s+', ' ', txt)
     return txt.strip()
 
-# ====================== LOOP-PROOF GENERATION (uusi ydin) ======================
+# ====================== LOOP-PROOF GENERATION (v5 – Fixed Scoring) ======================
 def text_similarity_score(a: str, b: str) -> float:
     a = normalize(a)
     b = normalize(b)
@@ -214,9 +214,18 @@ def text_similarity_score(a: str, b: str) -> float:
 def score_candidate(reply: str, prev_replies, user_text: str) -> float:
     if not reply:
         return -999.0
+
+    # 1. Similarity penalty (laskettu radikaalisti 2.5 → 0.9)
     sim_penalty = 0.0
     for prev in prev_replies:
-        sim_penalty += text_similarity_score(reply, prev) * 2.5
+        sim_penalty += text_similarity_score(reply, prev) * 0.9
+
+    # 2. Diversity bonus (uusi – palkitsee erilaisuuden)
+    diversity_bonus = 0.0
+    for prev in prev_replies:
+        diversity_bonus += (1.0 - text_similarity_score(reply, prev)) * 0.6
+
+    # 3. Length penalty
     length = len(reply.strip())
     if length < 8:
         len_penalty = 2.0
@@ -226,11 +235,21 @@ def score_candidate(reply: str, prev_replies, user_text: str) -> float:
         len_penalty = 1.2
     else:
         len_penalty = 0.0
+
+    # 4. React bonus (lexical touch)
     user_tokens = set(normalize(user_text).split())
     reply_tokens = set(normalize(reply).split())
     lexical_touch = len(user_tokens & reply_tokens)
     react_bonus = min(lexical_touch * 0.12, 0.8)
-    return 1.0 + react_bonus - sim_penalty - len_penalty
+
+    # 5. Start penalty (sama aloituslause → rangaistus)
+    start_penalty = 0.0
+    reply_start = normalize(reply[:20])
+    for prev in prev_replies:
+        if normalize(prev[:20]) == reply_start:
+            start_penalty += 1.5
+
+    return 1.0 + react_bonus + diversity_bonus - sim_penalty - len_penalty - start_penalty
 
 async def build_generation_messages(user_id, text):
     base_system = get_system_prompt(user_id)
@@ -260,7 +279,7 @@ async def build_generation_messages(user_id, text):
             "content": "\n".join(memory_lines)
         })
 
-    # Vain käyttäjän viimeiset viestit (ei omia vastauksia historiassa)
+    # Vain käyttäjän viimeiset viestit
     history = conversation_history.get(user_id, [])[-10:]
     seen = set()
     for msg in history:
@@ -272,7 +291,7 @@ async def build_generation_messages(user_id, text):
             seen.add(norm)
             messages.append({"role": "user", "content": content})
 
-    # Rakenteellinen vaihtelu (lisätty käyttäjän viestiin)
+    # Rakenteellinen vaihtelu
     structure_hint = random.choice([
         "Vastaa yhdellä napakalla kappaleella.",
         "Vastaa kahdella lyhyellä virkkeellä.",
@@ -315,6 +334,11 @@ async def generate_loop_proof_reply(user_id, text):
         except Exception as e:
             print("Candidate generation error:", e)
 
+    # Debug: näytetään kaikki kandidaatit konsolissa
+    print("=== CANDIDATES ===")
+    for s, r in candidates:
+        print(f"CANDIDATE: {round(s, 2)} | {r[:80]}...")
+
     if not candidates:
         hard_messages = [
             {"role": "system", "content": get_system_prompt(user_id)},
@@ -336,8 +360,12 @@ async def generate_loop_proof_reply(user_id, text):
         return reply
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-    best_reply = candidates[0][1]
 
+    # Random valinta top-2:sta (ei aina paras)
+    top_k = candidates[:2]
+    best_reply = random.choice(top_k)[1]
+
+    # Jos silti liian samanlainen → hard reset
     if any(text_similarity_score(best_reply, prev) > 0.55 for prev in prev_replies):
         try:
             hard_reset_messages = [
@@ -406,7 +434,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== MEGAN_CHAT (uusi yksinkertainen versio) ======================
+# ====================== MEGAN_CHAT ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -435,7 +463,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        # Loop-proof generation (3 kandidaattia + pisteytys)
+        # Loop-proof generation (uusi scoring)
         reply = await generate_loop_proof_reply(user_id, text)
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -498,7 +526,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.5 (LOOP-PROOF v4 – Candidate Scoring) on nyt käynnissä")
+    print("✅ Megan 4.6 (LOOP-PROOF v5 – Diversity Scoring) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
