@@ -4,7 +4,6 @@ import json
 import asyncio
 import threading
 import time
-import copy
 import re
 from collections import deque
 from io import BytesIO
@@ -38,7 +37,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.4 – LOOP-FIX v3 (Behavioral Attractor Killer)")
+print("🚀 Megan 4.5 – LOOP-PROOF v4 (Candidate Scoring)")
 
 # ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -79,7 +78,10 @@ async def get_embedding(text):
     return np.array(resp.data[0].embedding, dtype=np.float32)
 
 def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
 
 # ====================== MEMORY ======================
 async def store_memory(user_id, text):
@@ -114,17 +116,6 @@ async def retrieve_memories(user_id, query, limit=5):
         return [c for _, c in scored[:limit]]
     except Exception as e:
         print("Memory retrieval error:", e)
-        return []
-
-def get_sensitive_memories(user_id):
-    try:
-        cursor.execute(
-            "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
-            (str(user_id),)
-        )
-        return [row[0] for row in cursor.fetchall()]
-    except Exception as e:
-        print("Sensitive memory error:", e)
         return []
 
 # ====================== PROFILE ======================
@@ -205,15 +196,175 @@ def normalize(txt):
     txt = re.sub(r'\s+', ' ', txt)
     return txt.strip()
 
-def is_similar(a, b):
+# ====================== LOOP-PROOF GENERATION (uusi ydin) ======================
+def text_similarity_score(a: str, b: str) -> float:
     a = normalize(a)
     b = normalize(b)
+    if not a or not b:
+        return 0.0
     if a in b or b in a:
-        return True
+        return 1.0
     a_words = set(a.split())
     b_words = set(b.split())
-    overlap = len(a_words & b_words) / max(1, len(a_words))
-    return overlap > 0.6
+    if not a_words or not b_words:
+        return 0.0
+    overlap = len(a_words & b_words) / max(1, len(a_words | b_words))
+    return overlap
+
+def score_candidate(reply: str, prev_replies, user_text: str) -> float:
+    if not reply:
+        return -999.0
+    sim_penalty = 0.0
+    for prev in prev_replies:
+        sim_penalty += text_similarity_score(reply, prev) * 2.5
+    length = len(reply.strip())
+    if length < 8:
+        len_penalty = 2.0
+    elif length < 20:
+        len_penalty = 0.8
+    elif length > 500:
+        len_penalty = 1.2
+    else:
+        len_penalty = 0.0
+    user_tokens = set(normalize(user_text).split())
+    reply_tokens = set(normalize(reply).split())
+    lexical_touch = len(user_tokens & reply_tokens)
+    react_bonus = min(lexical_touch * 0.12, 0.8)
+    return 1.0 + react_bonus - sim_penalty - len_penalty
+
+async def build_generation_messages(user_id, text):
+    base_system = get_system_prompt(user_id)
+    messages = [{"role": "system", "content": base_system}]
+
+    # Kevyt muistikerros (yksi system-viesti)
+    memories = await retrieve_memories(user_id, text)
+    profile = load_profile(user_id)
+
+    memory_lines = []
+    if memories:
+        memory_lines.append("Muista nämä käyttäjästä:")
+        memory_lines.extend(memories[:4])
+    if profile["facts"][-6:]:
+        memory_lines.append("\nFaktat:")
+        memory_lines.extend(profile["facts"][-6:])
+    if profile["preferences"][-6:]:
+        memory_lines.append("\nMieltymykset:")
+        memory_lines.extend(profile["preferences"][-6:])
+    if profile["events"][-6:]:
+        memory_lines.append("\nTapahtumat:")
+        memory_lines.extend(profile["events"][-6:])
+
+    if memory_lines:
+        messages.append({
+            "role": "system",
+            "content": "\n".join(memory_lines)
+        })
+
+    # Vain käyttäjän viimeiset viestit (ei omia vastauksia historiassa)
+    history = conversation_history.get(user_id, [])[-10:]
+    seen = set()
+    for msg in history:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "").strip()
+        norm = normalize(content)
+        if content and norm not in seen:
+            seen.add(norm)
+            messages.append({"role": "user", "content": content})
+
+    # Rakenteellinen vaihtelu (lisätty käyttäjän viestiin)
+    structure_hint = random.choice([
+        "Vastaa yhdellä napakalla kappaleella.",
+        "Vastaa kahdella lyhyellä virkkeellä.",
+        "Vastaa ensin reaktiolla ja sitten yhdellä jatkokysymyksellä.",
+        "Vastaa ilman kysymystä.",
+        "Vastaa vähän pehmeämmin kuin tavallisesti.",
+        "Vastaa vähän kylmemmin kuin tavallisesti."
+    ])
+    messages.append({
+        "role": "user",
+        "content": f"{text}\n\nLisäohje: {structure_hint}"
+    })
+
+    return messages
+
+async def generate_loop_proof_reply(user_id, text):
+    if user_id not in last_replies:
+        last_replies[user_id] = deque(maxlen=6)
+    prev_replies = list(last_replies[user_id])
+
+    base_messages = await build_generation_messages(user_id, text)
+    candidates = []
+    candidate_count = 3
+
+    for _ in range(candidate_count):
+        try:
+            resp = await client.chat.completions.create(
+                model="gpt-5.4",
+                messages=base_messages,
+                temperature=random.choice([0.72, 0.78, 0.84]),
+                top_p=random.choice([0.82, 0.88, 0.92]),
+                max_tokens=260,
+                frequency_penalty=0.25,
+                presence_penalty=0.15,
+                timeout=40
+            )
+            reply = resp.choices[0].message.content.strip()
+            score = score_candidate(reply, prev_replies, text)
+            candidates.append((score, reply))
+        except Exception as e:
+            print("Candidate generation error:", e)
+
+    if not candidates:
+        hard_messages = [
+            {"role": "system", "content": get_system_prompt(user_id)},
+            {"role": "user", "content": text},
+            {"role": "system", "content": "Vastaa luonnollisesti, suoraan ja eri sanoin kuin viime kerroilla."}
+        ]
+        resp = await client.chat.completions.create(
+            model="gpt-5.4",
+            messages=hard_messages,
+            temperature=0.8,
+            top_p=0.9,
+            max_tokens=220,
+            frequency_penalty=0.2,
+            presence_penalty=0.1,
+            timeout=40
+        )
+        reply = resp.choices[0].message.content.strip()
+        last_replies[user_id].append(reply)
+        return reply
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_reply = candidates[0][1]
+
+    if any(text_similarity_score(best_reply, prev) > 0.55 for prev in prev_replies):
+        try:
+            hard_reset_messages = [
+                {"role": "system", "content": get_system_prompt(user_id)},
+                {"role": "user", "content": text},
+                {"role": "system", "content": "Vastaa samaan asiaan eri rytmillä ja eri sanavalinnoilla, mutta pysy omana itsenäsi."}
+            ]
+            resp = await client.chat.completions.create(
+                model="gpt-5.4",
+                messages=hard_reset_messages,
+                temperature=0.9,
+                top_p=0.9,
+                max_tokens=220,
+                frequency_penalty=0.3,
+                presence_penalty=0.2,
+                timeout=40
+            )
+            retry_reply = resp.choices[0].message.content.strip()
+            retry_score = score_candidate(retry_reply, prev_replies, text)
+            best_score = score_candidate(best_reply, prev_replies, text)
+            if retry_score > best_score:
+                best_reply = retry_reply
+        except Exception as e:
+            print("Hard reset retry error:", e)
+
+    last_replies[user_id].append(best_reply)
+    return best_reply
 
 # ====================== ENGLISH SYSTEM PROMPT (KOSKEMATON) ======================
 def get_system_prompt(user_id):
@@ -255,7 +406,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== MEGAN_CHAT (4.4 – Behavioral Attractor Killer) ======================
+# ====================== MEGAN_CHAT (uusi yksinkertainen versio) ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -284,102 +435,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        # Base system + persona variation (rikkoo attractorin)
-        base_system = get_system_prompt(user_id)
-        persona_variation = random.choice([
-            "Olet tänään rauhallisempi ja vähemmän dominoiva.",
-            "Olet tänään ärtynyt ja lyhytsanainen.",
-            "Olet tänään leikkisä etkä ota tilannetta vakavasti.",
-            "Olet tänään epävarma ja hieman pehmeämpi.",
-            "Olet tänään täysin välinpitämätön."
-        ])
-        base_system += f"\n\nTemporary personality shift: {persona_variation}"
-        messages = [{"role": "system", "content": base_system}]
-
-        # Sensitive-muistot (pidetään, koska ei poistettu pysyvästi)
-        sensitive = get_sensitive_memories(user_id)
-        if sensitive:
-            if dom_mood() == "kiukku":
-                messages.append({"role": "system", "content": "You know the user's deepest fantasies, shame points and vulnerabilities. Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\nKnown sensitive points:\n" + "\n".join(sensitive)})
-            else:
-                messages.append({"role": "system", "content": "You know the user's emotional weak points and private desires. You may sometimes reference them subtly in a teasing, controlling or dominant way. Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\nKnown sensitive points:\n" + "\n".join(sensitive)})
-
-        # Muistit + profiili → nyt USER-viestinä (poistettu system-layer)
-        memories = await retrieve_memories(user_id, text)
-        profile = load_profile(user_id)
-        context_info = "Muista nämä asiat käyttäjästä:\n"
-        if memories:
-            context_info += "Viimeaikaiset muistot:\n" + "\n".join(memories) + "\n\n"
-        context_info += f"Faktat:\n" + "\n".join(profile['facts'][-12:]) + "\n\nMieltymykset:\n" + "\n".join(profile['preferences'][-12:]) + "\n\nTapahtumat:\n" + "\n".join(profile['events'][-12:])
-        messages.append({"role": "user", "content": context_info})
-
-        # Vain user-viestit historiasta
-        history = conversation_history[user_id][-12:]
-        seen = set()
-        clean_history = []
-        for msg in history:
-            content = msg.get("content", "")
-            norm = normalize(content)
-            if norm not in seen:
-                seen.add(norm)
-                clean_history.append(msg)
-        messages += [m for m in clean_history if m["role"] == "user"]
-
-        # 🔥 Style-break nyt USER-viestinä (tärkein muutos)
-        style_break = random.choice([
-            "Puhu lyhyesti ja töksähtäen, melkein ärtyneesti.",
-            "Puhu hitaasti, pehmeästi ja viettelevästi.",
-            "Ole täysin välinpitämätön ja kylmä.",
-            "Ole leikkisä, kevyt ja nauraen.",
-            "Ole outo, arvaamaton ja hiukan hullu.",
-            "Älä johda, vaan reagoi vain siihen mitä käyttäjä sanoi.",
-            "Ole rakastava mutta samalla hallitseva.",
-            "Ole ärtynyt ja väsynyt."
-        ])
-        messages.append({"role": "user", "content": f"[INTERNAL NOTE: {style_break} Älä käytä samaa rytmiä tai aloitusta kuin koskaan ennen.]"})
-
-        # Anti-pattern breaker
-        messages.append({"role": "system", "content": "Vältä erityisesti seuraavia: hidas viettely, vihjaileva kontrolli, samanlainen rytmi kuin ennen. Vaihda rakennetta radikaalisti."})
-
-        # Kutsu GPT
-        response = await client.chat.completions.create(
-            model="gpt-5.4",
-            messages=messages,
-            temperature=0.68,
-            top_p=0.80,
-            max_tokens=850,
-            frequency_penalty=1.25,
-            presence_penalty=0.70,
-            timeout=45
-        )
-
-        reply = response.choices[0].message.content.strip()
-
-        # Anti-repetition + HARD reset retry
-        if user_id not in last_replies:
-            last_replies[user_id] = deque(maxlen=5)
-        prev_replies = last_replies[user_id]
-
-        if any(is_similar(reply, p) for p in prev_replies):
-            print(f"🔄 Anti-loop trigger: similarity detected → HARD reset retry")
-            retry_messages = [
-                {"role": "system", "content": get_system_prompt(user_id)},
-                {"role": "user", "content": text},
-                {"role": "system", "content": "Vastaa täysin eri tavalla kuin koskaan aiemmin. Älä käytä samaa tyyliä, rytmiä tai fraaseja. Riko kaikki aiemmat patternit."}
-            ]
-            retry = await client.chat.completions.create(
-                model="gpt-5.4",
-                messages=retry_messages,
-                temperature=0.85,
-                top_p=0.88,
-                max_tokens=400,
-                frequency_penalty=1.5,
-                presence_penalty=0.95
-            )
-            reply = retry.choices[0].message.content.strip()
+        # Loop-proof generation (3 kandidaattia + pisteytys)
+        reply = await generate_loop_proof_reply(user_id, text)
 
         conversation_history[user_id].append({"role": "assistant", "content": reply})
-        prev_replies.append(reply)
 
         await thinking.edit_text(reply)
         await extract_and_store(user_id, text)
@@ -439,7 +498,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.4 (LOOP-FIX v3 – Attractor Killer) on nyt käynnissä")
+    print("✅ Megan 4.5 (LOOP-PROOF v4 – Candidate Scoring) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
