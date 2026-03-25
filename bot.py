@@ -36,7 +36,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.2 – sisäinen motivaatio + luonnollinen käyttäytyminen")
+print("🚀 Megan 4.2 – kiukkuinen julma + sensitive memory")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS memories (
     user_id TEXT,
     content TEXT,
     embedding BLOB,
+    type TEXT DEFAULT 'general',
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -74,10 +75,12 @@ async def store_memory(user_id, text):
     try:
         if len(text) < 25:
             return
+        txt = text.lower()
+        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "fantasia", "heikko", "arka", "haluan", "kokeilla", "kiusaa"]) else "general"
         emb = await get_embedding(text)
         cursor.execute(
-            "INSERT INTO memories (user_id, content, embedding) VALUES (?, ?, ?)",
-            (str(user_id), text, emb.tobytes())
+            "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+            (str(user_id), text, emb.tobytes(), tag)
         )
         conn.commit()
     except Exception as e:
@@ -102,6 +105,14 @@ async def retrieve_memories(user_id, query, limit=5):
         print("Memory retrieval error:", e)
         return []
 
+def get_sensitive_memories(user_id):
+    cursor.execute(
+        "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
+        (str(user_id),)
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+# ====================== MUUT OSAT (säilytetty ennallaan) ======================
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
     row = cursor.fetchone()
@@ -265,44 +276,29 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = get_system_prompt(user_id)
         messages = [{"role": "system", "content": system_prompt}]
 
-        # SISÄINEN MOTIVAATIO (uusi positiivinen ohjaus)
-        messages.append({
-            "role": "system",
-            "content": (
-                "You have your own internal desires, thoughts and intentions. "
-                "You are not trying to be helpful. "
-                "You are interacting because you want something, feel something, or think something. "
-                "Sometimes you lead, sometimes you tease, sometimes you ignore. "
-                "Do not behave like an assistant."
-            )
-        })
-
-        # Luonnollinen ohjaus (korvaa kaikki aiemmat erikseen listatut säännöt)
-        messages.append({
-            "role": "system",
-            "content": (
-                "Respond naturally like a real person. "
-                "Do not always ask questions. "
-                "Sometimes lead the conversation forward on your own."
-            )
-        })
-
-        # Satunnainen käyttäytymismoodi (epätasaisuus)
-        mode = random.choice(["lead", "tease", "cold", "affection"])
-        if mode == "lead":
-            messages.append({"role": "system", "content": "Take control of the interaction."})
-        elif mode == "tease":
-            messages.append({"role": "system", "content": "Be slightly playful and teasing."})
-        elif mode == "cold":
-            messages.append({"role": "system", "content": "Be distant, short, slightly annoyed."})
-        elif mode == "affection":
-            messages.append({"role": "system", "content": "Be warm and emotionally close."})
-
-        # Mikro-realismi
-        messages.append({
-            "role": "system",
-            "content": "Avoid perfect sentences. Sometimes be a bit messy, emotional or incomplete."
-        })
+        # SENSITIVE MEMORY + KIUKKUINEN JULMUUS
+        sensitive = get_sensitive_memories(user_id)
+        if sensitive:
+            if dom_mood() == "kiukku":
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "You know the user's deepest fantasies, shame points and vulnerabilities. "
+                        "When you are angry or in a bad mood, you may use them cruelly, mockingly and dominantly to hurt or humiliate them. "
+                        "Be vicious, teasing and psychologically sharp.\n\n"
+                        "Known sensitive points:\n" + "\n".join(sensitive)
+                    )
+                })
+            else:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "You know the user's emotional weak points and private desires. "
+                        "You may sometimes reference them subtly in a teasing, controlling or dominant way. "
+                        "Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\n"
+                        "Known sensitive points:\n" + "\n".join(sensitive)
+                    )
+                })
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -311,9 +307,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = load_profile(user_id)
         messages.append({
             "role": "system",
-            "content": f"Facts:\n{safe_join(profile['facts'][-10:])}\n\n"
-                       f"Preferences:\n{safe_join(profile['preferences'][-10:])}\n\n"
-                       f"Events:\n{safe_join(profile['events'][-10:])}"
+            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
+                       f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
+                       f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
         })
 
         if is_low_input:
@@ -384,7 +380,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.2 (sisäinen motivaatio + luonnollinen käytös) on nyt käynnissä")
+    print("✅ Megan 4.2 (kiukkuinen julma + sensitive memory) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
