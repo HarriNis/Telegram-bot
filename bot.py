@@ -70,7 +70,7 @@ async def get_embedding(text):
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-# ====================== MEMORY ======================
+# ====================== MEMORY (sensitive tagging) ======================
 async def store_memory(user_id, text):
     try:
         if len(text) < 25:
@@ -112,7 +112,7 @@ def get_sensitive_memories(user_id):
     )
     return [row[0] for row in cursor.fetchall()]
 
-# ====================== MUUT OSAT (säilytetty ennallaan) ======================
+# ====================== MUUT OSAT ======================
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
     row = cursor.fetchone()
