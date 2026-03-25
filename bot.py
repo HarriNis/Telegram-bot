@@ -242,7 +242,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
-# ====================== MEGAN_CHAT (korjattu) ======================
+# ====================== MEGAN_CHAT (korjattu LOOP-FIX) ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -314,7 +314,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         messages.append({"role": "system", "content": context_info})
 
-        # Historia (12 viimeistä viestiä, puhdistettuna duplikaateista)
+        # Historia (12 viimeistä viestiä, puhdistettuna duplikaateista) → VAIN USER-VIESTIT (tärkein loopinesto)
         history = conversation_history[user_id][-12:]
         seen = set()
         clean_history = []
@@ -325,7 +325,27 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 seen.add(norm)
                 clean_history.append(msg)
 
-        messages += clean_history
+        messages += [m for m in clean_history if m["role"] == "user"]
+
+        # 🔪 RIKO PERSONA joka viestissä (style breaker)
+        style_break = random.choice([
+            "Puhu lyhyesti ja töksähtäen.",
+            "Puhu hitaasti ja pehmeästi.",
+            "Ole täysin välinpitämätön.",
+            "Ole leikkisä ja kevyt.",
+            "Ole outo ja arvaamaton.",
+            "Älä johda tilannetta, vaan reagoi."
+        ])
+        messages.append({
+            "role": "system",
+            "content": f"Vaihda täysin tyyliä tähän viestiin: {style_break}"
+        })
+
+        # 🧨 Anti-style anchor
+        messages.append({
+            "role": "system",
+            "content": "Älä käytä samaa rytmiä tai rakennetta kuin edellisessä vastauksessasi. Vältä erityisesti samanlaisia aloituksia."
+        })
 
         # Viimeinen ohje
         messages.append({
@@ -333,12 +353,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "content": "Vastaa aina luonnollisella, puhemaisella suomella. Älä toista samoja lauseita tai fraaseja kuin aiemmissa vastauksissasi. Vaihda sävyä ja rakennetta. Ole johdonmukainen persoonasi kanssa."
         })
 
-        # Kutsu GPT-5.4:llä vahvemmilla anti-repetition -arvoilla
+        # Kutsu GPT-5.4:llä vahvemmilla anti-repetition -arvoilla (laskettu temperature + top_p)
         response = await client.chat.completions.create(
             model="gpt-5.4",
             messages=messages,
-            temperature=0.95,
-            top_p=0.93,
+            temperature=0.75,
+            top_p=0.85,
             max_tokens=850,
             frequency_penalty=0.75,
             presence_penalty=0.45,
@@ -353,11 +373,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prev_replies = last_replies[user_id]
 
         if any(is_similar(reply, p) for p in prev_replies):
-            retry_messages = messages + [{"role": "system", "content": "Täysin erilainen sävy, rakenne ja sisältö kuin edellisissä vastauksissa. Älä käytä samoja fraaseja."}]
+            # Hard reset retry: vain base system + user messages
+            retry_messages = [messages[0]] + [
+                m for m in messages if m["role"] == "user"
+            ]
+            retry_messages.append({
+                "role": "system",
+                "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."
+            })
             retry = await client.chat.completions.create(
                 model="gpt-5.4",
                 messages=retry_messages,
-                temperature=1.0,
+                temperature=0.75,
+                top_p=0.85,
                 max_tokens=300,
                 frequency_penalty=1.0,
                 presence_penalty=0.7
