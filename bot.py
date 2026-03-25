@@ -37,7 +37,7 @@ if not OPENAI_API_KEY:
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 4.8 – FINAL LOOP-PROOF v7 (Persona Relax)")
+print("🚀 Megan 4.9 – FINAL LOOP-PROOF v8 (Persona Relax + Smart Sensitive)")
 
 # ====================== DATABASE + MIGRATION ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -118,6 +118,23 @@ async def retrieve_memories(user_id, query, limit=5):
         print("Memory retrieval error:", e)
         return []
 
+def get_sensitive_memories(user_id):
+    try:
+        cursor.execute(
+            "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
+            (str(user_id),)
+        )
+        return [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        print("Sensitive memory error:", e)
+        return []
+
+# ====================== UUSI MINIMIKORJAUS: SMART SENSITIVE (ChatGPT:n ehdotus) ======================
+def should_use_sensitive_memory(text: str) -> bool:
+    t = text.lower()
+    triggers = ["pelkään", "häpeän", "nolottaa", "fantasia", "heikko", "arka", "haluan", "kokeilla", "kiusaa"]
+    return any(w in t for w in triggers)
+
 # ====================== PROFILE ======================
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
@@ -196,7 +213,7 @@ def normalize(txt):
     txt = re.sub(r'\s+', ' ', txt)
     return txt.strip()
 
-# ====================== LOOP-PROOF GENERATION (v7 – Structure + Chaos) ======================
+# ====================== LOOP-PROOF GENERATION (v8) ======================
 def text_similarity_score(a: str, b: str) -> float:
     a = normalize(a)
     b = normalize(b)
@@ -261,6 +278,7 @@ async def build_generation_messages(user_id, text):
     base_system = get_system_prompt(user_id)
     messages = [{"role": "system", "content": base_system}]
 
+    # Kevyt muistikerros
     memories = await retrieve_memories(user_id, text)
     profile = load_profile(user_id)
 
@@ -281,6 +299,7 @@ async def build_generation_messages(user_id, text):
     if memory_lines:
         messages.append({"role": "system", "content": "\n".join(memory_lines)})
 
+    # Vain käyttäjän viimeiset viestit
     history = conversation_history.get(user_id, [])[-10:]
     seen = set()
     for msg in history:
@@ -291,6 +310,15 @@ async def build_generation_messages(user_id, text):
         if content and norm not in seen:
             seen.add(norm)
             messages.append({"role": "user", "content": content})
+
+    # SMART SENSITIVE MEMORY (ChatGPT:n minimikorjaus)
+    if should_use_sensitive_memory(text):
+        sensitive = get_sensitive_memories(user_id)
+        if sensitive:
+            messages.append({
+                "role": "user",
+                "content": "Taustatietoa käyttäjästä (käytä luonnollisesti jos sopii):\n" + "\n".join(sensitive)
+            })
 
     messages.append({"role": "user", "content": text})
     return messages
@@ -515,7 +543,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 4.8 (FINAL LOOP-PROOF v7 – Persona Relax) on nyt käynnissä")
+    print("✅ Megan 4.9 (FINAL LOOP-PROOF v8 – Persona Relax + Smart Sensitive) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
