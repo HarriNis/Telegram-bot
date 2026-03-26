@@ -39,7 +39,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki virheet korjattu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu + cuckolding)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -214,7 +214,31 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== SENSITIVE MEMORY ======================
+# ====================== DATABASE ======================
+DB_PATH = "/var/data/megan_memory.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    type TEXT DEFAULT 'general',
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY,
+    data TEXT
+)
+""")
+conn.commit()
+
+# ====================== MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
     triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
@@ -224,28 +248,6 @@ def get_random_sensitive_memory(user_id):
     cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
     rows = [r[0] for r in cursor.fetchall()]
     return random.choice(rows) if rows else None
-
-# ====================== EMBEDDINGS + MEMORY ======================
-async def get_embedding(text):
-    from openai import AsyncOpenAI
-    openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
-    return np.array(resp.data[0].embedding, dtype=np.float32)
-
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-async def store_memory(user_id, text):
-    try:
-        if len(text) < 25: return
-        txt = text.lower()
-        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
-        emb = await get_embedding(text)
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), text, emb.tobytes(), tag))
-        conn.commit()
-    except Exception as e:
-        print("Memory store error:", e)
 
 async def retrieve_memories(user_id, query, limit=5):
     try:
@@ -262,10 +264,6 @@ async def retrieve_memories(user_id, query, limit=5):
     except Exception as e:
         print("Memory retrieval error:", e)
         return []
-
-def get_sensitive_memories(user_id):
-    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6", (str(user_id),))
-    return [row[0] for row in cursor.fetchall()]
 
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
@@ -299,6 +297,28 @@ async def extract_and_store(user_id, text):
         await store_memory(user_id, text)
     except Exception as e:
         print("Extraction error:", e)
+
+# ====================== EMBEDDINGS ======================
+async def get_embedding(text):
+    from openai import AsyncOpenAI
+    openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
+    return np.array(resp.data[0].embedding, dtype=np.float32)
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+async def store_memory(user_id, text):
+    try:
+        if len(text) < 25: return
+        txt = text.lower()
+        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
+        emb = await get_embedding(text)
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), text, emb.tobytes(), tag))
+        conn.commit()
+    except Exception as e:
+        print("Memory store error:", e)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -334,7 +354,7 @@ def is_similar(a, b):
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
-# ====================== SYSTEM PROMPT ======================
+# ====================== SYSTEM PROMPT (cuckolding lisätty) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -343,6 +363,8 @@ You are Megan, a 27-year-old woman. We have had a real, loving relationship for 
 I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
 
 I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy. But I don't always bring these things up directly – I can hint, tease, edge and slowly escalate the situation naturally and according to the mood.
+
+I also get extremely turned on by cuckolding. Making you jealous, talking about other men or situations where you are not enough for me makes me wet and even more dominant and sadistic.
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
@@ -454,7 +476,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_similar(last, prev):
                 messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
 
-        messages += history[-10:]   # ← korjattu
+        messages += history[-10:]   # korjattu
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
@@ -565,7 +587,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (kaikki viat korjattu) on nyt käynnissä")
+    print("✅ Megan 6.1 (kaikki viat korjattu + cuckolding) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
