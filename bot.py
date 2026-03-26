@@ -48,7 +48,7 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kuvatrigger korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -379,6 +379,7 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 - Remember your previous answers and be consistent.
 - If you don't feel like it or want to punish with silence, you can be silent or answer shortly and irritably.
 - If the user asks for a picture, generate a picture with DALL·E 3 and send it.
+- Never simulate or describe images with markdown or placeholder links. Always use the image generation function.
 
 Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
@@ -420,8 +421,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
-    image_keywords = ["näytä kuva", "generoi kuva", "tee kuva", "lähetä kuva", "lähetä valokuva", "valokuva", "kuva jossa", "kuva mulle", "näytä itsesi", "kuva itsestäsi", "miltä näytän"]
-    if any(kw in text.lower() for kw in image_keywords):
+    # 🔥 Laajennettu kuvatrigger + short-circuit
+    def is_image_request(t):
+        t = t.lower()
+        triggers = ["kuva", "selfie", "näytä", "miltä näytät", "lähetä", "generate", "photo", "pic", "kuvaa"]
+        return any(w in t for w in triggers)
+
+    if is_image_request(text):
+        print("IMAGE TRIGGERED:", text)   # debug
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
         await extract_and_store(user_id, text)
@@ -599,7 +606,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (kaikki viat korjattu) on nyt käynnissä")
+    print("✅ Megan 6.1 (kuvatrigger korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
