@@ -16,7 +16,6 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
-import aiohttp
 import sqlite3
 import numpy as np
 
@@ -48,7 +47,7 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Cinematic Narration Mode)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (hierarkkinen muisti + pakollinen konteksti)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -225,7 +224,7 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== DATABASE + MEMORY ======================
+# ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -249,6 +248,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
+# ====================== MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
     triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
@@ -259,7 +259,7 @@ def get_random_sensitive_memory(user_id):
     rows = [r[0] for r in cursor.fetchall()]
     return random.choice(rows) if rows else None
 
-async def retrieve_memories(user_id, query, limit=5):
+async def retrieve_memories(user_id, query, limit=8):
     try:
         q_emb = await get_embedding(query)
         cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 100", (str(user_id),))
@@ -267,7 +267,7 @@ async def retrieve_memories(user_id, query, limit=5):
         for content, emb_blob in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             score = cosine_similarity(q_emb, emb)
-            if score > 0.60:
+            if score > 0.45:
                 scored.append((score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
         seen = set()
@@ -338,8 +338,14 @@ async def store_memory(user_id, text):
 
 async def store_dialogue_turn(user_id, user_text, assistant_text):
     try:
-        combined = f"Käyttäjä sanoi: {user_text}\nMegan vastasi: {assistant_text}"
-        await store_memory(user_id, combined)
+        combined = json.dumps({
+            "user": user_text,
+            "assistant": assistant_text,
+            "timestamp": time.time()
+        })
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
+        conn.commit()
     except Exception as e:
         print("Dialogue turn store error:", e)
 
@@ -376,7 +382,6 @@ def is_similar(a, b):
 
 # ====================== SPLIT REPLY (Cinematic mode) ======================
 def split_reply(text):
-    # Erotellaan *kursiiviosat* ja normaali puhe
     parts = re.split(r'(\*.*?\*)', text, flags=re.DOTALL)
     narration = []
     speech = []
@@ -407,7 +412,12 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 - Describe actions, surroundings, inner thoughts and non-verbal things in *italics*
 - Spoken dialogue must be in normal text (no italics)
 - Alternate naturally between description and speech
-- Use *italics* for inner thoughts and actions
+
+**Memory rules:**
+- If something has happened before, you must not contradict it
+- Treat past events as real and fixed
+- Do not ignore relevant past interactions
+- Stay consistent with everything that has been established
 
 **Important rules:**
 - Answer directly what is asked.
@@ -479,7 +489,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = update_persona_mode(user_id)
 
         elapsed_label = get_elapsed_label(user_id)
-        update_continuity_state(user_id, text)
+        state = update_continuity_state(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         system_prompt = (
@@ -491,18 +501,15 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages = []
 
-        if should_use_sensitive_memory(text) and random.random() < 0.25:
-            sensitive = get_random_sensitive_memory(user_id)
-            if sensitive:
-                messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
-
-        if random.random() < 0.05:
-            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
-
+        # Hard memory injection
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.insert(0, {"role": "user", "content": "Important past context that really happened earlier:\n" + safe_join(memories)})
+            messages.insert(0, {
+                "role": "user",
+                "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)
+            })
 
+        # Always include profile
         profile = load_profile(user_id)
         profile_parts = []
         if profile["facts"]:
@@ -512,7 +519,24 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if profile["events"]:
             profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
         if profile_parts:
-            messages.insert(0, {"role": "user", "content": "\n\n".join(profile_parts)})
+            messages.insert(0, {
+                "role": "user",
+                "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)
+            })
+
+        # Continuity anchor
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
+        })
+
+        if should_use_sensitive_memory(text) and random.random() < 0.25:
+            sensitive = get_random_sensitive_memory(user_id)
+            if sensitive:
+                messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
+
+        if random.random() < 0.05:
+            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
 
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
@@ -521,6 +545,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages.append({"role": "user", "content": "Jos aikaa on kulunut selvästi, anna sen näkyä luonnollisesti sävyssä tai viittauksessa, mutta älä selitä sitä mekaanisesti."})
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
+
+        # Subtle reference
+        if random.random() < 0.3:
+            messages.append({
+                "role": "user",
+                "content": "Refer subtly to something that happened earlier without explaining it."
+            })
 
         history = clean_history(conversation_history[user_id])
         if len(history) > 2:
@@ -570,7 +601,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prev_replies.append(reply)
 
-        # ====================== CINEMATIC SPLIT ======================
+        # Cinematic split
         narration, speech = split_reply(reply)
 
         if narration:
@@ -579,7 +610,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if speech:
                 await message.reply_text(speech)
             else:
-                await message.reply_text("…")  # varmuuden vuoksi
+                await message.reply_text("…")
         else:
             await thinking.edit_text(reply)
 
@@ -664,10 +695,10 @@ def main():
 
     async def post_init(app: Application):
         asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration Mode käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Hierarkkinen muisti käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Cinematic Narration) on nyt käynnissä")
+    print("✅ Megan 6.1 (hierarkkinen muisti) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
