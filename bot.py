@@ -37,7 +37,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.3 – Claude Sonnet 4.6 (stable anti-loop)")
+print("🚀 Megan 5.3 – Claude Sonnet 4.6 (temperature/top_p fixed)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -307,12 +307,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        # 🔥 FIX 1 & 5: System prompt oikeaan paikkaan + Finnish-rule systemiin
         system_prompt = get_system_prompt(user_id)
 
         messages = []
 
-        # 🔥 FIX 3: Kevyt sensitive memory
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
             if sensitive:
@@ -321,7 +319,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "content": f"(Muistat jotain tähän liittyvää: {sensitive})"
                 })
 
-        # 🔥 FIX 2: Poistettu mode-blokki, tilalle kevyt satunnainen
         if random.random() < 0.35:
             messages.append({
                 "role": "user",
@@ -343,17 +340,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
-        # 🔥 FIX 4: Historia max 6 viimeistä user-viestiä
         history = clean_history(conversation_history[user_id])
         messages += [m for m in history[-6:] if m["role"] == "user"]
 
-        # Kutsu Claude oikealla tavalla
         response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=850,
-            temperature=0.85,
-            top_p=0.88,
-            system=system_prompt,          # ← TÄRKEIN MUUTOS
+            temperature=0.85,          # top_p poistettu
+            system=system_prompt,
             messages=messages
         )
 
@@ -372,7 +366,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             retry = await client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=180,
-                temperature=0.9,
+                temperature=0.9,       # top_p poistettu
                 system=system_prompt,
                 messages=retry_messages
             )
@@ -420,7 +414,7 @@ async def generate_proactive_message(user_id):
     resp = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=120,
-        temperature=1.0,
+        temperature=1.0,           # top_p poistettu
         system=get_system_prompt(user_id),
         messages=[
             {"role": "user", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
@@ -459,7 +453,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.3 (Claude Sonnet 4.6 – stable) on nyt käynnissä")
+    print("✅ Megan 5.3 (Claude Sonnet 4.6 – temperature fixed) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
