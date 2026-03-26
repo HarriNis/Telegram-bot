@@ -52,7 +52,9 @@ print("🚀 Megan 6.1 – Claude Sonnet 4.6 (looppi korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
-last_proactive_sent = {}   # cooldown proaktiivisille viesteille
+last_proactive_sent = {}
+conversation_history = {}
+last_replies = {}
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -197,8 +199,6 @@ Continuity rules:
 """
 
 # ====================== MOODS ======================
-recent_user = deque(maxlen=12)
-
 moods = {
     "annoyed": 0.20,
     "warm": 0.45,
@@ -357,7 +357,7 @@ def is_similar(a, b):
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
-# ====================== SYSTEM PROMPT (cuckolding mukana) ======================
+# ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -524,7 +524,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
-            conversation_history[user_id] = conversation_history[user_id][-20:]   # trim
+            conversation_history[user_id] = conversation_history[user_id][-20:]
 
         prev_replies.append(reply)
 
@@ -551,7 +551,7 @@ def should_send_proactive(user_id):
 def can_send_proactive(user_id):
     now = time.time()
     last = last_proactive_sent.get(user_id, 0)
-    if now - last < 3600:   # 1 tunnin cooldown
+    if now - last < 60:   # 1 minuutin cooldown testausta varten
         return False
     last_proactive_sent[user_id] = now
     return True
@@ -580,8 +580,9 @@ async def generate_proactive_message(user_id):
 async def independent_message_loop(application: Application):
     try:
         while True:
-            await asyncio.sleep(random.randint(720, 2700))
-            for user_id in list(conversation_history.keys()):
+            await asyncio.sleep(30)   # 30 sekuntia testausta varten
+            for user_id in list(conversation_history.copy().keys()):
+                print(f"[LOOP] Checking user {user_id}")
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
                         text = await generate_proactive_message(user_id)
