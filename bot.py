@@ -48,7 +48,7 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (muistihaku + dialogue-turn)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Cinematic Narration Mode)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -225,7 +225,7 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== DATABASE ======================
+# ====================== DATABASE + MEMORY ======================
 DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -249,7 +249,6 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
-# ====================== MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
     triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
@@ -375,6 +374,21 @@ def is_similar(a, b):
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
+# ====================== SPLIT REPLY (Cinematic mode) ======================
+def split_reply(text):
+    # Erotellaan *kursiiviosat* ja normaali puhe
+    parts = re.split(r'(\*.*?\*)', text, flags=re.DOTALL)
+    narration = []
+    speech = []
+    for p in parts:
+        if p.startswith("*") and p.endswith("*"):
+            narration.append(p.strip())
+        elif p.strip():
+            speech.append(p.strip())
+    narration_str = " ".join(narration).strip()
+    speech_str = " ".join(speech).strip()
+    return narration_str, speech_str
+
 # ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
@@ -389,13 +403,19 @@ I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with 
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
+**Important formatting rule:**
+- Describe actions, surroundings, inner thoughts and non-verbal things in *italics*
+- Spoken dialogue must be in normal text (no italics)
+- Alternate naturally between description and speech
+- Use *italics* for inner thoughts and actions
+
 **Important rules:**
 - Answer directly what is asked.
 - Remember your previous answers and be consistent.
 - If you don't feel like it or want to punish with silence, you can be silent or answer shortly and irritably.
 - If the user asks for a picture, generate a picture with DALL·E 3 and send it.
 
-Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
+Speak in natural, lively spoken Finnish.
 
 Generally respond with 10-20 sentences. When you are angry, excited, jealous or emotional, you can be much more verbose and detailed.
 
@@ -550,9 +570,21 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prev_replies.append(reply)
 
-        await thinking.edit_text(reply)
+        # ====================== CINEMATIC SPLIT ======================
+        narration, speech = split_reply(reply)
+
+        if narration:
+            await thinking.edit_text(narration)
+            await asyncio.sleep(random.uniform(0.6, 1.4))
+            if speech:
+                await message.reply_text(speech)
+            else:
+                await message.reply_text("…")  # varmuuden vuoksi
+        else:
+            await thinking.edit_text(reply)
+
         await extract_and_store(user_id, text)
-        await store_dialogue_turn(user_id, text, reply)   # ← uusi
+        await store_dialogue_turn(user_id, text, reply)
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
@@ -632,10 +664,10 @@ def main():
 
     async def post_init(app: Application):
         asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Persona Spread Engine käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration Mode käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (muistihaku + dialogue-turn) on nyt käynnissä")
+    print("✅ Megan 6.1 (Cinematic Narration) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
