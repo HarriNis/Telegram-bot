@@ -48,10 +48,11 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (mustasukkainen + tuhma persoona)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (looppi korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
+last_proactive_sent = {}   # cooldown proaktiivisille viesteille
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -163,7 +164,7 @@ def update_continuity_state(user_id, text):
         state["scene_locked_until"] = now + 3 * 3600
 
     since_scene_change = now - state["last_scene_change"] if state["last_scene_change"] else 999999
-    if (not forced_scene and now > state.get("scene_locked_until", 0) and since_scene_change > 1800):
+    if (not forced_scene and now > state.get("scene_locked_until", 0) and since_scene_change > 1800 and random.random() < 0.3):
         candidates = {"night": ["home", "bed"], "morning": ["home", "commute", "work"],
                       "day": ["work", "public", "home"], "evening": ["home", "public"],
                       "late_evening": ["home", "bed"]}
@@ -223,8 +224,107 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== DATABASE + MEMORY (ennallaan) ======================
-# (kaikki memory-funktiot ovat mukana kuten edellisessä versiossa)
+# ====================== DATABASE + MEMORY ======================
+DB_PATH = "/var/data/megan_memory.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    type TEXT DEFAULT 'general',
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY,
+    data TEXT
+)
+""")
+conn.commit()
+
+def should_use_sensitive_memory(text: str) -> bool:
+    t = text.lower()
+    triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
+    return any(x in t for x in triggers)
+
+def get_random_sensitive_memory(user_id):
+    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
+    rows = [r[0] for r in cursor.fetchall()]
+    return random.choice(rows) if rows else None
+
+async def retrieve_memories(user_id, query, limit=5):
+    try:
+        q_emb = await get_embedding(query)
+        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50", (str(user_id),))
+        scored = []
+        for content, emb_blob in cursor.fetchall():
+            emb = np.frombuffer(emb_blob, dtype=np.float32)
+            score = cosine_similarity(q_emb, emb)
+            if score > 0.78:
+                scored.append((score, content))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return [c for _, c in scored[:limit]]
+    except Exception as e:
+        print("Memory retrieval error:", e)
+        return []
+
+def load_profile(user_id):
+    cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
+    row = cursor.fetchone()
+    return json.loads(row[0]) if row else {"facts": [], "preferences": [], "events": []}
+
+def save_profile(user_id, profile):
+    cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
+    conn.commit()
+
+async def extract_and_store(user_id, text):
+    try:
+        resp = await anthropic_client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
+                      {"role": "user", "content": text}]
+        )
+        data = resp.content[0].text.strip()
+        profile = load_profile(user_id)
+        try:
+            parsed = json.loads(data)
+            for k in ["facts", "preferences", "events"]:
+                if k in parsed:
+                    for item in parsed[k]:
+                        if item not in profile[k]:
+                            profile[k].append(item)
+                    profile[k] = profile[k][-20:]
+            save_profile(user_id, profile)
+        except:
+            pass
+        await store_memory(user_id, text)
+    except Exception as e:
+        print("Extraction error:", e)
+
+async def get_embedding(text):
+    resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
+    return np.array(resp.data[0].embedding, dtype=np.float32)
+
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+async def store_memory(user_id, text):
+    try:
+        if len(text) < 25: return
+        txt = text.lower()
+        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
+        emb = await get_embedding(text)
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), text, emb.tobytes(), tag))
+        conn.commit()
+    except Exception as e:
+        print("Memory store error:", e)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -242,9 +342,6 @@ def clean_history(history):
 def safe_join(items):
     return "\n".join([str(x) for x in items if x])
 
-conversation_history = {}
-last_replies = {}
-
 def normalize(txt):
     txt = txt.lower()
     txt = re.sub(r'[^\w\s]', '', txt)
@@ -260,7 +357,7 @@ def is_similar(a, b):
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
-# ====================== SYSTEM PROMPT (uusi persoona) ======================
+# ====================== SYSTEM PROMPT (cuckolding mukana) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -322,7 +419,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Lopetetaan sitten. 💔")
         return
 
-    image_keywords = ["kuva", "selfie", "näytä", "miltä näytät", "lähetä", "generate", "photo", "pic", "kuvaa"]
+    image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic", "kuvaa"]
     if any(kw in text.lower() for kw in image_keywords):
         await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -427,6 +524,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
+            conversation_history[user_id] = conversation_history[user_id][-20:]   # trim
 
         prev_replies.append(reply)
 
@@ -450,6 +548,18 @@ def should_send_proactive(user_id):
     if block == "morning": return random.random() < 0.18
     return random.random() < 0.25
 
+def can_send_proactive(user_id):
+    now = time.time()
+    last = last_proactive_sent.get(user_id, 0)
+    if now - last < 3600:   # 1 tunnin cooldown
+        return False
+    last_proactive_sent[user_id] = now
+    return True
+
+def user_recently_active(user_id):
+    state = get_or_create_state(user_id)
+    return time.time() - state["last_interaction"] < 1800
+
 async def generate_proactive_message(user_id):
     history = conversation_history.get(user_id, [])[-8:]
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
@@ -472,11 +582,12 @@ async def independent_message_loop(application: Application):
         while True:
             await asyncio.sleep(random.randint(720, 2700))
             for user_id in list(conversation_history.keys()):
-                if should_send_proactive(user_id):
+                if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
                         text = await generate_proactive_message(user_id)
                         await application.bot.send_message(chat_id=user_id, text=text)
                         conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
+                        conversation_history[user_id] = conversation_history[user_id][-20:]
                     except Exception as e:
                         print("Proactive error:", e)
     except asyncio.CancelledError:
@@ -501,7 +612,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (uusi persoona) on nyt käynnissä")
+    print("✅ Megan 6.1 (looppi korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
