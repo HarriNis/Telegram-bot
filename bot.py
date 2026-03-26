@@ -39,7 +39,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki virheet korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -214,6 +214,17 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
+# ====================== SENSITIVE MEMORY ======================
+def should_use_sensitive_memory(text: str) -> bool:
+    t = text.lower()
+    triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
+    return any(x in t for x in triggers)
+
+def get_random_sensitive_memory(user_id):
+    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
+    rows = [r[0] for r in cursor.fetchall()]
+    return random.choice(rows) if rows else None
+
 # ====================== EMBEDDINGS + MEMORY ======================
 async def get_embedding(text):
     from openai import AsyncOpenAI
@@ -236,7 +247,58 @@ async def store_memory(user_id, text):
     except Exception as e:
         print("Memory store error:", e)
 
-# (muut memory-funktiot ovat ennallaan – täydelliset versiot edellisistä viesteistä)
+async def retrieve_memories(user_id, query, limit=5):
+    try:
+        q_emb = await get_embedding(query)
+        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50", (str(user_id),))
+        scored = []
+        for content, emb_blob in cursor.fetchall():
+            emb = np.frombuffer(emb_blob, dtype=np.float32)
+            score = cosine_similarity(q_emb, emb)
+            if score > 0.78:
+                scored.append((score, content))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return [c for _, c in scored[:limit]]
+    except Exception as e:
+        print("Memory retrieval error:", e)
+        return []
+
+def get_sensitive_memories(user_id):
+    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6", (str(user_id),))
+    return [row[0] for row in cursor.fetchall()]
+
+def load_profile(user_id):
+    cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
+    row = cursor.fetchone()
+    return json.loads(row[0]) if row else {"facts": [], "preferences": [], "events": []}
+
+def save_profile(user_id, profile):
+    cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
+    conn.commit()
+
+async def extract_and_store(user_id, text):
+    try:
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
+                      {"role": "user", "content": text}]
+        )
+        data = resp.content[0].text.strip()
+        profile = load_profile(user_id)
+        try:
+            parsed = json.loads(data)
+            for k in ["facts", "preferences", "events"]:
+                if k in parsed:
+                    for item in parsed[k]:
+                        if item not in profile[k]:
+                            profile[k].append(item)
+                    profile[k] = profile[k][-20:]
+            save_profile(user_id, profile)
+        except:
+            pass
+        await store_memory(user_id, text)
+    except Exception as e:
+        print("Extraction error:", e)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -392,10 +454,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_similar(last, prev):
                 messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
 
-        messages.append({
-            "role": "user",
-            "content": "Viime keskustelu lyhyesti:\n" + safe_join([f"{m['role']}: {m['content']}" for m in history[-6:]])
-        })
+        messages += history[-10:]   # ← korjattu
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
@@ -473,16 +532,19 @@ async def generate_proactive_message(user_id):
     return resp.content[0].text.strip()
 
 async def independent_message_loop(application: Application):
-    while True:
-        await asyncio.sleep(random.randint(720, 2700))
-        for user_id in list(conversation_history.keys()):
-            if should_send_proactive(user_id):
-                try:
-                    text = await generate_proactive_message(user_id)
-                    await application.bot.send_message(chat_id=user_id, text=text)
-                    conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
-                except:
-                    pass
+    try:
+        while True:
+            await asyncio.sleep(random.randint(720, 2700))
+            for user_id in list(conversation_history.keys()):
+                if should_send_proactive(user_id):
+                    try:
+                        text = await generate_proactive_message(user_id)
+                        await application.bot.send_message(chat_id=user_id, text=text)
+                        conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
+                    except Exception as e:
+                        print("Proactive error:", e)
+    except asyncio.CancelledError:
+        print("Loop stopped cleanly")
 
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
