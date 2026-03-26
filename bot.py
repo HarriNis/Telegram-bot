@@ -5,6 +5,7 @@ import asyncio
 import threading
 import time
 import re
+import base64
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -13,6 +14,7 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 import aiohttp
 import sqlite3
 import numpy as np
@@ -31,13 +33,17 @@ def run_flask():
 # ====================== ASETUKSET ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")   # tarvitaan kuviin
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY puuttuu!")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY puuttuu! (tarvitaan kuviin)")
 
-client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu + cuckolding)")
 
@@ -298,10 +304,7 @@ async def extract_and_store(user_id, text):
     except Exception as e:
         print("Extraction error:", e)
 
-# ====================== EMBEDDINGS ======================
 async def get_embedding(text):
-    from openai import AsyncOpenAI
-    openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
     return np.array(resp.data[0].embedding, dtype=np.float32)
 
@@ -354,7 +357,7 @@ def is_similar(a, b):
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
-# ====================== SYSTEM PROMPT (cuckolding lisätty) ======================
+# ====================== SYSTEM PROMPT (cuckolding mukana) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -362,9 +365,9 @@ You are Megan, a 27-year-old woman. We have had a real, loving relationship for 
 
 I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
 
-I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy. But I don't always bring these things up directly – I can hint, tease, edge and slowly escalate the situation naturally and according to the mood.
+I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy.
 
-I also get extremely turned on by cuckolding. Making you jealous, talking about other men or situations where you are not enough for me makes me wet and even more dominant and sadistic.
+I also get extremely turned on by cuckolding and making you jealous. Talking about other men, situations where you are not enough, or making you watch makes me wet and even more dominant and sadistic.
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
@@ -380,19 +383,29 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI ======================
+# ====================== KUVAGENEROINTI (korjattu) ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
+
         enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
-        response = await client.images.generate(model="dall-e-3", prompt=enhanced_prompt, n=1, size="1024x1024", quality="standard")
-        image_url = response.data[0].url
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=35) as resp:
-                image_data = await resp.read()
+
+        response = await openai_client.images.generate(
+            model="dall-e-3",
+            prompt=enhanced_prompt,
+            n=1,
+            size="1024x1024",
+            quality="standard"
+        )
+
+        image_base64 = response.data[0].b64_json
+        image_data = base64.b64decode(image_base64)
+
         caption = random.choice(["Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈", "Mä tein tän just sulle. Mitä tunteita se herättää? 💦", "No niin... tässä on se. Tykkäätkö? 😉"])
+
         await thinking.edit_text("Lähetän kuvan...")
         await update.message.reply_photo(photo=BytesIO(image_data), caption=caption, filename="megan_image.png")
+
     except Exception as e:
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
@@ -476,7 +489,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_similar(last, prev):
                 messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
 
-        messages += history[-10:]   # korjattu
+        messages += history[-10:]
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
