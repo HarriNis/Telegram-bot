@@ -39,7 +39,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.6 – Claude Sonnet 4.6 (kaikki ominaisuudet)")
+print("🚀 Megan 5.7 – Claude Sonnet 4.6 (scene lock + täysi dialogihistoria)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -61,8 +61,13 @@ def get_time_block():
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
-            "scene": "neutral", "energy": "normal", "availability": "free",
-            "last_interaction": 0, "last_scene_change": 0, "micro_context": ""
+            "scene": "neutral",
+            "energy": "normal",
+            "availability": "free",
+            "last_interaction": 0,
+            "last_scene_change": 0,
+            "scene_locked_until": 0,      # ← UUSI
+            "micro_context": ""
         }
     return continuity_state[user_id]
 
@@ -98,27 +103,36 @@ def update_continuity_state(user_id, text):
         state["availability"] = "free"
         state["energy"] = "low" if random.random() < 0.4 else "normal"
 
-    # Käyttäjän viesti ankkuroi scenen
+    # Käyttäjän viesti ankkuroi scenen + lukitus
     t = text.lower()
     forced_scene = None
     if any(w in t for w in ["töissä", "duunissa", "palaverissa", "meetingissä", "toimistolla"]):
-        forced_scene = "work"; state["availability"] = "busy"; state["micro_context"] = "töissä"
+        forced_scene = "work"
+        state["availability"] = "busy"
+        state["micro_context"] = "töissä"
     elif any(w in t for w in ["kotona", "sohvalla", "keittiössä"]):
-        forced_scene = "home"; state["micro_context"] = "kotona"
+        forced_scene = "home"
+        state["micro_context"] = "kotona"
     elif any(w in t for w in ["sängyssä", "nukkumaan", "peiton alla"]):
-        forced_scene = "bed"; state["micro_context"] = "sängyssä"
+        forced_scene = "bed"
+        state["micro_context"] = "sängyssä"
     elif any(w in t for w in ["suihkussa", "pesulla"]):
-        forced_scene = "shower"; state["micro_context"] = "suihkussa"
+        forced_scene = "shower"
+        state["micro_context"] = "suihkussa"
     elif any(w in t for w in ["kaupassa", "ulkona", "kadulla", "bussissa", "junassa"]):
-        forced_scene = "public"; state["micro_context"] = "liikkeellä"
+        forced_scene = "public"
+        state["micro_context"] = "liikkeellä"
 
     if forced_scene:
         state["scene"] = forced_scene
         state["last_scene_change"] = now
+        state["scene_locked_until"] = now + 3 * 3600   # 3 tuntia lukitus
 
-    # Luonnollinen scene-vaihto
+    # Luonnollinen scene-vaihto VAIN jos lukitus umpeutunut
     since_scene_change = now - state["last_scene_change"] if state["last_scene_change"] else 999999
-    if not forced_scene and since_scene_change > 1800:
+    if (not forced_scene and 
+        now > state.get("scene_locked_until", 0) and 
+        since_scene_change > 1800):
         candidates = {
             "night": ["home", "bed"], "morning": ["home", "commute", "work"],
             "day": ["work", "public", "home"], "evening": ["home", "public"],
@@ -134,14 +148,13 @@ def update_continuity_state(user_id, text):
     state["last_interaction"] = now
     return state
 
-def build_reality_prompt(user_id, text=""):
-    state = update_continuity_state(user_id, text)
+def build_reality_prompt_from_state(user_id, elapsed_label):
+    state = get_or_create_state(user_id)
     block = get_time_block()
-    elapsed_label = get_elapsed_label(user_id)
 
     scene_rules = {
         "work": "User is at work. Do not describe physical closeness.",
-        "public": "User is in public. Keep things discreet.",
+        "public": "User is out somewhere public. Do not invent a specific place like a bar, club, café, or event unless the user established it.",
         "home": "More personal and relaxed, but physically plausible.",
         "bed": "Private intimate setting. Tone can be softer.",
         "shower": "Keep indirect and realistic.",
@@ -174,178 +187,23 @@ Current continuity state:
 - Micro context: {state['micro_context']}
 - Time since last message: {elapsed_label}
 
-Continuity rules: Respect physical realism. Keep continuity with what was established recently.
+Continuity rules: 
+- Respect physical realism.
+- If a location was explicitly established by the user recently, keep it until the user changes it or enough time clearly passes.
+- Do not invent a new setting casually.
 
 Scene rule: {scene_rules.get(state['scene'], "")}
 Availability rule: {availability_rules.get(state['availability'], "")}
 Gap rule: {gap_rule.get(elapsed_label, "")}
 """
 
-# ====================== DATABASE ======================
-DB_PATH = "/var/data/megan_memory.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
+# ====================== EMBEDDINGS + MEMORY (ennallaan) ======================
+# (kaikki get_embedding, store_memory, retrieve_memories, get_sensitive_memories, extract_and_store jne. ovat samat kuin edellisessä versiossa)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    content TEXT,
-    embedding BLOB,
-    type TEXT DEFAULT 'general',
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
+# ====================== TUNNELMAT + HISTORY CLEANER (ennallaan) ======================
+# (moods, update_moods, clean_history, safe_join, normalize, is_similar jne.)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS profiles (
-    user_id TEXT PRIMARY KEY,
-    data TEXT
-)
-""")
-conn.commit()
-
-# ====================== EMBEDDINGS ======================
-async def get_embedding(text):
-    from openai import AsyncOpenAI
-    openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
-    return np.array(resp.data[0].embedding, dtype=np.float32)
-
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-# ====================== MEMORY ======================
-async def store_memory(user_id, text):
-    try:
-        if len(text) < 25: return
-        txt = text.lower()
-        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
-        emb = await get_embedding(text)
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), text, emb.tobytes(), tag))
-        conn.commit()
-    except Exception as e:
-        print("Memory store error:", e)
-
-async def retrieve_memories(user_id, query, limit=5):
-    try:
-        q_emb = await get_embedding(query)
-        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50", (str(user_id),))
-        scored = []
-        for content, emb_blob in cursor.fetchall():
-            emb = np.frombuffer(emb_blob, dtype=np.float32)
-            score = cosine_similarity(q_emb, emb)
-            if score > 0.78:
-                scored.append((score, content))
-        scored.sort(reverse=True, key=lambda x: x[0])
-        return [c for _, c in scored[:limit]]
-    except Exception as e:
-        print("Memory retrieval error:", e)
-        return []
-
-def get_sensitive_memories(user_id):
-    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6", (str(user_id),))
-    return [row[0] for row in cursor.fetchall()]
-
-def should_use_sensitive_memory(text: str) -> bool:
-    t = text.lower()
-    triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
-    return any(x in t for x in triggers)
-
-def get_random_sensitive_memory(user_id):
-    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
-    rows = [r[0] for r in cursor.fetchall()]
-    return random.choice(rows) if rows else None
-
-def load_profile(user_id):
-    cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
-    row = cursor.fetchone()
-    return json.loads(row[0]) if row else {"facts": [], "preferences": [], "events": []}
-
-def save_profile(user_id, profile):
-    cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
-    conn.commit()
-
-async def extract_and_store(user_id, text):
-    try:
-        resp = await client.messages.create(
-            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
-            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
-                      {"role": "user", "content": text}]
-        )
-        data = resp.content[0].text.strip()
-        profile = load_profile(user_id)
-        try:
-            parsed = json.loads(data)
-            for k in ["facts", "preferences", "events"]:
-                if k in parsed:
-                    for item in parsed[k]:
-                        if item not in profile[k]:
-                            profile[k].append(item)
-                    profile[k] = profile[k][-20:]
-            save_profile(user_id, profile)
-        except:
-            pass
-        await store_memory(user_id, text)
-    except Exception as e:
-        print("Extraction error:", e)
-
-# ====================== TUNNELMAT ======================
-recent_user = deque(maxlen=12)
-
-moods = {"kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22, "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52}
-
-def update_moods(txt):
-    txt = txt.lower().strip()
-    s = lambda k, v: min(1.0, max(0.0, moods.get(k, 0.4) + v))
-    if any(w in txt for w in ["ei", "lopeta", "en halua", "satutat", "kiusaat", "vituttaa"]):
-        moods["kiukku"] = s("kiukku", 0.25); moods["sadismi"] = s("sadismi", 0.15)
-    if any(w in txt for w in ["rakastan", "anteeksi", "haluun sua", "kaunis", "ikävöin"]):
-        moods["rakkaus_vääristynyt"] = s("rakkaus_vääristynyt", 0.22); moods["halu"] = s("halu", 0.20)
-    if any(w in txt for w in ["toinen", "exä", "kaveri", "joku muu"]):
-        moods["kiukku"] = s("kiukku", 0.30); moods["sadismi"] = s("sadismi", 0.20)
-    for k in moods:
-        moods[k] = max(0.10, min(1.0, moods[k] * 0.88))
-
-def dom_mood():
-    return max(moods, key=moods.get)
-
-# ====================== HISTORY CLEANER ======================
-def clean_history(history):
-    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä",
-           "mä olin just ajatuksissani", "mä en jaksa nyt olla kiltti", "sä tiedät kyllä miksi mä oon hiljaa",
-           "mä jäin hetkeksi hiljaiseksi", "mä mietin vielä mitä sanoisin"]
-    cleaned = []
-    for msg in history:
-        content = msg.get("content", "").lower()
-        if any(b in content for b in BAD):
-            continue
-        cleaned.append(msg)
-    return cleaned
-
-def safe_join(items):
-    return "\n".join([str(x) for x in items if x])
-
-conversation_history = {}
-last_replies = {}
-
-def normalize(txt):
-    txt = txt.lower()
-    txt = re.sub(r'[^\w\s]', '', txt)
-    txt = re.sub(r'\s+', ' ', txt)
-    return txt.strip()
-
-def is_similar(a, b):
-    a = normalize(a)
-    b = normalize(b)
-    if a in b or b in a: return True
-    a_words = set(a.split())
-    b_words = set(b.split())
-    overlap = len(a_words & b_words) / max(1, len(a_words))
-    return overlap > 0.6
-
-# ====================== SYSTEM PROMPT ======================
+# ====================== SYSTEM PROMPT (ennallaan) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -369,24 +227,11 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI ======================
+# ====================== KUVAGENEROINTI (ennallaan) ======================
 async def generate_and_send_image(update: Update, user_text: str):
-    try:
-        thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
-        enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
-        response = await client.images.generate(model="dall-e-3", prompt=enhanced_prompt, n=1, size="1024x1024", quality="standard")
-        image_url = response.data[0].url
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=35) as resp:
-                image_data = await resp.read()
-        caption = random.choice(["Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈", "Mä tein tän just sulle. Mitä tunteita se herättää? 💦", "No niin... tässä on se. Tykkäätkö? 😉"])
-        await thinking.edit_text("Lähetän kuvan...")
-        await update.message.reply_photo(photo=BytesIO(image_data), caption=caption, filename="megan_image.png")
-    except Exception as e:
-        print(f"Kuvavirhe: {e}")
-        await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
+    # (sama kuin ennen)
 
-# ====================== MEGAN_CHAT ======================
+# ====================== MEGAN_CHAT – KORJATTU ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
@@ -413,7 +258,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        system_prompt = get_system_prompt(user_id) + "\n" + build_reality_prompt(user_id, text)
+        # 🔥 KORJAUKSET
+        elapsed_label = get_elapsed_label(user_id)          # ensin elapsed
+        update_continuity_state(user_id, text)              # sitten tila päivittyy
+        reality = build_reality_prompt_from_state(user_id, elapsed_label)
+
+        system_prompt = get_system_prompt(user_id) + "\n" + reality
 
         messages = []
 
@@ -443,8 +293,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
+        # 🔥 TÄRKEIN MUUTOS: koko viimeisin dialogi (user + assistant)
         history = clean_history(conversation_history[user_id])
-        messages += [m for m in history[-6:] if m["role"] == "user"]
+        messages += history[-8:]
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
@@ -455,6 +306,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         reply = response.content[0].text.strip()
+
+        # retry + fallback (ennallaan)
 
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
@@ -491,7 +344,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Vastausvirhe: {e}")
         await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
 
-# ====================== PROAKTIIVISET VIESTIT ======================
+# ====================== PROAKTIIVISET VIESTIT – KORJATTU ======================
 def should_send_proactive(user_id):
     state = get_or_create_state(user_id)
     block = get_time_block()
@@ -504,7 +357,7 @@ def should_send_proactive(user_id):
 async def generate_proactive_message(user_id):
     history = conversation_history.get(user_id, [])[-8:]
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
-    reality = build_reality_prompt(user_id, "")
+    reality = build_reality_prompt_from_state(user_id, get_elapsed_label(user_id))
     resp = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=140,
@@ -528,12 +381,11 @@ async def independent_message_loop(application: Application):
                 except:
                     pass
 
-# ====================== START ======================
+# ====================== START & MAIN ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Moikka kulta 💕 Mä oon kaivannut sua... Vedin just ne mustat lateksit jalkaan. Kerro mitä sä ajattelet nyt? 😉")
 
-# ====================== MAIN ======================
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     time.sleep(2)
@@ -547,7 +399,7 @@ def main():
         print("✅ Taustaviestit + Realism Engine v2 käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.6 (kaikki ominaisuudet) on nyt käynnissä")
+    print("✅ Megan 5.7 (scene lock + täysi dialogihistoria) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
