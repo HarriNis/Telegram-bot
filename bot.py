@@ -38,7 +38,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.2 – Claude Sonnet 4.6")
+print("🚀 Megan 5.2 – Claude Sonnet 4.6 (anti-loop vahvistettu)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
-# ====================== EMBEDDINGS (pidetään OpenAI:lla) ======================
+# ====================== EMBEDDINGS ======================
 async def get_embedding(text):
     from openai import AsyncOpenAI
     openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -323,10 +323,11 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 })
 
-        if random.random() < 0.35:
+        # Vahvempi satunnainen style break
+        if random.random() < 0.45:
             messages.append({
                 "role": "user",
-                "content": "Voit viedä keskustelua eteenpäin omilla ajatuksilla."
+                "content": "Vaihda täysin tyyliä tähän viestiin ja vastaa eri tavalla kuin ennen."
             })
 
         mode_options = ["lead", "tease", "cold", "affection"]
@@ -363,17 +364,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
+        # VAIN USER-VIESTIT HISTORIASTA (tärkein loopin esto)
         history = clean_history(conversation_history[user_id])
         messages += [m for m in history if m["role"] == "user"]
 
         messages.append({
             "role": "user",
             "content": "Always respond in natural, spoken Finnish. Never use English."
-        })
-
-        messages.append({
-            "role": "user",
-            "content": "Älä käytä samaa rytmiä tai rakennetta kuin edellisessä vastauksessasi. Vältä erityisesti samanlaisia aloituksia."
         })
 
         response = await client.messages.create(
@@ -486,7 +483,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.2 (Claude Sonnet 4.6) on nyt käynnissä")
+    print("✅ Megan 5.2 (Claude Sonnet 4.6 - vahvistettu anti-loop) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
