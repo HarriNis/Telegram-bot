@@ -48,13 +48,16 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (looppi korjattu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki NameErrorit korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
-continuity_state = {}
-last_proactive_sent = {}
+
+# ====================== GLOBAL STATE ======================
 conversation_history = {}
 last_replies = {}
+recent_user = deque(maxlen=12)
+continuity_state = {}
+last_proactive_sent = {}
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -551,7 +554,7 @@ def should_send_proactive(user_id):
 def can_send_proactive(user_id):
     now = time.time()
     last = last_proactive_sent.get(user_id, 0)
-    if now - last < 60:   # 1 minuutin cooldown testausta varten
+    if now - last < 60:
         return False
     last_proactive_sent[user_id] = now
     return True
@@ -580,9 +583,8 @@ async def generate_proactive_message(user_id):
 async def independent_message_loop(application: Application):
     try:
         while True:
-            await asyncio.sleep(30)   # 30 sekuntia testausta varten
+            await asyncio.sleep(30)
             for user_id in list(conversation_history.copy().keys()):
-                print(f"[LOOP] Checking user {user_id}")
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
                         text = await generate_proactive_message(user_id)
@@ -613,7 +615,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (looppi korjattu) on nyt käynnissä")
+    print("✅ Megan 6.1 (kaikki virheet korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
