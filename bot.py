@@ -39,7 +39,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.7 – Claude Sonnet 4.6 (täydellinen, ajettava versio)")
+print("🚀 Megan 6.0 – Claude Sonnet 4.6 (stable, looppi korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -135,32 +135,6 @@ def build_reality_prompt_from_state(user_id, elapsed_label):
     state = get_or_create_state(user_id)
     block = get_time_block()
 
-    scene_rules = {
-        "work": "User is at work. Do not describe physical closeness.",
-        "public": "User is out somewhere public. Do not invent a specific place like a bar, club, café, or event unless the user established it.",
-        "home": "More personal and relaxed, but physically plausible.",
-        "bed": "Private intimate setting. Tone can be softer.",
-        "shower": "Keep indirect and realistic.",
-        "commute": "User is traveling. Keep short and message-like.",
-        "neutral": "No specific setting. Avoid assuming proximity."
-    }
-
-    availability_rules = {
-        "busy": "Shorter, interrupted or distracted responses.",
-        "free": "Relaxed and developed responses.",
-        "sleeping": "Sleepy, quiet or minimal tone.",
-        "low_presence": "Sleepy, quiet or slower tone.",
-        "distracted": "Split-focus and inconsistent in a realistic way."
-    }
-
-    gap_rule = {
-        "immediate": "Continue naturally from the current flow.",
-        "recent": "Keep continuity, but do not sound frozen in the exact same second.",
-        "hours": "Some time has passed. Reflect that naturally.",
-        "long_gap": "A noticeable amount of time has passed. Do not continue as if no time passed.",
-        "first_contact": "This is the first contact today."
-    }
-
     return f"""
 Current continuity state:
 - Time of day: {block}
@@ -171,13 +145,9 @@ Current continuity state:
 - Time since last message: {elapsed_label}
 
 Continuity rules: 
+- Keep the same location unless user changes it
+- Keep behavior consistent with situation
 - Respect physical realism.
-- If a location was explicitly established by the user recently, keep it until the user changes it or enough time clearly passes.
-- Do not invent a new setting casually.
-
-Scene rule: {scene_rules.get(state['scene'], "")}
-Availability rule: {availability_rules.get(state['availability'], "")}
-Gap rule: {gap_rule.get(elapsed_label, "")}
 """
 
 # ====================== DATABASE ======================
@@ -401,29 +371,41 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if sensitive:
                 messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
 
-        if random.random() < 0.15:
+        if random.random() < 0.05:   # ← pienennetty
             messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
 
         memories = await retrieve_memories(user_id, text)
         if memories:
             messages.append({"role": "user", "content": "Remember these:\n" + safe_join(memories)})
 
-        profile = load_profile(user_id)
-        messages.append({
-            "role": "user",
-            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\nMieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\nTapahtumat:\n{safe_join(profile['events'][-10:])}"
-        })
+        # Profile vain satunnaisesti
+        if random.random() < 0.25:
+            profile = load_profile(user_id)
+            messages.append({
+                "role": "user",
+                "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\nMieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\nTapahtumat:\n{safe_join(profile['events'][-10:])}"
+            })
 
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
-        if random.random() < 0.30:
+        if random.random() < 0.10:   # ← pienennetty
             messages.append({"role": "user", "content": "Jos aikaa on kulunut selvästi, anna sen näkyä luonnollisesti sävyssä tai viittauksessa, mutta älä selitä sitä mekaanisesti."})
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
+        # 🔥 KORJATTU HISTORIA: vain lyhyt yhteenveto
         history = clean_history(conversation_history[user_id])
-        messages += history[-8:]   # koko dialogi
+        if len(history) > 2:
+            last = history[-1]["content"]
+            prev = history[-2]["content"]
+            if is_similar(last, prev):
+                messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
+
+        messages.append({
+            "role": "user",
+            "content": "Viime keskustelu lyhyesti:\n" + safe_join([f"{m['role']}: {m['content']}" for m in history[-6:]])
+        })
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
@@ -505,7 +487,6 @@ async def independent_message_loop(application: Application):
                 try:
                     text = await generate_proactive_message(user_id)
                     await application.bot.send_message(chat_id=user_id, text=text)
-                    # Tallennetaan myös historiaan
                     conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
                 except:
                     pass
@@ -526,10 +507,10 @@ def main():
 
     async def post_init(app: Application):
         app.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Realism Engine v2 käynnissä")
+        print("✅ Taustaviestit + Realism Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.7 (täydellinen ajettava versio) on nyt käynnissä")
+    print("✅ Megan 6.0 (stable, looppi korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
