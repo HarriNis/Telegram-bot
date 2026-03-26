@@ -4,12 +4,14 @@ import json
 import asyncio
 import threading
 import time
+import copy
+import re
 from collections import deque
 from io import BytesIO
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 import aiohttp
 import sqlite3
 import numpy as np
@@ -27,16 +29,16 @@ def run_flask():
 
 # ====================== ASETUKSET ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY puuttuu!")
+if not ANTHROPIC_API_KEY:
+    raise ValueError("ANTHROPIC_API_KEY puuttuu!")
 
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.2 – gpt-5.4 + korjatut loop-fixit")
+print("🚀 Megan 5.2 – Claude Sonnet 4.6")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -62,9 +64,11 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
-# ====================== EMBEDDINGS ======================
+# ====================== EMBEDDINGS (pidetään OpenAI:lla) ======================
 async def get_embedding(text):
-    resp = await client.embeddings.create(model="text-embedding-3-small", input=text)
+    from openai import AsyncOpenAI
+    openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    resp = await openai_client.embeddings.create(model="text-embedding-3-small", input=text)
     return np.array(resp.data[0].embedding, dtype=np.float32)
 
 def cosine_similarity(a, b):
@@ -76,8 +80,7 @@ async def store_memory(user_id, text):
         if len(text) < 25:
             return
         txt = text.lower()
-        sensitive_keywords = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]
-        tag = "sensitive" if any(w in txt for w in sensitive_keywords) else "general"
+        tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
         emb = await get_embedding(text)
         cursor.execute(
             "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
@@ -105,6 +108,13 @@ async def retrieve_memories(user_id, query, limit=5):
     except Exception as e:
         print("Memory retrieval error:", e)
         return []
+
+def get_sensitive_memories(user_id):
+    cursor.execute(
+        "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
+        (str(user_id),)
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
@@ -137,13 +147,13 @@ def save_profile(user_id, profile):
 
 async def extract_and_store(user_id, text):
     try:
-        resp = await client.chat.completions.create(
-            model="gpt-5.4",
-            messages=[{"role": "system", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}],
-            max_completion_tokens=200,
-            temperature=0.3
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}]
         )
-        data = resp.choices[0].message.content.strip()
+        data = resp.content[0].text.strip()
         profile = load_profile(user_id)
         try:
             parsed = json.loads(data)
@@ -190,29 +200,36 @@ def dom_mood():
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
-    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä"]
+    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä", "mä olin just ajatuksissani", "mä en jaksa nyt olla kiltti", "sä tiedät kyllä miksi mä oon hiljaa"]
     cleaned = []
     for msg in history:
-        content = msg.get("content", "").lower()
-        if not any(b in content for b in BAD):
-            cleaned.append(msg)
+        content = msg.get("content", "")
+        if any(is_similar(content, bad) for bad in BAD):
+            continue
+        cleaned.append(msg)
     return cleaned
 
-# ====================== SAFE JOIN ======================
 def safe_join(items):
     return "\n".join([str(x) for x in items if x])
 
-# ====================== HISTORY & ANTI-REPETITION ======================
 conversation_history = {}
 last_replies = {}
 
 def normalize(txt):
-    return txt.lower().replace("💕", "").replace("❤️", "").replace(" ", "").strip()
+    txt = txt.lower()
+    txt = re.sub(r'[^\w\s]', '', txt)
+    txt = re.sub(r'\s+', ' ', txt)
+    return txt.strip()
 
 def is_similar(a, b):
     a = normalize(a)
     b = normalize(b)
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    a_words = set(a.split())
+    b_words = set(b.split())
+    overlap = len(a_words & b_words) / max(1, len(a_words))
+    return overlap > 0.6
 
 # ====================== ENGLISH SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
@@ -274,124 +291,170 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_moods(text)
     recent_user.append(text)
-    conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
-
     is_low_input = len(text.strip()) < 8
 
     try:
+        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+
         thinking = await message.reply_text("…", disable_notification=True)
 
         system_prompt = get_system_prompt(user_id)
-        messages = [{"role": "system", "content": system_prompt}]
+        messages = [{"role": "user", "content": system_prompt}]
 
-        # PROAKTIIVINEN LOGIIKKA (tehty satunnaiseksi dokumentin mukaan)
-        messages.append({
-            "role": "system",
-            "content": (
-                "Älä jatka keskustelua kysymyksillä. "
-                "Vie keskustelua eteenpäin kertomalla jotain itse."
-            )
-        })
-
-        # Tämä on nyt satunnainen (dokumentin korjaus)
-        if random.random() < 0.4:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "Kirjoita jotain mitä TEET, AJATTELET tai KOET juuri nyt. "
-                    "Älä reagoi pelkästään käyttäjän viestiin."
-                )
-            })
-
-        messages.append({
-            "role": "system",
-            "content": (
-                "Käytä käyttäjän viimeistä vastausta ja tee siitä seuraus. "
-                "Älä sano 'kiva kuulla'. Jatka siitä."
-            )
-        })
-
-        if is_low_input:
-            messages.append({
-                "role": "system",
-                "content": "Käyttäjä ei antanut paljon inputtia. Älä kysy mitään. Aloita itse."
-            })
-
-        # 🔥 SENSITIVE MEMORY (kevyt injektio)
-        if should_use_sensitive_memory(text) and random.random() < 0.2:
-            sensitive = get_random_sensitive_memory(user_id)
-            if sensitive:
+        sensitive = get_sensitive_memories(user_id)
+        if sensitive:
+            if dom_mood() == "kiukku":
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Taustalla voi olla tällainen asia, mutta käytä sitä vain jos se tuntuu luonnolliselta tähän tilanteeseen:\n"
-                        + sensitive
+                        "You know the user's deepest fantasies, shame points and vulnerabilities. "
+                        "Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\n"
+                        "Known sensitive points:\n" + "\n".join(sensitive)
+                    )
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You know the user's emotional weak points and private desires. "
+                        "You may sometimes reference them subtly in a teasing, controlling or dominant way. "
+                        "Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\n"
+                        "Known sensitive points:\n" + "\n".join(sensitive)
                     )
                 })
 
+        if random.random() < 0.35:
+            messages.append({
+                "role": "user",
+                "content": "Voit viedä keskustelua eteenpäin omilla ajatuksilla."
+            })
+
+        mode_options = ["lead", "tease", "cold", "affection"]
+        last_mode = context.chat_data.get("last_mode")
+        if random.random() < 0.6 and last_mode in mode_options:
+            mode = last_mode
+        else:
+            if last_mode in mode_options:
+                mode_options.remove(last_mode)
+            mode = random.choice(mode_options)
+        context.chat_data["last_mode"] = mode
+
+        if mode == "lead":
+            messages.append({"role": "user", "content": "Take control."})
+        elif mode == "tease":
+            messages.append({"role": "user", "content": "Be playful and teasing."})
+        elif mode == "cold":
+            messages.append({"role": "user", "content": "Be short and distant."})
+        elif mode == "affection":
+            messages.append({"role": "user", "content": "Be warm and close."})
+
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({"role": "system", "content": "Muista nämä:\n" + safe_join(memories)})
+            messages.append({"role": "user", "content": "Remember these:\n" + safe_join(memories)})
 
         profile = load_profile(user_id)
         messages.append({
-            "role": "system",
+            "role": "user",
             "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
                        f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
                        f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
         })
 
-        messages += clean_history(conversation_history[user_id])[-20:]
+        if is_low_input:
+            messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
+
+        history = clean_history(conversation_history[user_id])
+        messages += [m for m in history if m["role"] == "user"]
 
         messages.append({
-            "role": "system",
+            "role": "user",
             "content": "Always respond in natural, spoken Finnish. Never use English."
         })
 
-        response = await client.chat.completions.create(
-            model="gpt-5.4",
-            messages=messages,
+        messages.append({
+            "role": "user",
+            "content": "Älä käytä samaa rytmiä tai rakennetta kuin edellisessä vastauksessasi. Vältä erityisesti samanlaisia aloituksia."
+        })
+
+        response = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=850,
             temperature=0.85,
             top_p=0.9,
-            max_completion_tokens=850,      # <-- korjattu
-            frequency_penalty=0.6,
-            presence_penalty=0.5,
-            timeout=40
+            messages=messages
         )
 
-        reply = response.choices[0].message.content.strip()
+        reply = response.content[0].text.strip()
+
+        if user_id not in last_replies:
+            last_replies[user_id] = deque(maxlen=3)
+        prev_replies = last_replies[user_id]
+
+        if any(is_similar(reply, p) for p in prev_replies):
+            retry_messages = [messages[0]] + [m for m in messages if m["role"] == "user"]
+            retry_messages.append({
+                "role": "user",
+                "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."
+            })
+            retry = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=180,
+                temperature=0.9,
+                messages=retry_messages
+            )
+            reply = retry.content[0].text.strip()
+
+        BAD = ["mä olin just", "ajattelin sua", "outo fiilis"]
+        is_fallback = False
+        if any(b in reply.lower() for b in BAD):
+            reply = random.choice([
+                "…mä en jaksa nyt olla kiltti.",
+                "*katsoo sua pitkään* sä tiedät kyllä miksi mä oon hiljaa.",
+                "älä luule että mä unohdin mitä sanoit.",
+                "hmm… sä teit just jotain mitä mä en ihan sulata."
+            ])
+            is_fallback = True
+
+        if not reply or len(reply) < 3:
+            reply = random.choice([
+                "…mä mietin hetken.",
+                "*hiljenee vähän*",
+                "en jaksa vastata siihen nyt kunnolla."
+            ])
+            is_fallback = True
+
+        if not is_fallback:
+            conversation_history[user_id].append({"role": "assistant", "content": reply})
+
+        prev_replies.append(reply)
 
         await thinking.edit_text(reply)
-        conversation_history[user_id].append({"role": "assistant", "content": reply})
         await extract_and_store(user_id, text)
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text("No… mä olin just ajatuksissani.")
+        await thinking.edit_text(random.choice([
+            "…mä jäin hetkeksi hiljaiseksi.",
+            "*huokaa kevyesti* en jaksa vastata nätisti just nyt.",
+            "hmm… mä mietin vielä mitä sanoisin."
+        ]))
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 async def generate_proactive_message(user_id):
     history = conversation_history.get(user_id, [])[-6:]
-    recent_text = "\n".join([
-        f"{m['role']}: {m['content']}"
-        for m in history if isinstance(m, dict) and "role" in m and "content" in m
-    ])
-
-    resp = await client.chat.completions.create(
-        model="gpt-5.4",
-        messages=[
-            {"role": "system", "content": get_system_prompt(user_id)},
-            {"role": "system", "content":
-                "Kirjoita omatoiminen viesti. "
-                "Älä käytä fraaseja. "
-                "Perusta viesti viime keskusteluun."
-            },
-            {"role": "system", "content": f"Viime keskustelu:\n{recent_text}"}
-        ],
+    recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
+    resp = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=120,
         temperature=1.0,
-        max_completion_tokens=120      # <-- korjattu
+        messages=[
+            {"role": "user", "content": get_system_prompt(user_id)},
+            {"role": "user", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
+            {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}
+        ]
     )
-    return resp.choices[0].message.content.strip()
+    text = resp.content[0].text.strip()
+    return text
 
 async def independent_message_loop(application: Application):
     while True:
@@ -401,12 +464,8 @@ async def independent_message_loop(application: Application):
                 try:
                     text = await generate_proactive_message(user_id)
                     await application.bot.send_message(chat_id=user_id, text=text)
-                    conversation_history.setdefault(user_id, []).append({
-                        "role": "assistant",
-                        "content": text
-                    })
-                except Exception as e:
-                    print("Proactive message error:", e)
+                except:
+                    pass
 
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -427,7 +486,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.2 (gpt-5.4) on nyt käynnissä")
+    print("✅ Megan 5.2 (Claude Sonnet 4.6) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
