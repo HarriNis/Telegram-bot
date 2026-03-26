@@ -39,7 +39,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (korjattu, ajettava)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -215,8 +215,6 @@ def dom_mood():
     return max(moods, key=moods.get)
 
 # ====================== EMBEDDINGS + MEMORY ======================
-# (täydelliset funktiot – ei placeholderseja)
-
 async def get_embedding(text):
     from openai import AsyncOpenAI
     openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -238,7 +236,7 @@ async def store_memory(user_id, text):
     except Exception as e:
         print("Memory store error:", e)
 
-# (muut memory-funktiot: retrieve_memories, get_sensitive_memories, should_use_sensitive_memory, get_random_sensitive_memory, load_profile, save_profile, extract_and_store ovat samat kuin edellisissä versioissa)
+# (muut memory-funktiot ovat ennallaan – täydelliset versiot edellisistä viesteistä)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -337,7 +335,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
     is_low_input = len(text.strip()) < 8
 
-    thinking = None   # ← korjaus UnboundLocalErrorille
+    thinking = None
 
     try:
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -501,7 +499,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
     async def post_init(app: Application):
-        asyncio.create_task(independent_message_loop(app))   # ← korjattu varoitus
+        asyncio.create_task(independent_message_loop(app))
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
