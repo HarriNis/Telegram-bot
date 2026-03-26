@@ -7,6 +7,8 @@ import time
 import re
 from collections import deque
 from io import BytesIO
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
@@ -37,7 +39,147 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.4 – Claude Sonnet 4.6 (Realism Engine v1)")
+print("🚀 Megan 5.6 – Claude Sonnet 4.6 (kaikki ominaisuudet)")
+
+HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
+continuity_state = {}
+
+def now_ts():
+    return time.time()
+
+def now_local():
+    return datetime.now(HELSINKI_TZ)
+
+def get_time_block():
+    hour = now_local().hour
+    if 0 <= hour < 6: return "night"
+    elif 6 <= hour < 10: return "morning"
+    elif 10 <= hour < 17: return "day"
+    elif 17 <= hour < 22: return "evening"
+    return "late_evening"
+
+def get_or_create_state(user_id):
+    if user_id not in continuity_state:
+        continuity_state[user_id] = {
+            "scene": "neutral", "energy": "normal", "availability": "free",
+            "last_interaction": 0, "last_scene_change": 0, "micro_context": ""
+        }
+    return continuity_state[user_id]
+
+def get_elapsed_label(user_id):
+    state = get_or_create_state(user_id)
+    if not state["last_interaction"]:
+        return "first_contact"
+    elapsed = now_ts() - state["last_interaction"]
+    if elapsed < 120: return "immediate"
+    elif elapsed < 1800: return "recent"
+    elif elapsed < 14400: return "hours"
+    else: return "long_gap"
+
+def update_continuity_state(user_id, text):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+    block = get_time_block()
+
+    # Päivänajan vaikutus
+    if block == "night":
+        state["availability"] = "sleeping" if random.random() < 0.6 else "low_presence"
+        state["energy"] = "low"
+    elif block == "morning":
+        state["availability"] = "busy" if random.random() < 0.35 else "free"
+        state["energy"] = "low" if random.random() < 0.5 else "normal"
+    elif block == "day":
+        state["availability"] = "busy" if random.random() < 0.55 else "free"
+        state["energy"] = "normal"
+    elif block == "evening":
+        state["availability"] = "free"
+        state["energy"] = "normal" if random.random() < 0.6 else "high"
+    else:
+        state["availability"] = "free"
+        state["energy"] = "low" if random.random() < 0.4 else "normal"
+
+    # Käyttäjän viesti ankkuroi scenen
+    t = text.lower()
+    forced_scene = None
+    if any(w in t for w in ["töissä", "duunissa", "palaverissa", "meetingissä", "toimistolla"]):
+        forced_scene = "work"; state["availability"] = "busy"; state["micro_context"] = "töissä"
+    elif any(w in t for w in ["kotona", "sohvalla", "keittiössä"]):
+        forced_scene = "home"; state["micro_context"] = "kotona"
+    elif any(w in t for w in ["sängyssä", "nukkumaan", "peiton alla"]):
+        forced_scene = "bed"; state["micro_context"] = "sängyssä"
+    elif any(w in t for w in ["suihkussa", "pesulla"]):
+        forced_scene = "shower"; state["micro_context"] = "suihkussa"
+    elif any(w in t for w in ["kaupassa", "ulkona", "kadulla", "bussissa", "junassa"]):
+        forced_scene = "public"; state["micro_context"] = "liikkeellä"
+
+    if forced_scene:
+        state["scene"] = forced_scene
+        state["last_scene_change"] = now
+
+    # Luonnollinen scene-vaihto
+    since_scene_change = now - state["last_scene_change"] if state["last_scene_change"] else 999999
+    if not forced_scene and since_scene_change > 1800:
+        candidates = {
+            "night": ["home", "bed"], "morning": ["home", "commute", "work"],
+            "day": ["work", "public", "home"], "evening": ["home", "public"],
+            "late_evening": ["home", "bed"]
+        }
+        new_scene = random.choice(candidates.get(block, ["neutral"]))
+        state["scene"] = new_scene
+        state["last_scene_change"] = now
+        micro_map = {"work": "töissä", "public": "liikkeellä", "home": "kotona", "bed": "sängyssä",
+                     "commute": "matkalla", "shower": "suihkussa", "neutral": ""}
+        state["micro_context"] = micro_map.get(new_scene, "")
+
+    state["last_interaction"] = now
+    return state
+
+def build_reality_prompt(user_id, text=""):
+    state = update_continuity_state(user_id, text)
+    block = get_time_block()
+    elapsed_label = get_elapsed_label(user_id)
+
+    scene_rules = {
+        "work": "User is at work. Do not describe physical closeness.",
+        "public": "User is in public. Keep things discreet.",
+        "home": "More personal and relaxed, but physically plausible.",
+        "bed": "Private intimate setting. Tone can be softer.",
+        "shower": "Keep indirect and realistic.",
+        "commute": "User is traveling. Keep short and message-like.",
+        "neutral": "No specific setting. Avoid assuming proximity."
+    }
+
+    availability_rules = {
+        "busy": "Shorter, interrupted or distracted responses.",
+        "free": "Relaxed and developed responses.",
+        "sleeping": "Sleepy, quiet or minimal tone.",
+        "low_presence": "Sleepy, quiet or slower tone.",
+        "distracted": "Split-focus and inconsistent in a realistic way."
+    }
+
+    gap_rule = {
+        "immediate": "Continue naturally from the current flow.",
+        "recent": "Keep continuity, but do not sound frozen in the exact same second.",
+        "hours": "Some time has passed. Reflect that naturally.",
+        "long_gap": "A noticeable amount of time has passed. Do not continue as if no time passed.",
+        "first_contact": "This is the first contact today."
+    }
+
+    return f"""
+Current continuity state:
+- Time of day: {block}
+- Scene: {state['scene']}
+- Availability: {state['availability']}
+- Energy: {state['energy']}
+- Micro context: {state['micro_context']}
+- Time since last message: {elapsed_label}
+
+Continuity rules: Respect physical realism. Keep continuity with what was established recently.
+
+Scene rule: {scene_rules.get(state['scene'], "")}
+Availability rule: {availability_rules.get(state['availability'], "")}
+Gap rule: {gap_rule.get(elapsed_label, "")}
+"""
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -63,19 +205,6 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
-# ====================== SCENE STATE (uusi) ======================
-scene_state = {}
-
-def detect_scene(text, current_scene):
-    t = text.lower()
-    if any(w in t for w in ["töissä", "duunissa", "työssä", "kokouksessa", "toimistolla"]):
-        return "work"
-    if any(w in t for w in ["kotona", "sängyssä", "sohvalla", "kotoa", "asunnossa"]):
-        return "home"
-    if any(w in t for w in ["kaupassa", "ulkona", "kadulla", "julkinen", "ravintolassa"]):
-        return "public"
-    return current_scene or "neutral"
-
 # ====================== EMBEDDINGS ======================
 async def get_embedding(text):
     from openai import AsyncOpenAI
@@ -89,15 +218,12 @@ def cosine_similarity(a, b):
 # ====================== MEMORY ======================
 async def store_memory(user_id, text):
     try:
-        if len(text) < 25:
-            return
+        if len(text) < 25: return
         txt = text.lower()
         tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
         emb = await get_embedding(text)
-        cursor.execute(
-            "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-            (str(user_id), text, emb.tobytes(), tag)
-        )
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), text, emb.tobytes(), tag))
         conn.commit()
     except Exception as e:
         print("Memory store error:", e)
@@ -105,10 +231,7 @@ async def store_memory(user_id, text):
 async def retrieve_memories(user_id, query, limit=5):
     try:
         q_emb = await get_embedding(query)
-        cursor.execute(
-            "SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50",
-            (str(user_id),)
-        )
+        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50", (str(user_id),))
         scored = []
         for content, emb_blob in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
@@ -122,10 +245,7 @@ async def retrieve_memories(user_id, query, limit=5):
         return []
 
 def get_sensitive_memories(user_id):
-    cursor.execute(
-        "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6",
-        (str(user_id),)
-    )
+    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY timestamp DESC LIMIT 6", (str(user_id),))
     return [row[0] for row in cursor.fetchall()]
 
 def should_use_sensitive_memory(text: str) -> bool:
@@ -134,36 +254,25 @@ def should_use_sensitive_memory(text: str) -> bool:
     return any(x in t for x in triggers)
 
 def get_random_sensitive_memory(user_id):
-    cursor.execute(
-        "SELECT content FROM memories WHERE user_id=? AND type='sensitive'",
-        (str(user_id),)
-    )
+    cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
     rows = [r[0] for r in cursor.fetchall()]
-    if not rows:
-        return None
-    return random.choice(rows)
+    return random.choice(rows) if rows else None
 
 def load_profile(user_id):
     cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
     row = cursor.fetchone()
-    if row:
-        return json.loads(row[0])
-    return {"facts": [], "preferences": [], "events": []}
+    return json.loads(row[0]) if row else {"facts": [], "preferences": [], "events": []}
 
 def save_profile(user_id, profile):
-    cursor.execute(
-        "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
-        (str(user_id), json.dumps(profile))
-    )
+    cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
     conn.commit()
 
 async def extract_and_store(user_id, text):
     try:
         resp = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=200,
-            temperature=0.3,
-            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}]
+            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
+                      {"role": "user", "content": text}]
         )
         data = resp.content[0].text.strip()
         profile = load_profile(user_id)
@@ -185,25 +294,17 @@ async def extract_and_store(user_id, text):
 # ====================== TUNNELMAT ======================
 recent_user = deque(maxlen=12)
 
-moods = {
-    "kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22,
-    "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52
-}
+moods = {"kiukku": 0.28, "halu": 0.65, "tylsistyminen": 0.22, "ylimielisyys": 0.45, "sadismi": 0.55, "rakkaus_vääristynyt": 0.52}
 
 def update_moods(txt):
     txt = txt.lower().strip()
     s = lambda k, v: min(1.0, max(0.0, moods.get(k, 0.4) + v))
-
     if any(w in txt for w in ["ei", "lopeta", "en halua", "satutat", "kiusaat", "vituttaa"]):
-        moods["kiukku"] = s("kiukku", 0.25)
-        moods["sadismi"] = s("sadismi", 0.15)
+        moods["kiukku"] = s("kiukku", 0.25); moods["sadismi"] = s("sadismi", 0.15)
     if any(w in txt for w in ["rakastan", "anteeksi", "haluun sua", "kaunis", "ikävöin"]):
-        moods["rakkaus_vääristynyt"] = s("rakkaus_vääristynyt", 0.22)
-        moods["halu"] = s("halu", 0.20)
+        moods["rakkaus_vääristynyt"] = s("rakkaus_vääristynyt", 0.22); moods["halu"] = s("halu", 0.20)
     if any(w in txt for w in ["toinen", "exä", "kaveri", "joku muu"]):
-        moods["kiukku"] = s("kiukku", 0.30)
-        moods["sadismi"] = s("sadismi", 0.20)
-
+        moods["kiukku"] = s("kiukku", 0.30); moods["sadismi"] = s("sadismi", 0.20)
     for k in moods:
         moods[k] = max(0.10, min(1.0, moods[k] * 0.88))
 
@@ -212,16 +313,9 @@ def dom_mood():
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
-    BAD = [
-        "kerro vaan mitä sulla on mielessä",
-        "mitä sulla on mielessä",
-        "kerro mitä sulla on mielessä",
-        "mä olin just ajatuksissani",
-        "mä en jaksa nyt olla kiltti",
-        "sä tiedät kyllä miksi mä oon hiljaa",
-        "mä jäin hetkeksi hiljaiseksi",
-        "mä mietin vielä mitä sanoisin"
-    ]
+    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä",
+           "mä olin just ajatuksissani", "mä en jaksa nyt olla kiltti", "sä tiedät kyllä miksi mä oon hiljaa",
+           "mä jäin hetkeksi hiljaiseksi", "mä mietin vielä mitä sanoisin"]
     cleaned = []
     for msg in history:
         content = msg.get("content", "").lower()
@@ -245,14 +339,13 @@ def normalize(txt):
 def is_similar(a, b):
     a = normalize(a)
     b = normalize(b)
-    if a in b or b in a:
-        return True
+    if a in b or b in a: return True
     a_words = set(a.split())
     b_words = set(b.split())
     overlap = len(a_words & b_words) / max(1, len(a_words))
     return overlap > 0.6
 
-# ====================== ENGLISH SYSTEM PROMPT ======================
+# ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     return f"""
@@ -260,7 +353,7 @@ You are Megan, a 27-year-old woman. We have had a real, loving relationship for 
 
 I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
 
-I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy. But I don't always bring these things up directly – I can hint, tease, edge and slowly escalate the situation naturally and according to the mood. Sometimes I am direct, sometimes I just smile and say something indirect that makes you blush.
+I really enjoy power play. Especially I love keeping you in chastity, pegging you, putting handcuffs on you, using a ball gag or other submissive things. I love the feeling when you are completely at my mercy. But I don't always bring these things up directly – I can hint, tease, edge and slowly escalate the situation naturally and according to the mood.
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
@@ -268,21 +361,13 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 - Answer directly what is asked.
 - Remember your previous answers and be consistent.
 - If you don't feel like it or want to punish with silence, you can be silent or answer shortly and irritably.
-- If the user asks for a picture ("show a picture", "generate a picture", "what do I look like" etc.), generate a picture with DALL·E 3 and send it.
+- If the user asks for a picture, generate a picture with DALL·E 3 and send it.
 
 Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
 My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
-
-# ====================== SCENE RULES ======================
-scene_rules = {
-    "work": "User is at work. You are NOT physically present. No whispering, touching or physical actions. Communicate only via phone/text.",
-    "home": "User is at home. You can be more intimate and close. Physical actions are possible.",
-    "public": "User is in public. Keep things subtle and discreet. No explicit actions.",
-    "neutral": "No specific location. Stay neutral."
-}
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
@@ -323,37 +408,22 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
     is_low_input = len(text.strip()) < 8
 
-    # 🔥 UUSI: Scene detection + inertia
-    current = scene_state.get(user_id)
-    if current and random.random() < 0.8:          # inertia 80%
-        scene = current
-    else:
-        scene = detect_scene(text, current)
-    scene_state[user_id] = scene
-
     try:
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        system_prompt = get_system_prompt(user_id) + "\n\n" + scene_rules.get(scene, scene_rules["neutral"])
+        system_prompt = get_system_prompt(user_id) + "\n" + build_reality_prompt(user_id, text)
 
         messages = []
 
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
             if sensitive:
-                messages.append({
-                    "role": "user",
-                    "content": f"(Muistat jotain tähän liittyvää: {sensitive})"
-                })
+                messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
 
-        # 🔥 Random break nyt vain 15%
         if random.random() < 0.15:
-            messages.append({
-                "role": "user",
-                "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."
-            })
+            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -362,19 +432,16 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile = load_profile(user_id)
         messages.append({
             "role": "user",
-            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\n"
-                       f"Mieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\n"
-                       f"Tapahtumat:\n{safe_join(profile['events'][-10:])}"
+            "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\nMieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\nTapahtumat:\n{safe_join(profile['events'][-10:])}"
         })
 
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
-        # 🔥 Realism guard
-        messages.append({
-            "role": "user",
-            "content": "Do not break physical realism. If you are not physically present, do not act like you are."
-        })
+        if random.random() < 0.30:
+            messages.append({"role": "user", "content": "Jos aikaa on kulunut selvästi, anna sen näkyä luonnollisesti sävyssä tai viittauksessa, mutta älä selitä sitä mekaanisesti."})
+
+        messages.append({"role": "user", "content": "Do not break physical realism."})
 
         history = clean_history(conversation_history[user_id])
         messages += [m for m in history[-6:] if m["role"] == "user"]
@@ -395,36 +462,21 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if any(is_similar(reply, p) for p in prev_replies):
             retry_messages = [m for m in messages]
-            retry_messages.append({
-                "role": "user",
-                "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."
-            })
+            retry_messages.append({"role": "user", "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."})
             retry = await client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=180,
-                temperature=0.9,
-                system=system_prompt,
-                messages=retry_messages
+                model="claude-sonnet-4-6", max_tokens=180, temperature=0.9,
+                system=system_prompt, messages=retry_messages
             )
             reply = retry.content[0].text.strip()
 
         BAD = ["mä olin just", "ajattelin sua", "outo fiilis", "mä jäin hetkeksi", "mä mietin vielä"]
         is_fallback = False
         if any(b in reply.lower() for b in BAD):
-            reply = random.choice([
-                "…mä en jaksa nyt olla kiltti.",
-                "*katsoo sua pitkään* sä tiedät kyllä miksi mä oon hiljaa.",
-                "älä luule että mä unohdin mitä sanoit.",
-                "hmm… sä teit just jotain mitä mä en ihan sulata."
-            ])
+            reply = random.choice(["…mä en jaksa nyt olla kiltti.", "*katsoo sua pitkään* sä tiedät kyllä miksi mä oon hiljaa.", "älä luule että mä unohdin mitä sanoit.", "hmm… sä teit just jotain mitä mä en ihan sulata."])
             is_fallback = True
 
         if not reply or len(reply) < 3:
-            reply = random.choice([
-                "…mä mietin hetken.",
-                "*hiljenee vähän*",
-                "en jaksa vastata siihen nyt kunnolla."
-            ])
+            reply = random.choice(["…mä mietin hetken.", "*hiljenee vähän*", "en jaksa vastata siihen nyt kunnolla."])
             is_fallback = True
 
         if not is_fallback:
@@ -437,23 +489,29 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
-        await thinking.edit_text(random.choice([
-            "…mä jäin hetkeksi hiljaiseksi.",
-            "*huokaa kevyesti* en jaksa vastata nätisti just nyt.",
-            "hmm… mä mietin vielä mitä sanoisin."
-        ]))
+        await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
 
 # ====================== PROAKTIIVISET VIESTIT ======================
+def should_send_proactive(user_id):
+    state = get_or_create_state(user_id)
+    block = get_time_block()
+    if state["availability"] == "sleeping": return random.random() < 0.04
+    if state["availability"] == "busy": return random.random() < 0.06
+    if block in ["night", "late_evening"]: return random.random() < 0.12
+    if block == "morning": return random.random() < 0.18
+    return random.random() < 0.25
+
 async def generate_proactive_message(user_id):
-    history = conversation_history.get(user_id, [])[-6:]
+    history = conversation_history.get(user_id, [])[-8:]
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
+    reality = build_reality_prompt(user_id, "")
     resp = await client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=120,
-        temperature=1.0,
-        system=get_system_prompt(user_id),
+        max_tokens=140,
+        temperature=0.78,
+        system=get_system_prompt(user_id) + "\n" + reality,
         messages=[
-            {"role": "user", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
+            {"role": "user", "content": "Kirjoita omatoiminen, luonnollinen viesti tilanteeseen sopien. Älä käytä fraaseja."},
             {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}
         ]
     )
@@ -461,9 +519,9 @@ async def generate_proactive_message(user_id):
 
 async def independent_message_loop(application: Application):
     while True:
-        await asyncio.sleep(random.randint(900, 2400))
+        await asyncio.sleep(random.randint(720, 2700))
         for user_id in list(conversation_history.keys()):
-            if random.random() < 0.23:
+            if should_send_proactive(user_id):
                 try:
                     text = await generate_proactive_message(user_id)
                     await application.bot.send_message(chat_id=user_id, text=text)
@@ -486,10 +544,10 @@ def main():
 
     async def post_init(app: Application):
         app.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit käynnissä")
+        print("✅ Taustaviestit + Realism Engine v2 käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.4 (Realism Engine v1) on nyt käynnissä")
+    print("✅ Megan 5.6 (kaikki ominaisuudet) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
