@@ -37,7 +37,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.3 – Claude Sonnet 4.6 (temperature/top_p fixed)")
+print("🚀 Megan 5.4 – Claude Sonnet 4.6 (Realism Engine v1)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS profiles (
 )
 """)
 conn.commit()
+
+# ====================== SCENE STATE (uusi) ======================
+scene_state = {}
+
+def detect_scene(text, current_scene):
+    t = text.lower()
+    if any(w in t for w in ["töissä", "duunissa", "työssä", "kokouksessa", "toimistolla"]):
+        return "work"
+    if any(w in t for w in ["kotona", "sängyssä", "sohvalla", "kotoa", "asunnossa"]):
+        return "home"
+    if any(w in t for w in ["kaupassa", "ulkona", "kadulla", "julkinen", "ravintolassa"]):
+        return "public"
+    return current_scene or "neutral"
 
 # ====================== EMBEDDINGS ======================
 async def get_embedding(text):
@@ -263,6 +276,14 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
+# ====================== SCENE RULES ======================
+scene_rules = {
+    "work": "User is at work. You are NOT physically present. No whispering, touching or physical actions. Communicate only via phone/text.",
+    "home": "User is at home. You can be more intimate and close. Physical actions are possible.",
+    "public": "User is in public. Keep things subtle and discreet. No explicit actions.",
+    "neutral": "No specific location. Stay neutral."
+}
+
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
@@ -302,12 +323,20 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent_user.append(text)
     is_low_input = len(text.strip()) < 8
 
+    # 🔥 UUSI: Scene detection + inertia
+    current = scene_state.get(user_id)
+    if current and random.random() < 0.8:          # inertia 80%
+        scene = current
+    else:
+        scene = detect_scene(text, current)
+    scene_state[user_id] = scene
+
     try:
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
         thinking = await message.reply_text("…", disable_notification=True)
 
-        system_prompt = get_system_prompt(user_id)
+        system_prompt = get_system_prompt(user_id) + "\n\n" + scene_rules.get(scene, scene_rules["neutral"])
 
         messages = []
 
@@ -319,7 +348,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "content": f"(Muistat jotain tähän liittyvää: {sensitive})"
                 })
 
-        if random.random() < 0.35:
+        # 🔥 Random break nyt vain 15%
+        if random.random() < 0.15:
             messages.append({
                 "role": "user",
                 "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."
@@ -340,13 +370,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
+        # 🔥 Realism guard
+        messages.append({
+            "role": "user",
+            "content": "Do not break physical realism. If you are not physically present, do not act like you are."
+        })
+
         history = clean_history(conversation_history[user_id])
         messages += [m for m in history[-6:] if m["role"] == "user"]
 
         response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=850,
-            temperature=0.85,          # top_p poistettu
+            temperature=0.85,
             system=system_prompt,
             messages=messages
         )
@@ -366,7 +402,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             retry = await client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=180,
-                temperature=0.9,       # top_p poistettu
+                temperature=0.9,
                 system=system_prompt,
                 messages=retry_messages
             )
@@ -414,7 +450,7 @@ async def generate_proactive_message(user_id):
     resp = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=120,
-        temperature=1.0,           # top_p poistettu
+        temperature=1.0,
         system=get_system_prompt(user_id),
         messages=[
             {"role": "user", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
@@ -453,7 +489,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.3 (Claude Sonnet 4.6 – temperature fixed) on nyt käynnissä")
+    print("✅ Megan 5.4 (Realism Engine v1) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
