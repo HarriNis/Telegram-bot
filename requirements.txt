@@ -1,5 +1,6 @@
 flask
 python-telegram-bot
-openai
+anthropic
 aiohttp
 numpy
+openai
