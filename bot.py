@@ -48,16 +48,14 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki NameErrorit korjattu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (muistihaku + dialogue-turn)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
-
-# ====================== GLOBAL STATE ======================
+continuity_state = {}
+last_proactive_sent = {}
 conversation_history = {}
 last_replies = {}
 recent_user = deque(maxlen=12)
-continuity_state = {}
-last_proactive_sent = {}
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -227,7 +225,7 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== DATABASE + MEMORY ======================
+# ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -251,6 +249,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
+# ====================== MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
     triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
@@ -264,15 +263,24 @@ def get_random_sensitive_memory(user_id):
 async def retrieve_memories(user_id, query, limit=5):
     try:
         q_emb = await get_embedding(query)
-        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 50", (str(user_id),))
+        cursor.execute("SELECT content, embedding FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 100", (str(user_id),))
         scored = []
         for content, emb_blob in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             score = cosine_similarity(q_emb, emb)
-            if score > 0.78:
+            if score > 0.60:
                 scored.append((score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
-        return [c for _, c in scored[:limit]]
+        seen = set()
+        results = []
+        for _, content in scored:
+            key = normalize(content)
+            if key not in seen:
+                seen.add(key)
+                results.append(content)
+            if len(results) >= limit:
+                break
+        return results
     except Exception as e:
         print("Memory retrieval error:", e)
         return []
@@ -328,6 +336,13 @@ async def store_memory(user_id, text):
         conn.commit()
     except Exception as e:
         print("Memory store error:", e)
+
+async def store_dialogue_turn(user_id, user_text, assistant_text):
+    try:
+        combined = f"Käyttäjä sanoi: {user_text}\nMegan vastasi: {assistant_text}"
+        await store_memory(user_id, combined)
+    except Exception as e:
+        print("Dialogue turn store error:", e)
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -466,14 +481,18 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.append({"role": "user", "content": "Remember these:\n" + safe_join(memories)})
+            messages.insert(0, {"role": "user", "content": "Important past context that really happened earlier:\n" + safe_join(memories)})
 
-        if random.random() < 0.25:
-            profile = load_profile(user_id)
-            messages.append({
-                "role": "user",
-                "content": f"Faktat:\n{safe_join(profile['facts'][-10:])}\n\nMieltymykset:\n{safe_join(profile['preferences'][-10:])}\n\nTapahtumat:\n{safe_join(profile['events'][-10:])}"
-            })
+        profile = load_profile(user_id)
+        profile_parts = []
+        if profile["facts"]:
+            profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
+        if profile["preferences"]:
+            profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
+        if profile["events"]:
+            profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
+        if profile_parts:
+            messages.insert(0, {"role": "user", "content": "\n\n".join(profile_parts)})
 
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
@@ -490,7 +509,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_similar(last, prev):
                 messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
 
-        messages += history[-10:]
+        messages += history[-20:]
 
         response = await anthropic_client.messages.create(
             model="claude-sonnet-4-6",
@@ -533,6 +552,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await thinking.edit_text(reply)
         await extract_and_store(user_id, text)
+        await store_dialogue_turn(user_id, text, reply)   # ← uusi
 
     except Exception as e:
         print(f"Vastausvirhe: {e}")
@@ -615,7 +635,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (kaikki virheet korjattu) on nyt käynnissä")
+    print("✅ Megan 6.1 (muistihaku + dialogue-turn) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
