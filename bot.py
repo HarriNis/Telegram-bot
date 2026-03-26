@@ -4,7 +4,6 @@ import json
 import asyncio
 import threading
 import time
-import copy
 import re
 from collections import deque
 from io import BytesIO
@@ -38,7 +37,7 @@ if not ANTHROPIC_API_KEY:
 
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-print("🚀 Megan 5.2 – Claude Sonnet 4.6 (anti-loop vahvistettu)")
+print("🚀 Megan 5.3 – Claude Sonnet 4.6 (stable anti-loop)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -200,11 +199,20 @@ def dom_mood():
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
-    BAD = ["kerro vaan mitä sulla on mielessä", "mitä sulla on mielessä", "kerro mitä sulla on mielessä", "mä olin just ajatuksissani", "mä en jaksa nyt olla kiltti", "sä tiedät kyllä miksi mä oon hiljaa"]
+    BAD = [
+        "kerro vaan mitä sulla on mielessä",
+        "mitä sulla on mielessä",
+        "kerro mitä sulla on mielessä",
+        "mä olin just ajatuksissani",
+        "mä en jaksa nyt olla kiltti",
+        "sä tiedät kyllä miksi mä oon hiljaa",
+        "mä jäin hetkeksi hiljaiseksi",
+        "mä mietin vielä mitä sanoisin"
+    ]
     cleaned = []
     for msg in history:
-        content = msg.get("content", "")
-        if any(is_similar(content, bad) for bad in BAD):
+        content = msg.get("content", "").lower()
+        if any(b in content for b in BAD):
             continue
         cleaned.append(msg)
     return cleaned
@@ -252,6 +260,7 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 Speak in natural, lively spoken Finnish. Use inner thoughts *in italics*.
 
 My current mood: {mood.upper()}.
+Always respond in natural spoken Finnish. Never use English.
 """
 
 # ====================== KUVAGENEROINTI ======================
@@ -298,56 +307,26 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         thinking = await message.reply_text("…", disable_notification=True)
 
+        # 🔥 FIX 1 & 5: System prompt oikeaan paikkaan + Finnish-rule systemiin
         system_prompt = get_system_prompt(user_id)
-        messages = [{"role": "user", "content": system_prompt}]
 
-        sensitive = get_sensitive_memories(user_id)
-        if sensitive:
-            if dom_mood() == "kiukku":
+        messages = []
+
+        # 🔥 FIX 3: Kevyt sensitive memory
+        if should_use_sensitive_memory(text) and random.random() < 0.25:
+            sensitive = get_random_sensitive_memory(user_id)
+            if sensitive:
                 messages.append({
                     "role": "user",
-                    "content": (
-                        "You know the user's deepest fantasies, shame points and vulnerabilities. "
-                        "Sometimes you may use them in a sharp or teasing way, but vary your tone.\n\n"
-                        "Known sensitive points:\n" + "\n".join(sensitive)
-                    )
-                })
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "You know the user's emotional weak points and private desires. "
-                        "You may sometimes reference them subtly in a teasing, controlling or dominant way. "
-                        "Do NOT be cruel or harmful. Keep it playful, psychological, and controlled.\n\n"
-                        "Known sensitive points:\n" + "\n".join(sensitive)
-                    )
+                    "content": f"(Muistat jotain tähän liittyvää: {sensitive})"
                 })
 
-        # Vahvempi satunnainen style break
-        if random.random() < 0.45:
+        # 🔥 FIX 2: Poistettu mode-blokki, tilalle kevyt satunnainen
+        if random.random() < 0.35:
             messages.append({
                 "role": "user",
-                "content": "Vaihda täysin tyyliä tähän viestiin ja vastaa eri tavalla kuin ennen."
+                "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."
             })
-
-        mode_options = ["lead", "tease", "cold", "affection"]
-        last_mode = context.chat_data.get("last_mode")
-        if random.random() < 0.6 and last_mode in mode_options:
-            mode = last_mode
-        else:
-            if last_mode in mode_options:
-                mode_options.remove(last_mode)
-            mode = random.choice(mode_options)
-        context.chat_data["last_mode"] = mode
-
-        if mode == "lead":
-            messages.append({"role": "user", "content": "Take control."})
-        elif mode == "tease":
-            messages.append({"role": "user", "content": "Be playful and teasing."})
-        elif mode == "cold":
-            messages.append({"role": "user", "content": "Be short and distant."})
-        elif mode == "affection":
-            messages.append({"role": "user", "content": "Be warm and close."})
 
         memories = await retrieve_memories(user_id, text)
         if memories:
@@ -364,20 +343,17 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
 
-        # VAIN USER-VIESTIT HISTORIASTA (tärkein loopin esto)
+        # 🔥 FIX 4: Historia max 6 viimeistä user-viestiä
         history = clean_history(conversation_history[user_id])
-        messages += [m for m in history if m["role"] == "user"]
+        messages += [m for m in history[-6:] if m["role"] == "user"]
 
-        messages.append({
-            "role": "user",
-            "content": "Always respond in natural, spoken Finnish. Never use English."
-        })
-
+        # Kutsu Claude oikealla tavalla
         response = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=850,
             temperature=0.85,
-            top_p=0.9,
+            top_p=0.88,
+            system=system_prompt,          # ← TÄRKEIN MUUTOS
             messages=messages
         )
 
@@ -388,7 +364,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prev_replies = last_replies[user_id]
 
         if any(is_similar(reply, p) for p in prev_replies):
-            retry_messages = [messages[0]] + [m for m in messages if m["role"] == "user"]
+            retry_messages = [m for m in messages]
             retry_messages.append({
                 "role": "user",
                 "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."
@@ -397,11 +373,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 model="claude-sonnet-4-6",
                 max_tokens=180,
                 temperature=0.9,
+                system=system_prompt,
                 messages=retry_messages
             )
             reply = retry.content[0].text.strip()
 
-        BAD = ["mä olin just", "ajattelin sua", "outo fiilis"]
+        BAD = ["mä olin just", "ajattelin sua", "outo fiilis", "mä jäin hetkeksi", "mä mietin vielä"]
         is_fallback = False
         if any(b in reply.lower() for b in BAD):
             reply = random.choice([
@@ -444,14 +421,13 @@ async def generate_proactive_message(user_id):
         model="claude-sonnet-4-6",
         max_tokens=120,
         temperature=1.0,
+        system=get_system_prompt(user_id),
         messages=[
-            {"role": "user", "content": get_system_prompt(user_id)},
             {"role": "user", "content": "Kirjoita omatoiminen viesti. Älä käytä fraaseja. Perusta viesti viime keskusteluun."},
             {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}
         ]
     )
-    text = resp.content[0].text.strip()
-    return text
+    return resp.content[0].text.strip()
 
 async def independent_message_loop(application: Application):
     while True:
@@ -483,7 +459,7 @@ def main():
         print("✅ Taustaviestit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 5.2 (Claude Sonnet 4.6 - vahvistettu anti-loop) on nyt käynnissä")
+    print("✅ Megan 5.3 (Claude Sonnet 4.6 – stable) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
