@@ -6,6 +6,7 @@ import threading
 import time
 import re
 import base64
+import logging
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -18,6 +19,8 @@ from openai import AsyncOpenAI
 import aiohttp
 import sqlite3
 import numpy as np
+
+logging.basicConfig(level=logging.INFO)
 
 # ====================== RENDER HEALTH CHECK ======================
 app = Flask(__name__)
@@ -33,7 +36,7 @@ def run_flask():
 # ====================== ASETUKSET ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")   # tarvitaan kuviin
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
@@ -45,7 +48,7 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu + cuckolding)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (kaikki viat korjattu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -282,7 +285,7 @@ def save_profile(user_id, profile):
 
 async def extract_and_store(user_id, text):
     try:
-        resp = await client.messages.create(
+        resp = await anthropic_client.messages.create(
             model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
             messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
                       {"role": "user", "content": text}]
@@ -383,13 +386,11 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI (korjattu) ======================
+# ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
-
         enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
-
         response = await openai_client.images.generate(
             model="dall-e-3",
             prompt=enhanced_prompt,
@@ -397,21 +398,19 @@ async def generate_and_send_image(update: Update, user_text: str):
             size="1024x1024",
             quality="standard"
         )
-
         image_base64 = response.data[0].b64_json
         image_data = base64.b64decode(image_base64)
-
         caption = random.choice(["Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈", "Mä tein tän just sulle. Mitä tunteita se herättää? 💦", "No niin... tässä on se. Tykkäätkö? 😉"])
-
         await thinking.edit_text("Lähetän kuvan...")
         await update.message.reply_photo(photo=BytesIO(image_data), caption=caption, filename="megan_image.png")
-
     except Exception as e:
         print(f"Kuvavirhe: {e}")
         await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
 
 # ====================== MEGAN_CHAT ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     user_id = update.effective_user.id
     message = update.message
     text = (message.text or message.caption or "").strip()
@@ -491,7 +490,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages += history[-10:]
 
-        response = await client.messages.create(
+        response = await anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=850,
             temperature=0.85,
@@ -508,7 +507,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(is_similar(reply, p) for p in prev_replies):
             retry_messages = [m for m in messages]
             retry_messages.append({"role": "user", "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."})
-            retry = await client.messages.create(
+            retry = await anthropic_client.messages.create(
                 model="claude-sonnet-4-6", max_tokens=180, temperature=0.9,
                 system=system_prompt, messages=retry_messages
             )
@@ -554,7 +553,7 @@ async def generate_proactive_message(user_id):
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
     elapsed_label = get_elapsed_label(user_id)
     reality = build_reality_prompt_from_state(user_id, elapsed_label)
-    resp = await client.messages.create(
+    resp = await anthropic_client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=140,
         temperature=0.78,
@@ -600,7 +599,7 @@ def main():
         print("✅ Taustaviestit + Persona Spread Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (kaikki viat korjattu + cuckolding) on nyt käynnissä")
+    print("✅ Megan 6.1 (kaikki viat korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
