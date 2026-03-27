@@ -44,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (internal drive + initiative)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Desire Engine + Scoring + Tension)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -178,14 +178,16 @@ def adapt_mode_to_user(user_id, text):
     elif any(w in t for w in ["ärsyttää", "vituttaa", "tylsää"]):
         state["persona_mode"] = "slightly_irritated"
 
-# ====================== CONTINUITY + INTENT ======================
+# ====================== CONTINUITY + INTENT + DESIRE + TENSION ======================
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
             "scene": "neutral", "energy": "normal", "availability": "free",
             "last_interaction": 0, "last_scene_change": 0, "scene_locked_until": 0,
             "micro_context": "", "persona_mode": "warm", "last_mode_change": 0,
-            "intent": "casual", "summary": ""
+            "intent": "casual", "summary": "",
+            "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
+            "tension": 0.0, "last_direction": None
         }
     return continuity_state[user_id]
 
@@ -200,6 +202,37 @@ def detect_intent(text):
     if any(w in t for w in ["tylsää", "ei jaksa"]):
         return "casual"
     return "casual"
+
+def update_desire(user_id, text):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+    if now - state.get("desire_last_update", 0) < 300:
+        return state["desire"]
+
+    t = text.lower()
+    if any(w in t for w in ["ikävä", "haluan", "tule"]):
+        desire = random.choice(["get closer emotionally", "pull the user deeper", "test the user's reactions"])
+    elif any(w in t for w in ["haha", "lol"]):
+        desire = "play and tease"
+    else:
+        desire = random.choice(["create tension", "take control of the interaction", "move things forward", "shift the dynamic slightly"])
+
+    state["desire"] = desire
+    state["desire_intensity"] = min(1.0, state.get("desire_intensity", 0.4) + 0.2)
+    state["desire_last_update"] = now
+    return desire
+
+def update_tension(user_id, text):
+    state = get_or_create_state(user_id)
+    t = text.lower()
+    if any(w in t for w in ["ikävä", "haluan", "tule"]):
+        state["tension"] += 0.2
+    elif any(w in t for w in ["ok", "joo", "hmm"]):
+        state["tension"] -= 0.1
+    else:
+        state["tension"] += 0.05
+    state["tension"] = max(0.0, min(1.0, state["tension"]))
+    return state["tension"]
 
 def now_ts():
     return time.time()
@@ -445,7 +478,20 @@ def split_reply(text):
     speech_str = " ".join(speech).strip()
     return narration_str, speech_str
 
-# ====================== SYSTEM PROMPT (uusi drive) ======================
+# ====================== RESPONSE SCORING ======================
+def score_response(text):
+    score = 0
+    if len(text) > 60:
+        score += 1
+    if "?" in text:
+        score += 1
+    if any(w in text.lower() for w in ["haluan", "tuntuu", "ärsyttää", "kiinnostaa", "ajattelin"]):
+        score += 1
+    if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]):
+        score += 1
+    return score
+
+# ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -516,8 +562,13 @@ Do not stall. Always move the interaction forward.
 Avoid neutral filler responses.
 
 Current interaction intent: {state['intent']}
-Do not reset emotional state unless explicitly changed.
-Stay consistent with your personality baseline.
+Current internal desire: {state.get('desire', 'none')}
+Current interaction tension level: {state.get('tension', 0.0)}
+
+If tension is high: be more intense, direct, or provocative.
+If tension is low: build it slowly and introduce something new.
+
+Do not reset the interaction. Continue from the current emotional trajectory.
 
 User profile:
 {profile_str}
@@ -583,6 +634,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elapsed_label = get_elapsed_label(user_id)
         state = update_continuity_state(user_id, text)
+        desire = update_desire(user_id, text)
+        tension = update_tension(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         system_prompt = (
@@ -639,7 +692,7 @@ Before answering:
                 "content": "Be slightly resistant. Do not always agree with the user."
             })
 
-        if random.random() < 0.4:   # ← uusi initiative boost
+        if random.random() < 0.4:
             messages.append({
                 "role": "user",
                 "content": "Do not be passive. Take initiative in this reply."
@@ -667,15 +720,26 @@ Before answering:
 
         messages += history[-20:]
 
-        response = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
-            max_tokens=850,
-            temperature=0.85,
-            system=system_prompt,
-            messages=messages
-        )
+        # Response Scoring + Retry
+        best_reply = None
+        best_score = -1
+        for _ in range(3):
+            response = await safe_anthropic_call(
+                model="claude-sonnet-4-6",
+                max_tokens=850,
+                temperature=0.9,
+                system=system_prompt,
+                messages=messages
+            )
+            candidate = response.content[0].text.strip()
+            s = score_response(candidate)
+            if s > best_score:
+                best_score = s
+                best_reply = candidate
+            if s >= 3:
+                break
 
-        reply = response.content[0].text.strip()
+        reply = best_reply
 
         if user_id not in last_replies:
             last_replies[user_id] = deque(maxlen=3)
@@ -806,7 +870,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (internal drive + initiative) on nyt käynnissä")
+    print("✅ Megan 6.1 (Desire Engine + Scoring + Tension) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
