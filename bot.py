@@ -39,6 +39,7 @@ def run_flask():
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+XAI_API_KEY = os.getenv("XAI_API_KEY")  # Grokille
 
 if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
     raise ValueError("Puuttuva API-avain!")
@@ -46,13 +47,18 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+grok_client = AsyncOpenAI(
+    api_key=XAI_API_KEY,
+    base_url="https://api.x.ai/v1"
+)
+
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution + Cloudinary + gpt-image-1)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Grok xAI + OpenAI hybrid images)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -583,6 +589,57 @@ def score_response(text):
         score += 1
     return score
 
+# ====================== SAFE IMAGE PROMPT ======================
+def build_safe_image_prompt(user_text: str) -> str:
+    text = (user_text or "").strip()
+
+    banned_terms = [
+        "rinnat", "pylly", "seksikäs", "dominoiva",
+        "tuhma", "märkä", "fetissi", "alaston", "eroottinen"
+    ]
+
+    lowered = text.lower()
+    for term in banned_terms:
+        lowered = lowered.replace(term, "")
+
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+
+    style_variants = [
+        "editorial fashion portrait",
+        "cinematic portrait photography",
+        "high-end studio fashion shot",
+        "dramatic realistic portrait"
+    ]
+
+    mood_variants = [
+        "confident expression",
+        "calm but intense presence",
+        "self-assured posture",
+        "elegant and bold styling"
+    ]
+
+    outfit_variants = [
+        "glossy black leggings",
+        "sleek black fashion outfit",
+        "modern fitted black clothing",
+        "minimal stylish black wardrobe"
+    ]
+
+    base_prompt = f"""
+{random.choice(style_variants)},
+27-year-old blonde woman,
+{random.choice(outfit_variants)},
+{random.choice(mood_variants)},
+soft cinematic lighting,
+highly detailed,
+realistic photo,
+safe, non-explicit, fashion photography
+""".strip()
+
+    if lowered:
+        return f"{base_prompt}\nUser preference to incorporate if safe: {lowered}"
+    return base_prompt
+
 # ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
@@ -680,21 +737,44 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI (gpt-image-1 + Cloudinary fallback) ======================
+# ====================== HYBRID IMAGE GENERATION (Grok first + OpenAI fallback) ======================
+async def generate_image_hybrid(user_text: str):
+    prompt = build_safe_image_prompt(user_text)
+
+    # 1. Try Grok first
+    try:
+        response = await grok_client.images.generate(
+            model="grok-2-image",
+            prompt=prompt,
+            size="1024x1024"
+        )
+        return base64.b64decode(response.data[0].b64_json)
+    except Exception as e:
+        print("Grok image error:", repr(e))
+
+    # 2. Fallback to OpenAI
+    try:
+        response = await openai_client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024"
+        )
+        return base64.b64decode(response.data[0].b64_json)
+    except Exception as e:
+        print("OpenAI fallback error:", repr(e))
+        return None
+
+# ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
+    image_data = None
+    caption = "Kuva ei valmistunut."
+
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
 
-        enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
-
-        response = await openai_client.images.generate(
-            model="gpt-image-1",
-            prompt=enhanced_prompt,
-            size="1024x1024"
-        )
-
-        image_base64 = response.data[0].b64_json
-        image_data = base64.b64decode(image_base64)
+        image_data = await generate_image_hybrid(user_text)
+        if image_data is None:
+            raise Exception("Both Grok and OpenAI failed")
 
         upload_result = cloudinary.uploader.upload(
             BytesIO(image_data),
@@ -702,7 +782,6 @@ async def generate_and_send_image(update: Update, user_text: str):
         )
 
         image_url = upload_result.get("secure_url")
-
         if not image_url:
             raise Exception("Cloudinary upload failed - no secure_url")
 
@@ -722,11 +801,13 @@ async def generate_and_send_image(update: Update, user_text: str):
         print("Kuvavirhe FULL:", repr(e))
         traceback.print_exc()
         try:
-            # fallback Telegramiin
-            await update.message.reply_photo(
-                photo=BytesIO(image_data),
-                caption=caption
-            )
+            if image_data is not None:
+                await update.message.reply_photo(
+                    photo=BytesIO(image_data),
+                    caption=caption
+                )
+            else:
+                await update.message.reply_text("...en saanut kuvaa luotua nyt.")
         except:
             await update.message.reply_text("...en saanut kuvaa luotua nyt.")
 
@@ -1004,7 +1085,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution + Cloudinary + gpt-image-1) on nyt käynnissä")
+    print("✅ Megan 6.1 (Grok xAI + OpenAI hybrid images) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
