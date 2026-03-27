@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Loop-fiksit)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (MemoryEngine v3)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -198,7 +198,7 @@ def maybe_interrupt_action(state, text):
             state["action_started"] = 0
 
 def breaks_scene_logic(reply, state):
-    return False   # placeholder korjaus
+    return False
 
 def breaks_temporal_logic(reply, state):
     if not state["current_action"]:
@@ -210,10 +210,10 @@ def breaks_temporal_logic(reply, state):
     return False
 
 def reinforce_micro_context(state):
-    return None   # placeholder korjaus
+    return None
 
 def get_recent_actions(user_id):
-    return "No recent actions."   # placeholder korjaus
+    return "No recent actions."
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -253,6 +253,13 @@ recent_context = deque(maxlen=6)
 # ====================== WORKING MEMORY ======================
 working_memory = {}
 
+# ====================== PERSONA BASELINE & DRIFT CONTROL ======================
+PERSONA_BASELINE = {
+    "dominance": 0.7,
+    "warmth": 0.5,
+    "playfulness": 0.4
+}
+
 # ====================== STATE SNAPSHOT ======================
 def build_state_snapshot(user_id):
     state = get_or_create_state(user_id)
@@ -281,10 +288,96 @@ def build_memory_context(memories):
             structured.append(f"- {m}")
     return "\n".join(structured[:6])
 
+# ====================== MEMORY ENGINE V3 HELPERS ======================
+def is_noise(content):
+    txt = content.lower()
+    if len(txt) < 20:
+        return True
+    if any(x in txt for x in ["ok", "joo", "hmm"]):
+        return True
+    return False
+
+def stabilize_persona(user_id):
+    state = get_or_create_state(user_id)
+    if "persona_vector" not in state:
+        state["persona_vector"] = PERSONA_BASELINE.copy()
+    vec = state["persona_vector"]
+    for k in vec:
+        baseline = PERSONA_BASELINE[k]
+        drift = vec[k] - baseline
+        if abs(drift) > 0.25:
+            vec[k] = baseline + drift * 0.5
+    return vec
+
+async def update_arcs(user_id, text):
+    state = get_or_create_state(user_id)
+    now = time.time()
+    if now - state.get("arc_last_update", 0) < 600:
+        return
+    memories = await retrieve_memories(user_id, text, limit=20)
+    joined = "\n".join(memories[-10:])
+    try:
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6",
+            max_tokens=120,
+            temperature=0.4,
+            messages=[
+                {"role": "user", "content": "Extract 1-3 relationship arcs. JSON: {\"arcs\": [\"...\"]}. Examples: emotional push-pull, dominance escalation, trust testing"},
+                {"role": "user", "content": joined}
+            ]
+        )
+        parsed = json.loads(resp.content[0].text.strip())
+        arcs = parsed.get("arcs", [])
+        if arcs:
+            state["relationship_arcs"] = arcs
+            state["active_arc"] = arcs[0]
+            state["arc_last_update"] = now
+    except:
+        pass
+
+async def update_goal(user_id, text):
+    state = get_or_create_state(user_id)
+    now = time.time()
+    if now - state.get("goal_updated", 0) < 300:
+        return state.get("current_goal")
+    try:
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6",
+            max_tokens=60,
+            temperature=0.5,
+            messages=[
+                {"role": "user", "content": "Define immediate conversational goal in 1 sentence. Example: increase tension, deepen emotional bond, test reaction"},
+                {"role": "user", "content": text}
+            ]
+        )
+        goal = resp.content[0].text.strip()
+        state["current_goal"] = goal
+        state["goal_updated"] = now
+    except:
+        pass
+    return state.get("current_goal")
+
+def update_emotion(user_id, text):
+    state = get_or_create_state(user_id)
+    if "emotional_state" not in state:
+        state["emotional_state"] = {"valence": 0.0, "arousal": 0.5, "attachment": 0.5}
+    emo = state["emotional_state"]
+    t = text.lower()
+    if "ikävä" in t:
+        emo["attachment"] += 0.1
+        emo["valence"] += 0.05
+    if "ärsyttää" in t:
+        emo["valence"] -= 0.2
+    if "haluan" in t:
+        emo["arousal"] += 0.15
+    for k in emo:
+        emo[k] = max(0.0, min(1.0, emo[k]))
+    return emo
+
 # ====================== BACKGROUND TASK ======================
 background_task = None
 
-# ====================== SAFE ANTHROPIC CALL (timeout lisätty) ======================
+# ====================== SAFE ANTHROPIC CALL ======================
 async def safe_anthropic_call(**kwargs):
     for i in range(3):
         try:
@@ -389,6 +482,10 @@ def get_or_create_state(user_id):
             "tension": 0.0, "last_direction": None,
             "core_desires": [], "desire_profile_updated": 0,
             "phase": "neutral", "phase_last_change": 0,
+            "relationship_arcs": [], "active_arc": None, "arc_last_update": 0,
+            "current_goal": None, "goal_updated": 0,
+            "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
+            "persona_vector": PERSONA_BASELINE.copy(),
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -575,7 +672,7 @@ Current continuity state:
 - Current intent: {state['intent']}
 """
 
-# ====================== MEMORY SCORING ======================
+# ====================== MEMORY SCORING (retrieval optimization) ======================
 async def retrieve_memories(user_id, query, limit=8):
     try:
         q_emb = await get_embedding(query)
@@ -585,6 +682,8 @@ async def retrieve_memories(user_id, query, limit=8):
         scored = []
         now = time.time()
         for content, emb_blob, ts in rows:
+            if is_noise(content):
+                continue
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             cosine = cosine_similarity(q_emb, emb)
             try:
@@ -597,16 +696,21 @@ async def retrieve_memories(user_id, query, limit=8):
             final_score = 0.6 * cosine + 0.25 * recency + 0.15 * importance
             scored.append((final_score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
-        seen = set()
-        results = []
+        seen_intents = set()
+        unique = []
         for _, content in scored:
-            key = normalize(content)
-            if key not in seen:
-                seen.add(key)
-                results.append(content)
-            if len(results) >= limit:
+            try:
+                parsed = json.loads(content)
+                intent = parsed.get("intent")
+            except:
+                intent = None
+            if intent and intent in seen_intents:
+                continue
+            seen_intents.add(intent)
+            unique.append(content)
+            if len(unique) >= limit:
                 break
-        return results
+        return unique
     except Exception as e:
         print("Memory retrieval error:", e)
         return []
@@ -1024,8 +1128,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
-        # === WORKING MEMORY UPDATE ===
+        # === MEMORY ENGINE V3 UPDATES ===
         update_working_memory(user_id, text)
+        await update_arcs(user_id, text)
+        goal = await update_goal(user_id, text)
+        emo = update_emotion(user_id, text)
+        persona_vec = stabilize_persona(user_id)
 
         system_prompt = (
             get_system_prompt(user_id)
@@ -1060,6 +1168,29 @@ Your response MUST reflect this exact situation.
         messages.insert(0, {
             "role": "user",
             "content": f"Relevant past interactions:\n{memory_context}"
+        })
+
+        # === MEMORY ENGINE V3 INJECTIONS (emotion → goal → arcs → persona) ===
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Emotional state: valence={emo['valence']}, arousal={emo['arousal']}, attachment={emo['attachment']}"
+        })
+
+        if goal:
+            messages.insert(0, {
+                "role": "user",
+                "content": f"Your current goal: {goal}. You must steer toward this."
+            })
+
+        if state.get("active_arc"):
+            messages.insert(0, {
+                "role": "user",
+                "content": f"Current relationship dynamic: {state['active_arc']}"
+            })
+
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Persona calibration: dominance={persona_vec['dominance']}, warmth={persona_vec['warmth']}"
         })
 
         # === DIRECTION LAYER ===
@@ -1183,7 +1314,6 @@ Before answering:
             if s >= 3:
                 break
 
-        # Fallback jos best_reply jäi Noneksi
         if not best_reply:
             best_reply = "…mä mietin hetken."
 
@@ -1242,7 +1372,7 @@ Before answering:
             await message.reply_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
         return
 
-# ====================== PROAKTIIVISET VIESTIT (throttle lisätty) ======================
+# ====================== PROAKTIIVISET VIESTIT ======================
 def should_send_proactive(user_id):
     state = get_or_create_state(user_id)
     if state["intent"] == "intimate" and random.random() < 0.4: return True
@@ -1285,7 +1415,6 @@ async def independent_message_loop(application: Application):
             await asyncio.sleep(30)
             print("⏱️ Proactive tick")
             for user_id in list(conversation_history.copy().keys()):
-                # Throttle lisätty
                 if len(conversation_history.get(user_id, [])) < 2 or random.random() < 0.8:
                     continue
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
@@ -1315,10 +1444,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + Memory Pipeline + Loop-fiksit käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Loop-fiksit) on nyt käynnissä")
+    print("✅ Megan 6.1 (MemoryEngine v3) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
