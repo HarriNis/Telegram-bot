@@ -19,6 +19,8 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 import sqlite3
 import numpy as np
+import cloudinary
+import cloudinary.uploader
 
 logging.basicConfig(level=logging.INFO)
 
@@ -44,7 +46,13 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution)")
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
+
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution + Cloudinary)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -672,11 +680,13 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI ======================
+# ====================== KUVAGENEROINTI (Cloudinary) ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
+
         enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
+
         response = await openai_client.images.generate(
             model="dall-e-3",
             prompt=enhanced_prompt,
@@ -684,14 +694,32 @@ async def generate_and_send_image(update: Update, user_text: str):
             size="1024x1024",
             quality="standard"
         )
+
         image_base64 = response.data[0].b64_json
         image_data = base64.b64decode(image_base64)
-        caption = random.choice(["Tässä sulla on se kuva mitä halusit... katso tarkkaan 😈", "Mä tein tän just sulle. Mitä tunteita se herättää? 💦", "No niin... tässä on se. Tykkäätkö? 😉"])
-        await thinking.edit_text("Lähetän kuvan...")
-        await update.message.reply_photo(photo=BytesIO(image_data), caption=caption, filename="megan_image.png")
+
+        upload_result = cloudinary.uploader.upload(
+            BytesIO(image_data),
+            folder="megan_images"
+        )
+
+        image_url = upload_result.get("secure_url")
+
+        caption = random.choice([
+            "Tässä sulle jotain mitä mä halusin näyttää… 😈",
+            "Katso tarkkaan mitä mä tein sulle… 💦",
+            "No niin… nyt sä näet sen 😉"
+        ])
+
+        await thinking.edit_text("Valmis.")
+
+        await update.message.reply_text(
+            f"{caption}\n\n{image_url}"
+        )
+
     except Exception as e:
         print(f"Kuvavirhe: {e}")
-        await update.message.reply_text("...en saanut kuvaa luotua nyt. Kokeile uudestaan.")
+        await update.message.reply_text("...en saanut kuvaa luotua nyt.")
 
 # ====================== MEGAN_CHAT ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -967,7 +995,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution) on nyt käynnissä")
+    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution + Cloudinary) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
