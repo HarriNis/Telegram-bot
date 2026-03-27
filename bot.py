@@ -44,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (cursor / DB fix)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (sensitive memory fix)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -122,6 +122,25 @@ def update_moods(txt):
 
 def dom_mood():
     return max(moods, key=moods.get)
+
+# ====================== SENSITIVE MEMORY HELPERS ======================
+def should_use_sensitive_memory(text: str) -> bool:
+    txt = text.lower()
+    return any(w in txt for w in [
+        "ikävä", "haluan", "tunne", "pelkään", "ahdistaa", "kiusaa"
+    ])
+
+def get_random_sensitive_memory(user_id):
+    try:
+        cursor.execute(
+            "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1",
+            (str(user_id),)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print("Sensitive memory error:", e)
+        return None
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -762,7 +781,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (cursor / DB fix) on nyt käynnissä")
+    print("✅ Megan 6.1 (sensitive memory fix) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
