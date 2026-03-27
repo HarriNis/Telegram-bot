@@ -64,7 +64,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Venice.ai ensisijainen kuvagenerointi)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Venice.ai ensisijainen kuvagenerointi + täysi kuvamuisti)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -336,6 +336,14 @@ def build_memory_context(memories):
     for m in memories:
         try:
             parsed = json.loads(m)
+
+            if parsed.get("type") == "image_sent":
+                structured.append(
+                    f"- Aiemmin lähetit käyttäjälle kuvan "
+                    f"(pyyntö: {parsed.get('user_request')})"
+                )
+                continue
+
             structured.append(
                 f"- Aiemmin: {parsed.get('user')} → {parsed.get('assistant')} "
                 f"(intent: {parsed.get('intent')}, phase: {parsed.get('state', {}).get('phase')})"
@@ -627,6 +635,10 @@ def get_or_create_state(user_id):
             "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
             "side_characters": DEFAULT_SIDE_CHARACTERS.copy(),
             "active_side_character": None,
+
+            # UUSI: kuvamuisti
+            "last_image": None,
+            "image_history": [],
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -834,6 +846,15 @@ async def retrieve_memories(user_id, query, limit=8):
             age_hours = (now - ts_val) / 3600 if ts_val else 999
             recency = 1 / (1 + age_hours)
             importance = 1.5 if any(w in content.lower() for w in ["haluan", "sinä", "me", "tunne", "ikävä", "kiusaa"]) else 1.0
+
+            # UUSI: kuvat saavat ekstra-painon
+            try:
+                parsed = json.loads(content)
+                if parsed.get("type") == "image_sent":
+                    importance *= 1.25
+            except:
+                pass
+
             final_score = 0.6 * cosine + 0.25 * recency + 0.15 * importance
             scored.append((final_score, content))
         scored.sort(reverse=True, key=lambda x: x[0])
@@ -934,6 +955,65 @@ async def store_dialogue_turn(user_id, user_text, assistant_text):
             conn.commit()
     except Exception as e:
         print("Dialogue turn store error:", e)
+
+# ====================== UUSI: KUVATAPAHTUMIEN TALLENNUS ======================
+def register_sent_image(user_id, user_text, image_url=None, prompt_used=None):
+    state = get_or_create_state(user_id)
+
+    event = {
+        "type": "image_sent",
+        "user_request": user_text,
+        "image_url": image_url,
+        "prompt_used": prompt_used,
+        "timestamp": time.time(),
+    }
+
+    state["last_image"] = event
+    state["image_history"].append(event)
+    state["image_history"] = state["image_history"][-10:]
+
+async def store_image_event(user_id, user_text, image_url=None, prompt_used=None):
+    try:
+        payload = json.dumps({
+            "type": "image_sent",
+            "user_request": user_text,
+            "image_url": image_url,
+            "prompt_used": prompt_used,
+            "timestamp": time.time(),
+            "state": build_state_snapshot(user_id)
+        })
+
+        emb = await get_embedding(payload)
+
+        with db_lock:
+            cursor.execute(
+                "INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                (str(user_id), payload, emb.tobytes(), "image_event")
+            )
+            conn.commit()
+    except Exception as e:
+        print("Image event store error:", e)
+
+# ====================== UUSI: KUVA-VIITTAUS HELPERS ======================
+def user_refers_to_previous_image(text):
+    t = text.lower()
+    triggers = [
+        "se kuva", "äskeinen kuva", "lähettämäsi kuva", "kuva minkä lähetit",
+        "toi kuva", "edellinen kuva", "katoin sitä kuvaa", "näin sen kuvan"
+    ]
+    return any(x in t for x in triggers)
+
+def should_reference_last_image(user_id):
+    state = get_or_create_state(user_id)
+    last_image = state.get("last_image")
+    if not last_image:
+        return False
+
+    age = time.time() - last_image["timestamp"]
+    if age > 3600:
+        return False
+
+    return random.random() < 0.18
 
 # ====================== HISTORY CLEANER ======================
 def clean_history(history):
@@ -1212,7 +1292,7 @@ async def generate_image_hybrid(user_text: str, user_id: int):
 
     return None
 
-# ====================== KUVAGENEROINTI ======================
+# ====================== KUVAGENEROINTI (päivitetty täydellä muistilla) ======================
 async def generate_and_send_image(update: Update, user_text: str):
     user_id = update.effective_user.id
     image_data = None
@@ -1220,6 +1300,9 @@ async def generate_and_send_image(update: Update, user_text: str):
 
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
+
+        # Prompt talteen heti alussa
+        prompt_used = build_safe_image_prompt(user_text, user_id)
 
         image_data = await generate_image_hybrid(user_text, user_id)
         if image_data is None:
@@ -1235,12 +1318,38 @@ async def generate_and_send_image(update: Update, user_text: str):
         await thinking.edit_text("Valmis.")
         await update.message.reply_text(f"{caption}\n\n{image_url}")
 
+        # === KAIKKI KUVAMUISTI-TALLENNUKSET ===
+        register_sent_image(user_id, user_text, image_url=image_url, prompt_used=prompt_used)
+
+        conversation_history.setdefault(user_id, []).append({
+            "role": "assistant",
+            "content": f"[IMAGE_SENT] {caption}",
+            "type": "image_sent",
+            "image_url": image_url
+        })
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        await store_image_event(
+            user_id,
+            user_text,
+            image_url=image_url,
+            prompt_used=prompt_used
+        )
+
     except Exception as e:
         print("Kuvavirhe FULL:", repr(e))
         traceback.print_exc()
         try:
             if image_data is not None:
                 await update.message.reply_photo(photo=BytesIO(image_data), caption=caption)
+                # fallback-tallennus ilman URL:ää
+                register_sent_image(user_id, user_text, image_url=None, prompt_used=prompt_used)
+                conversation_history.setdefault(user_id, []).append({
+                    "role": "assistant",
+                    "content": "[IMAGE_SENT] image delivered without cloud URL",
+                    "type": "image_sent"
+                })
+                conversation_history[user_id] = conversation_history[user_id][-20:]
             else:
                 await update.message.reply_text("...en saanut kuvaa luotua nyt.")
         except:
@@ -1481,6 +1590,37 @@ Before answering:
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
+        # === UUSI: KUVAMUISTI PROMPTIT ===
+        last_image = state.get("last_image")
+        if last_image:
+            age_seconds = int(time.time() - last_image["timestamp"])
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"You previously sent the user an image {age_seconds} seconds ago. "
+                    f"The user asked: {last_image.get('user_request')}. "
+                    "If relevant, you may naturally refer to that image as something already shared."
+                )
+            })
+
+        if user_refers_to_previous_image(text) and state.get("last_image"):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    "The user is referring to an image you already sent earlier. "
+                    "Treat that image as a real shared past event and respond consistently."
+                )
+            })
+
+        if should_reference_last_image(user_id):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    "You may naturally make a brief callback to the image you previously sent, "
+                    "if it fits the current flow."
+                )
+            })
+
         micro_hint = reinforce_micro_context(state)
         if micro_hint:
             messages.append({
@@ -1674,10 +1814,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai ensisijainen) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
