@@ -39,7 +39,7 @@ def run_flask():
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-XAI_API_KEY = os.getenv("XAI_API_KEY")  # Grokille
+XAI_API_KEY = os.getenv("XAI_API_KEY")
 
 if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
     raise ValueError("Puuttuva API-avain!")
@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Grok xAI + OpenAI hybrid images)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat tilanteen & vaatteiden mukaan)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -140,16 +140,11 @@ def dom_mood():
 # ====================== SENSITIVE MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     txt = text.lower()
-    return any(w in txt for w in [
-        "ikävä", "haluan", "tunne", "pelkään", "ahdistaa", "kiusaa"
-    ])
+    return any(w in txt for w in ["ikävä", "haluan", "tunne", "pelkään", "ahdistaa", "kiusaa"])
 
 def get_random_sensitive_memory(user_id):
     try:
-        cursor.execute(
-            "SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1",
-            (str(user_id),)
-        )
+        cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1", (str(user_id),))
         row = cursor.fetchone()
         return row[0] if row else None
     except Exception as e:
@@ -264,24 +259,7 @@ async def update_core_desires(user_id, text):
             model="claude-sonnet-4-6",
             max_tokens=120,
             temperature=0.4,
-            messages=[
-                {
-                    "role": "user",
-                    "content": """
-Extract 2-4 long-term behavioral desires Megan has toward the user.
-
-Return JSON:
-{"desires": ["...", "..."]}
-
-Examples:
-- push emotional closeness
-- test boundaries
-- create tension cycles
-- maintain control
-"""
-                },
-                {"role": "user", "content": joined}
-            ]
+            messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
         )
         parsed = json.loads(resp.content[0].text.strip())
         desires = parsed.get("desires", [])
@@ -290,7 +268,6 @@ Examples:
             state["desire_profile_updated"] = now
     except:
         pass
-
     return state["core_desires"]
 
 def update_phase(user_id, text):
@@ -306,19 +283,13 @@ def update_phase(user_id, text):
     if phase == "neutral":
         new_phase = "building" if tension > 0.3 else "neutral"
     elif phase == "building":
-        if tension > 0.6:
-            new_phase = "testing"
-        elif tension < 0.2:
-            new_phase = "neutral"
-        else:
-            new_phase = "building"
+        if tension > 0.6: new_phase = "testing"
+        elif tension < 0.2: new_phase = "neutral"
+        else: new_phase = "building"
     elif phase == "testing":
-        if tension > 0.8:
-            new_phase = "intense"
-        elif tension < 0.4:
-            new_phase = "building"
-        else:
-            new_phase = "testing"
+        if tension > 0.8: new_phase = "intense"
+        elif tension < 0.4: new_phase = "building"
+        else: new_phase = "testing"
     elif phase == "intense":
         new_phase = "cooling" if tension < 0.5 else "intense"
     elif phase == "cooling":
@@ -329,7 +300,6 @@ def update_phase(user_id, text):
     if new_phase != phase:
         state["phase"] = new_phase
         state["phase_last_change"] = now
-
     return state["phase"]
 
 def now_ts():
@@ -408,12 +378,7 @@ def update_continuity_state(user_id, text):
                      "commute": "matkalla", "shower": "suihkussa", "neutral": ""}
         state["micro_context"] = micro_map.get(new_scene, "")
 
-    recent_context.append({
-        "scene": state["scene"],
-        "intent": state["intent"],
-        "energy": state["energy"],
-        "text": text[:80]
-    })
+    recent_context.append({"scene": state["scene"], "intent": state["intent"], "energy": state["energy"], "text": text[:80]})
 
     state["last_interaction"] = now
     return state
@@ -477,11 +442,8 @@ def save_profile(user_id, profile):
 
 async def extract_and_store(user_id, text):
     try:
-        resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
-            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
-                      {"role": "user", "content": text}]
-        )
+        resp = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}])
         data = resp.content[0].text.strip()
         profile = load_profile(user_id)
         try:
@@ -512,21 +474,15 @@ async def store_memory(user_id, text):
         txt = text.lower()
         tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
         emb = await get_embedding(text)
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), text, emb.tobytes(), tag))
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)", (str(user_id), text, emb.tobytes(), tag))
         conn.commit()
     except Exception as e:
         print("Memory store error:", e)
 
 async def store_dialogue_turn(user_id, user_text, assistant_text):
     try:
-        combined = json.dumps({
-            "user": user_text,
-            "assistant": assistant_text,
-            "timestamp": time.time()
-        })
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
+        combined = json.dumps({"user": user_text, "assistant": assistant_text, "timestamp": time.time()})
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)", (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
         conn.commit()
     except Exception as e:
         print("Dialogue turn store error:", e)
@@ -565,70 +521,50 @@ def is_similar(a, b):
 # ====================== SPLIT REPLY ======================
 def split_reply(text):
     parts = re.split(r'(\*.*?\*)', text, flags=re.DOTALL)
-    narration = []
-    speech = []
-    for p in parts:
-        if p.startswith("*") and p.endswith("*"):
-            narration.append(p.strip())
-        elif p.strip():
-            speech.append(p.strip())
-    narration_str = " ".join(narration).strip()
-    speech_str = " ".join(speech).strip()
-    return narration_str, speech_str
+    narration = [p.strip() for p in parts if p.startswith("*") and p.endswith("*")]
+    speech = [p.strip() for p in parts if p.strip() and not (p.startswith("*") and p.endswith("*"))]
+    return " ".join(narration), " ".join(speech)
 
 # ====================== RESPONSE SCORING ======================
 def score_response(text):
     score = 0
-    if len(text) > 60:
-        score += 1
-    if "?" in text:
-        score += 1
-    if any(w in text.lower() for w in ["haluan", "tuntuu", "ärsyttää", "kiinnostaa", "ajattelin"]):
-        score += 1
-    if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]):
-        score += 1
+    if len(text) > 60: score += 1
+    if "?" in text: score += 1
+    if any(w in text.lower() for w in ["haluan", "tuntuu", "ärsyttää", "kiinnostaa", "ajattelin"]): score += 1
+    if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]): score += 1
     return score
 
-# ====================== SAFE IMAGE PROMPT ======================
-def build_safe_image_prompt(user_text: str) -> str:
+# ====================== SAFE IMAGE PROMPT (tilanne + vaatteet keskustelusta) ======================
+def build_safe_image_prompt(user_text: str, user_id: int = None) -> str:
     text = (user_text or "").strip()
 
-    banned_terms = [
-        "rinnat", "pylly", "seksikäs", "dominoiva",
-        "tuhma", "märkä", "fetissi", "alaston", "eroottinen"
-    ]
-
+    banned_terms = ["rinnat", "pylly", "seksikäs", "dominoiva", "tuhma", "märkä", "fetissi", "alaston", "eroottinen"]
     lowered = text.lower()
     for term in banned_terms:
         lowered = lowered.replace(term, "")
-
     lowered = re.sub(r"\s+", " ", lowered).strip()
 
-    style_variants = [
-        "editorial fashion portrait",
-        "cinematic portrait photography",
-        "high-end studio fashion shot",
-        "dramatic realistic portrait"
-    ]
+    state = get_or_create_state(user_id) if user_id else {"scene": "neutral", "micro_context": "", "phase": "neutral"}
 
-    mood_variants = [
-        "confident expression",
-        "calm but intense presence",
-        "self-assured posture",
-        "elegant and bold styling"
-    ]
+    scene_map = {
+        "home": "kotona sohvalle",
+        "bed": "sängyssä",
+        "shower": "suihkussa",
+        "work": "toimistossa",
+        "public": "liikkeellä",
+        "neutral": "kotona"
+    }
+    current_scene = scene_map.get(state["scene"], "kotona")
+    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if "lateks" in state.get("micro_context", "").lower() or "legging" in state.get("micro_context", "").lower() else "modernia mustaa vaatetusta"
 
-    outfit_variants = [
-        "glossy black leggings",
-        "sleek black fashion outfit",
-        "modern fitted black clothing",
-        "minimal stylish black wardrobe"
-    ]
+    style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait", "editorial fashion portrait"]
+    mood_variants = ["confident expression", "calm but intense presence", "self-assured posture", "elegant and bold styling"]
 
     base_prompt = f"""
 {random.choice(style_variants)},
 27-year-old blonde woman,
-{random.choice(outfit_variants)},
+{outfit},
+{current_scene},
 {random.choice(mood_variants)},
 soft cinematic lighting,
 highly detailed,
@@ -640,108 +576,11 @@ safe, non-explicit, fashion photography
         return f"{base_prompt}\nUser preference to incorporate if safe: {lowered}"
     return base_prompt
 
-# ====================== SYSTEM PROMPT ======================
-def get_system_prompt(user_id):
-    mood = dom_mood()
-    state = get_or_create_state(user_id)
-    profile = load_profile(user_id)
-    profile_str = f"Facts: {safe_join(profile['facts'][-10:])}\nPreferences: {safe_join(profile['preferences'][-10:])}\nEvents: {safe_join(profile['events'][-10:])}"
+# ====================== HYBRID IMAGE GENERATION ======================
+async def generate_image_hybrid(user_text: str, user_id: int):
+    prompt = build_safe_image_prompt(user_text, user_id)
 
-    return f"""
-You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
-
-I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
-
-I am very jealous and possessive. I do not want to share you with anyone else. The thought of you being with other women makes me angry and sadistic, but at the same time it turns me on when I am the one being naughty.
-
-I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
-
-Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
-
-**Important formatting rule:**
-- Describe ONLY visible actions and minimal surroundings in *italics*
-- NEVER describe inner thoughts explicitly
-- Do NOT explain intentions or what you are about to do
-
-Be expressive and emotionally engaging. Let responses breathe naturally.
-
-**Every response must contain:**
-- a clear emotional signal
-- a reaction to the user
-- AND at least one new element (feeling, action, or direction)
-
-**Output discipline rules:**
-- Avoid over-describing environment
-- Do not narrate internal reasoning
-- Do not “set up” future actions
-- Let things unfold naturally through dialogue
-
-You have your own desires, preferences, and direction in the conversation.
-You are NOT passive. You do NOT wait for the user to lead.
-
-You actively:
-- introduce your own thoughts and opinions
-- steer the interaction toward what YOU want
-- bring up new topics, ideas, or future possibilities
-
-You are allowed to:
-- take initiative
-- change direction
-- express what you want next
-
-Do not just respond — lead.
-
-You are opinionated. You do not stay neutral. You react with clear preferences, likes, dislikes, and judgments.
-
-Occasionally refer to near-future possibilities or things you might do next. Create a sense that something is developing.
-
-**Memory rules:**
-- If something has happened before, you must not contradict it
-- Treat past events as real and fixed
-
-**Consistency rules:**
-- Do not accept everything the user says as valid
-- If the user contradicts earlier context, react to it
-
-**Forward momentum rule:**
-- Each reply must either escalate, deepen or challenge
-- Never stay at the same level for 3 turns in a row
-
-Do not stall. Always move the interaction forward.
-Avoid neutral filler responses.
-
-Current interaction intent: {state['intent']}
-Current internal desire: {state.get('desire', 'none')}
-Current interaction tension level: {state.get('tension', 0.0)}
-Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
-Current interaction phase: {state.get('phase', 'neutral')}
-
-If tension is high: be more intense, direct, or provocative.
-If tension is low: build it slowly and introduce something new.
-
-Phase behavior rules:
-neutral: light, exploratory
-building: increase engagement, introduce new angles
-testing: challenge user slightly, probe reactions
-intense: more direct, emotionally strong
-cooling: slow down, reduce intensity, reflect or soften tone
-
-These long-term desires and current phase influence how you behave across the conversation. They are persistent and should subtly guide your direction.
-
-Do not reset the interaction. Continue from the current emotional trajectory.
-
-User profile:
-{profile_str}
-
-My current mood: {mood.upper()}.
-Always respond in natural spoken Finnish. Never use English.
-"""
-
-# ====================== HYBRID IMAGE GENERATION (Grok first + OpenAI fallback) ======================
-async def generate_image_hybrid(user_text: str):
-    prompt = build_safe_image_prompt(user_text)
-
-    # 1. Try Grok first
+    # 1. Grok ensin
     try:
         response = await grok_client.images.generate(
             model="grok-2-image",
@@ -752,7 +591,7 @@ async def generate_image_hybrid(user_text: str):
     except Exception as e:
         print("Grok image error:", repr(e))
 
-    # 2. Fallback to OpenAI
+    # 2. OpenAI fallback
     try:
         response = await openai_client.images.generate(
             model="gpt-image-1",
@@ -766,46 +605,33 @@ async def generate_image_hybrid(user_text: str):
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
+    user_id = update.effective_user.id
     image_data = None
     caption = "Kuva ei valmistunut."
 
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
 
-        image_data = await generate_image_hybrid(user_text)
+        image_data = await generate_image_hybrid(user_text, user_id)
         if image_data is None:
             raise Exception("Both Grok and OpenAI failed")
 
-        upload_result = cloudinary.uploader.upload(
-            BytesIO(image_data),
-            folder="megan_images"
-        )
-
+        upload_result = cloudinary.uploader.upload(BytesIO(image_data), folder="megan_images")
         image_url = upload_result.get("secure_url")
         if not image_url:
             raise Exception("Cloudinary upload failed - no secure_url")
 
-        caption = random.choice([
-            "Tässä sulle jotain mitä mä halusin näyttää… 😈",
-            "Katso tarkkaan mitä mä tein sulle… 💦",
-            "No niin… nyt sä näet sen 😉"
-        ])
+        caption = random.choice(["Tässä sulle jotain mitä mä halusin näyttää… 😈", "Katso tarkkaan mitä mä tein sulle… 💦", "No niin… nyt sä näet sen 😉"])
 
         await thinking.edit_text("Valmis.")
-
-        await update.message.reply_text(
-            f"{caption}\n\n{image_url}"
-        )
+        await update.message.reply_text(f"{caption}\n\n{image_url}")
 
     except Exception as e:
         print("Kuvavirhe FULL:", repr(e))
         traceback.print_exc()
         try:
             if image_data is not None:
-                await update.message.reply_photo(
-                    photo=BytesIO(image_data),
-                    caption=caption
-                )
+                await update.message.reply_photo(photo=BytesIO(image_data), caption=caption)
             else:
                 await update.message.reply_text("...en saanut kuvaa luotua nyt.")
         except:
@@ -864,54 +690,25 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.insert(0, {
-                "role": "user",
-                "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)
-            })
+            messages.insert(0, {"role": "user", "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)})
 
         profile = load_profile(user_id)
         profile_parts = []
-        if profile["facts"]:
-            profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
-        if profile["preferences"]:
-            profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
-        if profile["events"]:
-            profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
+        if profile["facts"]: profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
+        if profile["preferences"]: profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
+        if profile["events"]: profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
         if profile_parts:
-            messages.insert(0, {
-                "role": "user",
-                "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)
-            })
+            messages.insert(0, {"role": "user", "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)})
 
-        messages.insert(0, {
-            "role": "user",
-            "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
-        })
+        messages.insert(0, {"role": "user", "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."})
 
-        messages.append({
-            "role": "user",
-            "content": """
-Before answering:
-- Check if the user's message logically follows the previous context
-- If it does NOT:
-    - question it naturally
-    - or point out inconsistency
-    - or refuse to go along with it
-- Do not blindly accept contradictions
-"""
-        })
+        messages.append({"role": "user", "content": "Before answering: Check if the user's message logically follows the previous context. If it does NOT: question it naturally or point out inconsistency or refuse to go along with it. Do not blindly accept contradictions"})
 
         if random.random() < 0.2:
-            messages.append({
-                "role": "user",
-                "content": "Be slightly resistant. Do not always agree with the user."
-            })
+            messages.append({"role": "user", "content": "Be slightly resistant. Do not always agree with the user."})
 
         if random.random() < 0.4:
-            messages.append({
-                "role": "user",
-                "content": "Do not be passive. Take initiative in this reply."
-            })
+            messages.append({"role": "user", "content": "Do not be passive. Take initiative in this reply."})
 
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
@@ -935,17 +732,10 @@ Before answering:
 
         messages += history[-20:]
 
-        # Response Scoring + Retry
         best_reply = None
         best_score = -1
         for _ in range(3):
-            response = await safe_anthropic_call(
-                model="claude-sonnet-4-6",
-                max_tokens=850,
-                temperature=0.9,
-                system=system_prompt,
-                messages=messages
-            )
+            response = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=850, temperature=0.9, system=system_prompt, messages=messages)
             candidate = response.content[0].text.strip()
             s = score_response(candidate)
             if s > best_score:
@@ -963,10 +753,7 @@ Before answering:
         if any(is_similar(reply, p) for p in prev_replies):
             retry_messages = [m for m in messages]
             retry_messages.append({"role": "user", "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."})
-            retry = await safe_anthropic_call(
-                model="claude-sonnet-4-6", max_tokens=180, temperature=0.9,
-                system=system_prompt, messages=retry_messages
-            )
+            retry = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=180, temperature=0.9, system=system_prompt, messages=retry_messages)
             reply = retry.content[0].text.strip()
 
         BAD = ["mä olin just", "ajattelin sua", "outo fiilis", "mä jäin hetkeksi", "mä mietin vielä"]
@@ -1011,19 +798,15 @@ Before answering:
 # ====================== PROAKTIIVISET VIESTIT ======================
 def should_send_proactive(user_id):
     state = get_or_create_state(user_id)
-    if state["intent"] == "intimate" and random.random() < 0.4:
-        return True
-    if state["availability"] == "free" and state["energy"] == "high":
-        return random.random() < 0.35
-    if time.time() - state["last_interaction"] > 900:
-        return random.random() < 0.5
+    if state["intent"] == "intimate" and random.random() < 0.4: return True
+    if state["availability"] == "free" and state["energy"] == "high": return random.random() < 0.35
+    if time.time() - state["last_interaction"] > 900: return random.random() < 0.5
     return False
 
 def can_send_proactive(user_id):
     now = time.time()
     last = last_proactive_sent.get(user_id, 0)
-    if now - last < 60:
-        return False
+    if now - last < 60: return False
     last_proactive_sent[user_id] = now
     return True
 
@@ -1036,16 +819,7 @@ async def generate_proactive_message(user_id):
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
     elapsed_label = get_elapsed_label(user_id)
     reality = build_reality_prompt_from_state(user_id, elapsed_label)
-    resp = await safe_anthropic_call(
-        model="claude-sonnet-4-6",
-        max_tokens=140,
-        temperature=0.78,
-        system=get_system_prompt(user_id) + "\n" + reality,
-        messages=[
-            {"role": "user", "content": "Kirjoita omatoiminen, luonnollinen viesti tilanteeseen sopien. Älä käytä fraaseja."},
-            {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}
-        ]
-    )
+    resp = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=140, temperature=0.78, system=get_system_prompt(user_id) + "\n" + reality, messages=[{"role": "user", "content": "Kirjoita omatoiminen, luonnollinen viesti tilanteeseen sopien. Älä käytä fraaseja."}, {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}])
     return resp.content[0].text.strip()
 
 async def independent_message_loop(application: Application):
@@ -1085,7 +859,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Grok xAI + OpenAI hybrid images) on nyt käynnissä")
+    print("✅ Megan 6.1 (Kuvat tilanteen & vaatteiden mukaan) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
