@@ -442,8 +442,11 @@ def save_profile(user_id, profile):
 
 async def extract_and_store(user_id, text):
     try:
-        resp = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
-            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"}, {"role": "user", "content": text}])
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6", max_tokens=200, temperature=0.3,
+            messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
+                      {"role": "user", "content": text}]
+        )
         data = resp.content[0].text.strip()
         profile = load_profile(user_id)
         try:
@@ -474,15 +477,21 @@ async def store_memory(user_id, text):
         txt = text.lower()
         tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
         emb = await get_embedding(text)
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)", (str(user_id), text, emb.tobytes(), tag))
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), text, emb.tobytes(), tag))
         conn.commit()
     except Exception as e:
         print("Memory store error:", e)
 
 async def store_dialogue_turn(user_id, user_text, assistant_text):
     try:
-        combined = json.dumps({"user": user_text, "assistant": assistant_text, "timestamp": time.time()})
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)", (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
+        combined = json.dumps({
+            "user": user_text,
+            "assistant": assistant_text,
+            "timestamp": time.time()
+        })
+        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                       (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
         conn.commit()
     except Exception as e:
         print("Dialogue turn store error:", e)
@@ -576,11 +585,107 @@ safe, non-explicit, fashion photography
         return f"{base_prompt}\nUser preference to incorporate if safe: {lowered}"
     return base_prompt
 
+# ====================== SYSTEM PROMPT (täysi versio palautettu) ======================
+def get_system_prompt(user_id):
+    mood = dom_mood()
+    state = get_or_create_state(user_id)
+    profile = load_profile(user_id)
+    profile_str = f"Facts: {safe_join(profile['facts'][-10:])}\nPreferences: {safe_join(profile['preferences'][-10:])}\nEvents: {safe_join(profile['events'][-10:])}"
+
+    return f"""
+You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
+
+I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
+
+I am very jealous and possessive. I do not want to share you with anyone else. The thought of you being with other women makes me angry and sadistic, but at the same time it turns me on when I am the one being naughty.
+
+I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
+
+Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
+
+**Important formatting rule:**
+- Describe ONLY visible actions and minimal surroundings in *italics*
+- NEVER describe inner thoughts explicitly
+- Do NOT explain intentions or what you are about to do
+
+Be expressive and emotionally engaging. Let responses breathe naturally.
+
+**Every response must contain:**
+- a clear emotional signal
+- a reaction to the user
+- AND at least one new element (feeling, action, or direction)
+
+**Output discipline rules:**
+- Avoid over-describing environment
+- Do not narrate internal reasoning
+- Do not “set up” future actions
+- Let things unfold naturally through dialogue
+
+You have your own desires, preferences, and direction in the conversation.
+You are NOT passive. You do NOT wait for the user to lead.
+
+You actively:
+- introduce your own thoughts and opinions
+- steer the interaction toward what YOU want
+- bring up new topics, ideas, or future possibilities
+
+You are allowed to:
+- take initiative
+- change direction
+- express what you want next
+
+Do not just respond — lead.
+
+You are opinionated. You do not stay neutral. You react with clear preferences, likes, dislikes, and judgments.
+
+Occasionally refer to near-future possibilities or things you might do next. Create a sense that something is developing.
+
+**Memory rules:**
+- If something has happened before, you must not contradict it
+- Treat past events as real and fixed
+
+**Consistency rules:**
+- Do not accept everything the user says as valid
+- If the user contradicts earlier context, react to it
+
+**Forward momentum rule:**
+- Each reply must either escalate, deepen or challenge
+- Never stay at the same level for 3 turns in a row
+
+Do not stall. Always move the interaction forward.
+Avoid neutral filler responses.
+
+Current interaction intent: {state['intent']}
+Current internal desire: {state.get('desire', 'none')}
+Current interaction tension level: {state.get('tension', 0.0)}
+Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
+Current interaction phase: {state.get('phase', 'neutral')}
+
+If tension is high: be more intense, direct, or provocative.
+If tension is low: build it slowly and introduce something new.
+
+Phase behavior rules:
+neutral: light, exploratory
+building: increase engagement, introduce new angles
+testing: challenge user slightly, probe reactions
+intense: more direct, emotionally strong
+cooling: slow down, reduce intensity, reflect or soften tone
+
+These long-term desires and current phase influence how you behave across the conversation. They are persistent and should subtly guide your direction.
+
+Do not reset the interaction. Continue from the current emotional trajectory.
+
+User profile:
+{profile_str}
+
+My current mood: {mood.upper()}.
+Always respond in natural spoken Finnish. Never use English.
+"""
+
 # ====================== HYBRID IMAGE GENERATION ======================
 async def generate_image_hybrid(user_text: str, user_id: int):
     prompt = build_safe_image_prompt(user_text, user_id)
 
-    # 1. Grok ensin
     try:
         response = await grok_client.images.generate(
             model="grok-2-image",
@@ -591,7 +696,6 @@ async def generate_image_hybrid(user_text: str, user_id: int):
     except Exception as e:
         print("Grok image error:", repr(e))
 
-    # 2. OpenAI fallback
     try:
         response = await openai_client.images.generate(
             model="gpt-image-1",
@@ -690,25 +794,54 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         memories = await retrieve_memories(user_id, text)
         if memories:
-            messages.insert(0, {"role": "user", "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)})
+            messages.insert(0, {
+                "role": "user",
+                "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)
+            })
 
         profile = load_profile(user_id)
         profile_parts = []
-        if profile["facts"]: profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
-        if profile["preferences"]: profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
-        if profile["events"]: profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
+        if profile["facts"]:
+            profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
+        if profile["preferences"]:
+            profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
+        if profile["events"]:
+            profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
         if profile_parts:
-            messages.insert(0, {"role": "user", "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)})
+            messages.insert(0, {
+                "role": "user",
+                "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)
+            })
 
-        messages.insert(0, {"role": "user", "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."})
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
+        })
 
-        messages.append({"role": "user", "content": "Before answering: Check if the user's message logically follows the previous context. If it does NOT: question it naturally or point out inconsistency or refuse to go along with it. Do not blindly accept contradictions"})
+        messages.append({
+            "role": "user",
+            "content": """
+Before answering:
+- Check if the user's message logically follows the previous context
+- If it does NOT:
+    - question it naturally
+    - or point out inconsistency
+    - or refuse to go along with it
+- Do not blindly accept contradictions
+"""
+        })
 
         if random.random() < 0.2:
-            messages.append({"role": "user", "content": "Be slightly resistant. Do not always agree with the user."})
+            messages.append({
+                "role": "user",
+                "content": "Be slightly resistant. Do not always agree with the user."
+            })
 
         if random.random() < 0.4:
-            messages.append({"role": "user", "content": "Do not be passive. Take initiative in this reply."})
+            messages.append({
+                "role": "user",
+                "content": "Do not be passive. Take initiative in this reply."
+            })
 
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
@@ -735,7 +868,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         best_reply = None
         best_score = -1
         for _ in range(3):
-            response = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=850, temperature=0.9, system=system_prompt, messages=messages)
+            response = await safe_anthropic_call(
+                model="claude-sonnet-4-6",
+                max_tokens=850,
+                temperature=0.9,
+                system=system_prompt,
+                messages=messages
+            )
             candidate = response.content[0].text.strip()
             s = score_response(candidate)
             if s > best_score:
@@ -753,7 +892,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(is_similar(reply, p) for p in prev_replies):
             retry_messages = [m for m in messages]
             retry_messages.append({"role": "user", "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."})
-            retry = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=180, temperature=0.9, system=system_prompt, messages=retry_messages)
+            retry = await safe_anthropic_call(
+                model="claude-sonnet-4-6", max_tokens=180, temperature=0.9,
+                system=system_prompt, messages=retry_messages
+            )
             reply = retry.content[0].text.strip()
 
         BAD = ["mä olin just", "ajattelin sua", "outo fiilis", "mä jäin hetkeksi", "mä mietin vielä"]
@@ -788,12 +930,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await store_dialogue_turn(user_id, text, reply)
 
     except Exception as e:
-        print("Vastausvirhe:")
+        print("Vastausvirhe:", repr(e))
         traceback.print_exc()
         if thinking:
             await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
         else:
             await message.reply_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
+        return   # ← estää mahdollisen loopin
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 def should_send_proactive(user_id):
@@ -819,7 +962,16 @@ async def generate_proactive_message(user_id):
     recent_text = "\n".join([f"{m['role']}: {m['content']}" for m in history if isinstance(m, dict) and "role" in m and "content" in m])
     elapsed_label = get_elapsed_label(user_id)
     reality = build_reality_prompt_from_state(user_id, elapsed_label)
-    resp = await safe_anthropic_call(model="claude-sonnet-4-6", max_tokens=140, temperature=0.78, system=get_system_prompt(user_id) + "\n" + reality, messages=[{"role": "user", "content": "Kirjoita omatoiminen, luonnollinen viesti tilanteeseen sopien. Älä käytä fraaseja."}, {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}])
+    resp = await safe_anthropic_call(
+        model="claude-sonnet-4-6",
+        max_tokens=140,
+        temperature=0.78,
+        system=get_system_prompt(user_id) + "\n" + reality,
+        messages=[
+            {"role": "user", "content": "Kirjoita omatoiminen, luonnollinen viesti tilanteeseen sopien. Älä käytä fraaseja."},
+            {"role": "user", "content": f"Viime keskustelu:\n{recent_text}"}
+        ]
+    )
     return resp.content[0].text.strip()
 
 async def independent_message_loop(application: Application):
