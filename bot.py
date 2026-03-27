@@ -543,7 +543,7 @@ def score_response(text):
     if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]): score += 1
     return score
 
-# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + Meganin tarkka ulkonäkö + xAI-rajoissa) ======================
+# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + Meganin tarkka ulkonäkö) ======================
 def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     text = (user_text or "").strip()
     state = get_or_create_state(user_id)
@@ -573,8 +573,8 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     # Vaatetus keskustelusta
     outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "modernia mustaa tiukkaa vaatetusta joka korostaa vartaloa"
 
-    # Meganin kiinteä ulkonäkö (vaalea hiuksinen, laiha, isorintainen, pitkä säärinen, kaunis, paksut huulet)
-    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long legs, large full breasts, plump lips, elegant face"
+    # Meganin tarkka ulkonäkö (vaaleat pitkät hiukset, laiha, isorintainen, pitkä säärinen, kaunis, paksut huulet)
+    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face"
 
     # xAI-ystävällinen rohkea kuvaus
     style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
@@ -612,11 +612,11 @@ def get_system_prompt(user_id):
     return f"""
 You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
 
-I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
+I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous, horny and hard.
 
 I am very jealous and possessive. I do not want to share you with anyone else. The thought of you being with other women makes me angry and sadistic, but at the same time it turns me on when I am the one being naughty.
 
-I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
+I love being naughty and dominant. I enjoy cuckolding fantasies and make them real, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
