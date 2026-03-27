@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Temporal Simulation Layer)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-State-Prompt Pipeline)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -239,6 +239,37 @@ conversation_history = {}
 last_replies = {}
 recent_user = deque(maxlen=12)
 recent_context = deque(maxlen=6)
+
+# ====================== WORKING MEMORY ======================
+working_memory = {}
+
+# ====================== STATE SNAPSHOT ======================
+def build_state_snapshot(user_id):
+    state = get_or_create_state(user_id)
+    return {
+        "scene": state["scene"],
+        "action": state.get("current_action"),
+        "intent": state["intent"],
+        "tension": state["tension"],
+        "phase": state["phase"],
+        "persona_mode": state["persona_mode"],
+        "desire": state.get("desire"),
+        "micro_context": state.get("micro_context"),
+    }
+
+# ====================== MEMORY CONTEXT BUILDER ======================
+def build_memory_context(memories):
+    structured = []
+    for m in memories:
+        try:
+            parsed = json.loads(m)
+            structured.append(
+                f"- Aiemmin: {parsed.get('user')} → {parsed.get('assistant')} "
+                f"(intent: {parsed.get('intent')}, phase: {parsed.get('state', {}).get('phase')})"
+            )
+        except:
+            structured.append(f"- {m}")
+    return "\n".join(structured[:6])
 
 # ====================== BACKGROUND TASK ======================
 background_task = None
@@ -472,6 +503,15 @@ def get_elapsed_label(user_id):
     elif elapsed < 14400: return "hours"
     else: return "long_gap"
 
+def update_working_memory(user_id, text):
+    wm = working_memory.setdefault(user_id, {})
+    t = text.lower()
+    if "ikävä" in t:
+        wm["emotional_flag"] = "longing"
+    if "tule" in t or "nyt" in t:
+        wm["direction"] = "escalate"
+    wm["last_user_text"] = text
+
 def update_continuity_state(user_id, text):
     state = get_or_create_state(user_id)
     now = now_ts()
@@ -494,10 +534,8 @@ def update_continuity_state(user_id, text):
         state["availability"] = "free"
         state["energy"] = "low" if random.random() < 0.4 else "normal"
 
-    # Temporal interrupt before action/scene update
     maybe_interrupt_action(state, text)
 
-    # === SCENE ENGINE ===
     forced = force_scene_from_text(state, text, now)
     if not forced:
         maybe_transition_scene(state, now)
@@ -507,41 +545,6 @@ def update_continuity_state(user_id, text):
 
     state["last_interaction"] = now
     return state
-
-# ====================== CONSISTENCY HELPERS ======================
-def breaks_scene_logic(reply, state):
-    r = reply.lower()
-    scene = state["scene"]
-    if scene == "home" and any(w in r for w in ["toimistolla", "töissä", "duunissa", "palaverissa"]):
-        return True
-    if scene == "work" and any(w in r for w in ["kotona", "sängyssä", "sohvalla", "suihkussa"]):
-        return True
-    if scene == "bed" and any(w in r for w in ["töissä", "ulkona", "kaupassa"]):
-        return True
-    return False
-
-def breaks_temporal_logic(reply, state):
-    if not state["current_action"]:
-        return False
-    r = reply.lower()
-    action = state["current_action"]
-    if action == "makaa sohvalla" and any(w in r for w in ["juoksen", "kävelen", "olen ulkona", "töissä"]):
-        return True
-    return False
-
-def reinforce_micro_context(state):
-    if state.get("micro_context") and random.random() < 0.6:
-        return f"({state['micro_context']})"
-    return ""
-
-def get_recent_actions(user_id):
-    state = get_or_create_state(user_id)
-    return f"""
-Recent continuity:
-- Scene: {state['scene']}
-- Action: {state.get('current_action') or 'nothing specific'}
-- Context: {state.get('micro_context', '')}
-"""
 
 def build_reality_prompt_from_state(user_id, elapsed_label):
     state = get_or_create_state(user_id)
@@ -646,9 +649,13 @@ async def store_memory(user_id, text):
 
 async def store_dialogue_turn(user_id, user_text, assistant_text):
     try:
+        state_snapshot = build_state_snapshot(user_id)
         combined = json.dumps({
             "user": user_text,
             "assistant": assistant_text,
+            "state": state_snapshot,
+            "intent": detect_intent(user_text),
+            "tension": get_or_create_state(user_id)["tension"],
             "timestamp": time.time()
         })
         cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
@@ -996,6 +1003,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
+        # === WORKING MEMORY UPDATE ===
+        update_working_memory(user_id, text)
+
         system_prompt = (
             get_system_prompt(user_id)
             + "\n" + reality
@@ -1023,12 +1033,39 @@ Your response MUST reflect this exact situation.
             "content": get_recent_actions(user_id)
         })
 
+        # === STRUCTURED MEMORY CONTEXT ===
         memories = await retrieve_memories(user_id, text)
-        if memories:
-            messages.insert(0, {
-                "role": "user",
-                "content": "These things DEFINITELY happened earlier in our relationship. You must stay consistent with them:\n\n" + safe_join(memories)
-            })
+        memory_context = build_memory_context(memories)
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Relevant past interactions:\n{memory_context}"
+        })
+
+        # === DIRECTION LAYER ===
+        direction = f"""
+Current direction:
+- Intent: {state['intent']}
+- Phase: {state['phase']}
+- Desire: {state.get('desire')}
+- Tension: {state['tension']}
+
+You MUST continue this trajectory, not reset it.
+"""
+        messages.insert(0, {"role": "user", "content": direction})
+
+        # Hard continuity rule
+        messages.insert(0, {
+            "role": "user",
+            "content": """
+You are in the middle of an ongoing interaction.
+
+You MUST:
+- continue the emotional trajectory
+- remember what just happened
+- not reset tone, intent, or direction
+- refer implicitly to previous interaction when relevant
+"""
+        })
 
         profile = load_profile(user_id)
         profile_parts = []
@@ -1250,10 +1287,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal Simulation Layer käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal Simulation + Memory-State Pipeline käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Temporal Simulation Layer) on nyt käynnissä")
+    print("✅ Megan 6.1 (Memory-State-Prompt Pipeline) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
