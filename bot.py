@@ -58,9 +58,9 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Scene Consistency Lock)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Temporal Simulation Layer)")
 
-# ====================== SCENE ENGINE (integroitu) ======================
+# ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
     "neutral": ["home", "work", "public"],
     "work": ["commute", "public"],
@@ -88,7 +88,7 @@ SCENE_ACTIONS = {
     "bed": ["makaa sängyssä"],
 }
 
-MIN_SCENE_DURATION = 900  # 15 min
+MIN_SCENE_DURATION = 900
 ACTION_MIN = 300
 ACTION_MAX = 1800
 
@@ -98,6 +98,8 @@ def init_scene_state():
         "micro_context": "",
         "current_action": None,
         "action_end": 0,
+        "action_started": 0,
+        "action_duration": 0,
         "last_scene_change": 0,
         "scene_locked_until": 0,
     }
@@ -140,14 +142,69 @@ def update_action(state, now):
     scene = state["scene"]
     if scene in SCENE_ACTIONS and random.random() < 0.4:
         action = random.choice(SCENE_ACTIONS[scene])
+        duration = random.randint(ACTION_MIN, ACTION_MAX)
         state["current_action"] = action
-        state["action_end"] = now + random.randint(ACTION_MIN, ACTION_MAX)
+        state["action_started"] = now
+        state["action_duration"] = duration
+        state["action_end"] = now + duration
 
 def _set_scene(state, scene, now):
     state["scene"] = scene
     state["last_scene_change"] = now
     state["scene_locked_until"] = now + MIN_SCENE_DURATION
     state["current_action"] = None
+    state["action_started"] = 0
+    state["action_duration"] = 0
+
+def get_action_progress(state, now):
+    if not state["current_action"]:
+        return None
+    elapsed = now - state["action_started"]
+    total = state["action_duration"]
+    if total <= 0:
+        return "starting"
+    ratio = elapsed / total
+    if ratio < 0.25:
+        return "starting"
+    elif ratio < 0.75:
+        return "ongoing"
+    elif ratio < 1.0:
+        return "ending"
+    else:
+        return "finished"
+
+def build_temporal_context(state):
+    now = time.time()
+    progress = get_action_progress(state, now)
+    if not state["current_action"]:
+        return "No ongoing action."
+    return f"""
+Temporal state:
+- Current action: {state['current_action']}
+- Action phase: {progress}
+- Started: {int(now - state['action_started'])} seconds ago
+- Expected duration: {state['action_duration']} seconds
+
+The action is ongoing and MUST be reflected naturally.
+"""
+
+def maybe_interrupt_action(state, text):
+    t = text.lower()
+    if any(w in t for w in ["tule", "tee", "nyt", "heti"]):
+        if state["current_action"]:
+            state["current_action"] = None
+            state["action_end"] = 0
+            state["action_duration"] = 0
+            state["action_started"] = 0
+
+def breaks_temporal_logic(reply, state):
+    if not state["current_action"]:
+        return False
+    r = reply.lower()
+    action = state["current_action"]
+    if action == "makaa sohvalla" and any(w in r for w in ["juoksen", "kävelen", "olen ulkona", "töissä"]):
+        return True
+    return False
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -437,6 +494,9 @@ def update_continuity_state(user_id, text):
         state["availability"] = "free"
         state["energy"] = "low" if random.random() < 0.4 else "normal"
 
+    # Temporal interrupt before action/scene update
+    maybe_interrupt_action(state, text)
+
     # === SCENE ENGINE ===
     forced = force_scene_from_text(state, text, now)
     if not forced:
@@ -448,7 +508,7 @@ def update_continuity_state(user_id, text):
     state["last_interaction"] = now
     return state
 
-# ====================== NEW CONSISTENCY HELPERS ======================
+# ====================== CONSISTENCY HELPERS ======================
 def breaks_scene_logic(reply, state):
     r = reply.lower()
     scene = state["scene"]
@@ -457,6 +517,15 @@ def breaks_scene_logic(reply, state):
     if scene == "work" and any(w in r for w in ["kotona", "sängyssä", "sohvalla", "suihkussa"]):
         return True
     if scene == "bed" and any(w in r for w in ["töissä", "ulkona", "kaupassa"]):
+        return True
+    return False
+
+def breaks_temporal_logic(reply, state):
+    if not state["current_action"]:
+        return False
+    r = reply.lower()
+    action = state["current_action"]
+    if action == "makaa sohvalla" and any(w in r for w in ["juoksen", "kävelen", "olen ulkona", "töissä"]):
         return True
     return False
 
@@ -489,7 +558,7 @@ Current continuity state:
 - Current intent: {state['intent']}
 """
 
-# ====================== MEMORY SCORING (async) ======================
+# ====================== MEMORY SCORING ======================
 async def retrieve_memories(user_id, query, limit=8):
     try:
         q_emb = await get_embedding(query)
@@ -687,7 +756,7 @@ safe, non-explicit, editorial fashion style
 
     return base_prompt
 
-# ====================== SYSTEM PROMPT (lisätty ABSOLUTE REALITY CONSTRAINTS) ======================
+# ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -770,6 +839,16 @@ STRICT RULES:
 If inconsistency appears, FIX it naturally instead of switching scene.
 
 You are always continuing the same physical moment unless time or movement clearly changes it.
+
+**TEMPORAL BEHAVIOR RULES:**
+- Actions take time and continue across messages
+- If you started something, you are STILL doing it unless finished
+- Your behavior must reflect the phase:
+    - starting → just beginning
+    - ongoing → mid-action
+    - ending → wrapping up
+
+You cannot instantly switch actions without finishing or interrupting them.
 
 **ABSOLUTE REALITY CONSTRAINTS:**
 
@@ -926,7 +1005,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages = []
 
-        # === NEW CONSISTENCY LOCKS ===
+        # === TEMPORAL + CONSISTENCY LOCKS ===
+        messages.insert(0, {"role": "user", "content": build_temporal_context(state)})
+
         scene_anchor = f"""
 You are currently:
 - in scene: {state['scene']}
@@ -1006,7 +1087,6 @@ Before answering:
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
-        # Micro-context reinforcement
         micro_hint = reinforce_micro_context(state)
         if micro_hint:
             messages.append({
@@ -1035,8 +1115,8 @@ Before answering:
             )
             candidate = response.content[0].text.strip()
 
-            if breaks_scene_logic(candidate, state):
-                continue  # retry if inconsistent
+            if breaks_scene_logic(candidate, state) or breaks_temporal_logic(candidate, state):
+                continue
 
             s = score_response(candidate)
             if s > best_score:
@@ -1170,10 +1250,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Scene Lock käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal Simulation Layer käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Scene Consistency Lock) on nyt käynnissä")
+    print("✅ Megan 6.1 (Temporal Simulation Layer) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
