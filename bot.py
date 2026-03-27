@@ -44,7 +44,33 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (looppi + debug fix)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (cursor / DB fix)")
+
+# ====================== DATABASE ======================
+DB_PATH = "/var/data/megan_memory.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    type TEXT DEFAULT 'general',
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY,
+    data TEXT
+)
+""")
+conn.commit()
+
+print("✅ Database initialized")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -736,7 +762,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (looppi + debug fix) on nyt käynnissä")
+    print("✅ Megan 6.1 (cursor / DB fix) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
