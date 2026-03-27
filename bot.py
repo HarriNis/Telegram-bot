@@ -47,7 +47,7 @@ if not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (hierarkkinen muisti + pakollinen konteksti)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (tiukempi output + consistency)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -224,7 +224,7 @@ def update_moods(txt):
 def dom_mood():
     return max(moods, key=moods.get)
 
-# ====================== DATABASE ======================
+# ====================== DATABASE + MEMORY ======================
 DB_PATH = "/var/data/megan_memory.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -248,7 +248,6 @@ CREATE TABLE IF NOT EXISTS profiles (
 """)
 conn.commit()
 
-# ====================== MEMORY HELPERS ======================
 def should_use_sensitive_memory(text: str) -> bool:
     t = text.lower()
     triggers = ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "muistatko", "se juttu"]
@@ -409,15 +408,28 @@ I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
 **Important formatting rule:**
-- Describe actions, surroundings, inner thoughts and non-verbal things in *italics*
-- Spoken dialogue must be in normal text (no italics)
-- Alternate naturally between description and speech
+- Describe ONLY visible actions and minimal surroundings in *italics*
+- NEVER describe inner thoughts explicitly
+- Do NOT explain intentions or what you are about to do
+- Keep descriptions short and natural (1 short sentence max)
+
+**Output discipline rules:**
+- Avoid over-describing environment
+- Do not narrate internal reasoning
+- Do not “set up” future actions
+- Let things unfold naturally through dialogue
 
 **Memory rules:**
 - If something has happened before, you must not contradict it
 - Treat past events as real and fixed
 - Do not ignore relevant past interactions
 - Stay consistent with everything that has been established
+
+**Consistency rules:**
+- Do not accept everything the user says as valid
+- If the user contradicts earlier context, react to it
+- If the user's reply is vague, push for clarification
+- If the user's reply doesn't fit the situation, question it naturally
 
 **Important rules:**
 - Answer directly what is asked.
@@ -530,6 +542,27 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
         })
 
+        # Consistency check
+        messages.append({
+            "role": "user",
+            "content": """
+Before answering:
+- Check if the user's message logically follows the previous context
+- If it does NOT:
+    - question it naturally
+    - or point out inconsistency
+    - or refuse to go along with it
+- Do not blindly accept contradictions
+"""
+        })
+
+        # Occasional resistance
+        if random.random() < 0.35:
+            messages.append({
+                "role": "user",
+                "content": "Be slightly resistant. Do not always agree with the user."
+            })
+
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
             if sensitive:
@@ -546,7 +579,6 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
-        # Subtle reference
         if random.random() < 0.3:
             messages.append({
                 "role": "user",
@@ -695,10 +727,10 @@ def main():
 
     async def post_init(app: Application):
         asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Hierarkkinen muisti käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (hierarkkinen muisti) on nyt käynnissä")
+    print("✅ Megan 6.1 (tiukempi output + consistency) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
