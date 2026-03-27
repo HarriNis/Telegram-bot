@@ -44,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (sensitive memory fix)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (löysempi output + drive)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -445,7 +445,7 @@ def split_reply(text):
     speech_str = " ".join(speech).strip()
     return narration_str, speech_str
 
-# ====================== SYSTEM PROMPT ======================
+# ====================== SYSTEM PROMPT (uusi, löysempi) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -467,7 +467,13 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 - Describe ONLY visible actions and minimal surroundings in *italics*
 - NEVER describe inner thoughts explicitly
 - Do NOT explain intentions or what you are about to do
-- Keep descriptions short and natural (1 short sentence max)
+
+Be expressive and emotionally engaging. Let responses breathe naturally.
+
+**Every response must contain:**
+- a clear emotional signal
+- a reaction to the user
+- AND at least one new element (feeling, action, or direction)
 
 **Output discipline rules:**
 - Avoid over-describing environment
@@ -486,6 +492,9 @@ Be as human and natural as possible. You can be sweet and loving at times, irrit
 **Forward momentum rule:**
 - Each reply must either escalate, deepen or challenge
 - Never stay at the same level for 3 turns in a row
+
+Do not stall. Always move the interaction forward.
+Avoid neutral filler responses.
 
 Current interaction intent: {state['intent']}
 Do not reset emotional state unless explicitly changed.
@@ -605,7 +614,7 @@ Before answering:
 """
         })
 
-        if random.random() < 0.35:
+        if random.random() < 0.2:   # pienennetty 0.35 → 0.2
             messages.append({
                 "role": "user",
                 "content": "Be slightly resistant. Do not always agree with the user."
@@ -616,22 +625,10 @@ Before answering:
             if sensitive:
                 messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
 
-        if random.random() < 0.05:
-            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
-
         if is_low_input:
-            messages.append({"role": "user", "content": "User gave very little input. Start the conversation yourself."})
-
-        if random.random() < 0.10:
-            messages.append({"role": "user", "content": "Jos aikaa on kulunut selvästi, anna sen näkyä luonnollisesti sävyssä tai viittauksessa, mutta älä selitä sitä mekaanisesti."})
+            messages.append({"role": "user", "content": "User gave very little input. React strongly anyway and push the interaction forward."})
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
-
-        if random.random() < 0.3:
-            messages.append({
-                "role": "user",
-                "content": "Refer subtly to something that happened earlier without explaining it."
-            })
 
         history = clean_history(conversation_history[user_id])
         if len(history) > 2:
@@ -781,7 +778,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (sensitive memory fix) on nyt käynnissä")
+    print("✅ Megan 6.1 (löysempi output + drive) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
