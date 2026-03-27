@@ -52,7 +52,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution + Cloudinary)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution + Cloudinary + gpt-image-1)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -680,7 +680,7 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== KUVAGENEROINTI (Cloudinary) ======================
+# ====================== KUVAGENEROINTI (gpt-image-1 + Cloudinary fallback) ======================
 async def generate_and_send_image(update: Update, user_text: str):
     try:
         thinking = await update.message.reply_text("Odota hetki, mä generoin sulle kuvan... 😏")
@@ -688,11 +688,9 @@ async def generate_and_send_image(update: Update, user_text: str):
         enhanced_prompt = f"27-vuotias kaunis platina-blondi nainen, valtavat raskaat rinnat, kapea vyötärö, tiukka pyöreä pylly, käyttää tiukkoja kiiltäviä mustia lateksileggingsejä, dominoiva ja seksikäs ilme, realistinen valokuva, korkea yksityiskohtaisuus, studio-valaistus, 8k -- {user_text}"
 
         response = await openai_client.images.generate(
-            model="dall-e-3",
+            model="gpt-image-1",
             prompt=enhanced_prompt,
-            n=1,
-            size="1024x1024",
-            quality="standard"
+            size="1024x1024"
         )
 
         image_base64 = response.data[0].b64_json
@@ -704,6 +702,9 @@ async def generate_and_send_image(update: Update, user_text: str):
         )
 
         image_url = upload_result.get("secure_url")
+
+        if not image_url:
+            raise Exception("Cloudinary upload failed - no secure_url")
 
         caption = random.choice([
             "Tässä sulle jotain mitä mä halusin näyttää… 😈",
@@ -718,8 +719,16 @@ async def generate_and_send_image(update: Update, user_text: str):
         )
 
     except Exception as e:
-        print(f"Kuvavirhe: {e}")
-        await update.message.reply_text("...en saanut kuvaa luotua nyt.")
+        print("Kuvavirhe FULL:", repr(e))
+        traceback.print_exc()
+        try:
+            # fallback Telegramiin
+            await update.message.reply_photo(
+                photo=BytesIO(image_data),
+                caption=caption
+            )
+        except:
+            await update.message.reply_text("...en saanut kuvaa luotua nyt.")
 
 # ====================== MEGAN_CHAT ======================
 async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,7 +1004,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution + Cloudinary) on nyt käynnissä")
+    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution + Cloudinary + gpt-image-1) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
