@@ -7,6 +7,7 @@ import time
 import re
 import base64
 import logging
+import traceback
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -43,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (update_moods palautettu)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (looppi + debug fix)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -62,6 +63,7 @@ async def safe_anthropic_call(**kwargs):
         try:
             return await anthropic_client.messages.create(**kwargs)
         except Exception as e:
+            print(f"[Anthropic retry {i}] {e}")
             if "overloaded" in str(e).lower() or "529" in str(e):
                 await asyncio.sleep(1.5 * (i + 1))
                 continue
@@ -492,7 +494,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await extract_and_store(user_id, text)
         return
 
-    update_moods(text)   # ← nyt toimii
+    update_moods(text)
     recent_user.append(text)
     is_low_input = len(text.strip()) < 8
 
@@ -650,7 +652,8 @@ Before answering:
         await store_dialogue_turn(user_id, text, reply)
 
     except Exception as e:
-        print(f"Vastausvirhe: {e}")
+        print("Vastausvirhe:")
+        traceback.print_exc()
         if thinking:
             await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
         else:
@@ -697,9 +700,11 @@ async def generate_proactive_message(user_id):
     return resp.content[0].text.strip()
 
 async def independent_message_loop(application: Application):
+    print("🔥 Proactive loop started")
     try:
         while True:
             await asyncio.sleep(30)
+            print("⏱️ Proactive tick")
             for user_id in list(conversation_history.copy().keys()):
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
@@ -720,7 +725,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====================== MAIN ======================
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
-    time.sleep(2)
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -732,7 +736,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (update_moods korjattu) on nyt käynnissä")
+    print("✅ Megan 6.1 (looppi + debug fix) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
