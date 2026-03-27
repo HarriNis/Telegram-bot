@@ -44,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Desire Engine + Scoring + Tension)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-Based Desires + Phase Evolution)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -178,7 +178,7 @@ def adapt_mode_to_user(user_id, text):
     elif any(w in t for w in ["ärsyttää", "vituttaa", "tylsää"]):
         state["persona_mode"] = "slightly_irritated"
 
-# ====================== CONTINUITY + INTENT + DESIRE + TENSION ======================
+# ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
@@ -187,7 +187,9 @@ def get_or_create_state(user_id):
             "micro_context": "", "persona_mode": "warm", "last_mode_change": 0,
             "intent": "casual", "summary": "",
             "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
-            "tension": 0.0, "last_direction": None
+            "tension": 0.0, "last_direction": None,
+            "core_desires": [], "desire_profile_updated": 0,
+            "phase": "neutral", "phase_last_change": 0
         }
     return continuity_state[user_id]
 
@@ -233,6 +235,88 @@ def update_tension(user_id, text):
         state["tension"] += 0.05
     state["tension"] = max(0.0, min(1.0, state["tension"]))
     return state["tension"]
+
+async def update_core_desires(user_id, text):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+    if now - state.get("desire_profile_updated", 0) < 1800:
+        return state["core_desires"]
+
+    memories = await retrieve_memories(user_id, text, limit=15)
+    joined = "\n".join(memories[-10:])
+
+    try:
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6",
+            max_tokens=120,
+            temperature=0.4,
+            messages=[
+                {
+                    "role": "user",
+                    "content": """
+Extract 2-4 long-term behavioral desires Megan has toward the user.
+
+Return JSON:
+{"desires": ["...", "..."]}
+
+Examples:
+- push emotional closeness
+- test boundaries
+- create tension cycles
+- maintain control
+"""
+                },
+                {"role": "user", "content": joined}
+            ]
+        )
+        parsed = json.loads(resp.content[0].text.strip())
+        desires = parsed.get("desires", [])
+        if desires:
+            state["core_desires"] = desires[:4]
+            state["desire_profile_updated"] = now
+    except:
+        pass
+
+    return state["core_desires"]
+
+def update_phase(user_id, text):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+    phase = state.get("phase", "neutral")
+    tension = state.get("tension", 0.0)
+    intent = state.get("intent", "casual")
+
+    if now - state.get("phase_last_change", 0) < 120:
+        return phase
+
+    if phase == "neutral":
+        new_phase = "building" if tension > 0.3 else "neutral"
+    elif phase == "building":
+        if tension > 0.6:
+            new_phase = "testing"
+        elif tension < 0.2:
+            new_phase = "neutral"
+        else:
+            new_phase = "building"
+    elif phase == "testing":
+        if tension > 0.8:
+            new_phase = "intense"
+        elif tension < 0.4:
+            new_phase = "building"
+        else:
+            new_phase = "testing"
+    elif phase == "intense":
+        new_phase = "cooling" if tension < 0.5 else "intense"
+    elif phase == "cooling":
+        new_phase = "neutral" if tension < 0.2 else "cooling"
+    else:
+        new_phase = "neutral"
+
+    if new_phase != phase:
+        state["phase"] = new_phase
+        state["phase_last_change"] = now
+
+    return state["phase"]
 
 def now_ts():
     return time.time()
@@ -564,9 +648,20 @@ Avoid neutral filler responses.
 Current interaction intent: {state['intent']}
 Current internal desire: {state.get('desire', 'none')}
 Current interaction tension level: {state.get('tension', 0.0)}
+Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
+Current interaction phase: {state.get('phase', 'neutral')}
 
 If tension is high: be more intense, direct, or provocative.
 If tension is low: build it slowly and introduce something new.
+
+Phase behavior rules:
+neutral: light, exploratory
+building: increase engagement, introduce new angles
+testing: challenge user slightly, probe reactions
+intense: more direct, emotionally strong
+cooling: slow down, reduce intensity, reflect or soften tone
+
+These long-term desires and current phase influence how you behave across the conversation. They are persistent and should subtly guide your direction.
 
 Do not reset the interaction. Continue from the current emotional trajectory.
 
@@ -635,7 +730,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elapsed_label = get_elapsed_label(user_id)
         state = update_continuity_state(user_id, text)
         desire = update_desire(user_id, text)
+        core_desires = await update_core_desires(user_id, text)
         tension = update_tension(user_id, text)
+        phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         system_prompt = (
@@ -870,7 +967,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Desire Engine + Scoring + Tension) on nyt käynnissä")
+    print("✅ Megan 6.1 (Memory-Based Desires + Phase Evolution) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
