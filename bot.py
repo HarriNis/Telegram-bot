@@ -60,17 +60,94 @@ cloudinary.config(
 
 print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Scene State Machine + Continuous Reality)")
 
-# ====================== SCENE STATE MACHINE ======================
+# ====================== SCENE ENGINE (integroitu) ======================
 SCENE_TRANSITIONS = {
+    "neutral": ["home", "work", "public"],
     "work": ["commute", "public"],
     "commute": ["home", "public"],
-    "home": ["public", "bed"],
-    "public": ["home", "work"],
+    "home": ["public", "bed", "shower"],
     "bed": ["home"],
     "shower": ["home"],
+    "public": ["home", "work", "commute"],
 }
 
-MIN_SCENE_DURATION = 900  # 15 min inertia
+SCENE_MICRO = {
+    "work": ["töissä", "palaverissa", "naputtelee konetta"],
+    "commute": ["kotimatkalla", "bussissa", "matkalla"],
+    "home": ["kotona", "sohvalla", "keittiössä"],
+    "bed": ["sängyssä", "peiton alla"],
+    "shower": ["suihkussa"],
+    "public": ["kaupassa", "ulkona", "liikkeellä"],
+    "neutral": [""]
+}
+
+SCENE_ACTIONS = {
+    "work": ["palaverissa", "keskittyy töihin"],
+    "home": ["makaa sohvalla", "katsoo sarjaa"],
+    "public": ["kävelee", "ostoksilla"],
+    "bed": ["makaa sängyssä"],
+}
+
+MIN_SCENE_DURATION = 900  # 15 min
+ACTION_MIN = 300
+ACTION_MAX = 1800
+
+def init_scene_state():
+    return {
+        "scene": "neutral",
+        "micro_context": "",
+        "current_action": None,
+        "action_end": 0,
+        "last_scene_change": 0,
+        "scene_locked_until": 0,
+    }
+
+def force_scene_from_text(state, text, now):
+    t = text.lower()
+    mapping = {
+        "work": ["töissä", "duunissa", "palaverissa", "toimistolla"],
+        "commute": ["bussissa", "junassa", "matkalla", "kotimatkalla"],
+        "home": ["kotona", "sohvalla", "keittiössä"],
+        "bed": ["sängyssä", "peiton alla"],
+        "shower": ["suihkussa"],
+        "public": ["kaupassa", "ulkona", "liikkeellä"],
+    }
+    for scene, keywords in mapping.items():
+        if any(w in t for w in keywords):
+            _set_scene(state, scene, now)
+            state["micro_context"] = random.choice(SCENE_MICRO[scene])
+            return True
+    return False
+
+def maybe_transition_scene(state, now):
+    if now - state["last_scene_change"] < MIN_SCENE_DURATION:
+        return state["scene"]
+    if now < state["scene_locked_until"]:
+        return state["scene"]
+    current = state["scene"]
+    allowed = SCENE_TRANSITIONS.get(current, [])
+    if not allowed:
+        return current
+    if random.random() < 0.2:
+        new_scene = random.choice(allowed)
+        _set_scene(state, new_scene, now)
+        state["micro_context"] = random.choice(SCENE_MICRO[new_scene])
+    return state["scene"]
+
+def update_action(state, now):
+    if state["current_action"] and now < state["action_end"]:
+        return
+    scene = state["scene"]
+    if scene in SCENE_ACTIONS and random.random() < 0.4:
+        action = random.choice(SCENE_ACTIONS[scene])
+        state["current_action"] = action
+        state["action_end"] = now + random.randint(ACTION_MIN, ACTION_MAX)
+
+def _set_scene(state, scene, now):
+    state["scene"] = scene
+    state["last_scene_change"] = now
+    state["scene_locked_until"] = now + MIN_SCENE_DURATION
+    state["current_action"] = None
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -203,16 +280,15 @@ def adapt_mode_to_user(user_id, text):
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
-            "scene": "neutral", "energy": "normal", "availability": "free",
-            "last_interaction": 0, "last_scene_change": 0, "scene_locked_until": 0,
-            "micro_context": "", "persona_mode": "warm", "last_mode_change": 0,
+            "energy": "normal", "availability": "free",
+            "last_interaction": 0, "persona_mode": "warm", "last_mode_change": 0,
             "intent": "casual", "summary": "",
             "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
             "tension": 0.0, "last_direction": None,
             "core_desires": [], "desire_profile_updated": 0,
             "phase": "neutral", "phase_last_change": 0,
-            "current_action": None, "action_end_time": 0
         }
+        continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
 
 def detect_intent(text):
@@ -315,22 +391,6 @@ def update_phase(user_id, text):
         state["phase_last_change"] = now
     return state["phase"]
 
-def maybe_start_action(state):
-    now = now_ts()
-    if state["current_action"] and now < state["action_end_time"]:
-        return
-    actions = {
-        "work": ["palaverissa", "kirjoittaa konetta", "keskittyy töihin"],
-        "home": ["makaa sohvalla", "katsoo sarjaa"],
-        "public": ["kävelee ulkona", "kaupassa"],
-        "bed": ["makaa sängyssä"],
-    }
-    scene = state["scene"]
-    if scene in actions and random.random() < 0.3:
-        action = random.choice(actions[scene])
-        state["current_action"] = action
-        state["action_end_time"] = now + random.randint(300, 1800)
-
 def now_ts():
     return time.time()
 
@@ -377,39 +437,11 @@ def update_continuity_state(user_id, text):
         state["availability"] = "free"
         state["energy"] = "low" if random.random() < 0.4 else "normal"
 
-    t = text.lower()
-    forced_scene = None
-    if any(w in t for w in ["töissä", "duunissa", "palaverissa", "meetingissä", "toimistolla"]):
-        forced_scene = "work"; state["availability"] = "busy"; state["micro_context"] = "töissä"
-    elif any(w in t for w in ["kotona", "sohvalla", "keittiössä"]):
-        forced_scene = "home"; state["micro_context"] = "kotona"
-    elif any(w in t for w in ["sängyssä", "nukkumaan", "peiton alla"]):
-        forced_scene = "bed"; state["micro_context"] = "sängyssä"
-    elif any(w in t for w in ["suihkussa", "pesulla"]):
-        forced_scene = "shower"; state["micro_context"] = "suihkussa"
-    elif any(w in t for w in ["kaupassa", "ulkona", "kadulla", "bussissa", "junassa"]):
-        forced_scene = "public"; state["micro_context"] = "liikkeellä"
-
-    if forced_scene:
-        state["scene"] = forced_scene
-        state["last_scene_change"] = now
-        state["scene_locked_until"] = now + 3 * 3600
-
-    # === SCENE STATE MACHINE WITH INERTIA + VALID TRANSITIONS ===
-    if now - state.get("last_scene_change", 0) < MIN_SCENE_DURATION:
-        pass  # inertia: stay in current scene
-    elif not forced_scene and now > state.get("scene_locked_until", 0):
-        current = state["scene"]
-        allowed = SCENE_TRANSITIONS.get(current, [])
-        if allowed and random.random() < 0.25:
-            new_scene = random.choice(allowed)
-            state["scene"] = new_scene
-            state["last_scene_change"] = now
-            micro_map = {"work": "töissä", "public": "liikkeellä", "home": "kotona", "bed": "sängyssä",
-                         "commute": "matkalla", "shower": "suihkussa", "neutral": ""}
-            state["micro_context"] = micro_map.get(new_scene, "")
-
-    maybe_start_action(state)
+    # === SCENE ENGINE ===
+    forced = force_scene_from_text(state, text, now)
+    if not forced:
+        maybe_transition_scene(state, now)
+    update_action(state, now)
 
     recent_context.append({"scene": state["scene"], "intent": state["intent"], "energy": state["energy"], "text": text[:80]})
 
@@ -707,6 +739,8 @@ STRICT RULES:
 - If you were in one place recently, you are STILL there unless time has passed or you explicitly moved
 
 If inconsistency appears, FIX it naturally instead of switching scene.
+
+You are always continuing the same physical moment unless time or movement clearly changes it.
 
 Current interaction intent: {state['intent']}
 Current internal desire: {state.get('desire', 'none')}
