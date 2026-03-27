@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Memory-State-Prompt Pipeline)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Loop-fiksit)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -197,6 +197,9 @@ def maybe_interrupt_action(state, text):
             state["action_duration"] = 0
             state["action_started"] = 0
 
+def breaks_scene_logic(reply, state):
+    return False   # placeholder korjaus
+
 def breaks_temporal_logic(reply, state):
     if not state["current_action"]:
         return False
@@ -206,8 +209,15 @@ def breaks_temporal_logic(reply, state):
         return True
     return False
 
-# ====================== DATABASE ======================
+def reinforce_micro_context(state):
+    return None   # placeholder korjaus
+
+def get_recent_actions(user_id):
+    return "No recent actions."   # placeholder korjaus
+
+# ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
+db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -274,11 +284,14 @@ def build_memory_context(memories):
 # ====================== BACKGROUND TASK ======================
 background_task = None
 
-# ====================== SAFE ANTHROPIC CALL ======================
+# ====================== SAFE ANTHROPIC CALL (timeout lisätty) ======================
 async def safe_anthropic_call(**kwargs):
     for i in range(3):
         try:
-            return await anthropic_client.messages.create(**kwargs)
+            return await asyncio.wait_for(
+                anthropic_client.messages.create(**kwargs),
+                timeout=20
+            )
         except Exception as e:
             print(f"[Anthropic retry {i}] {e}")
             if "overloaded" in str(e).lower() or "529" in str(e):
@@ -321,8 +334,9 @@ def should_use_sensitive_memory(text: str) -> bool:
 
 def get_random_sensitive_memory(user_id):
     try:
-        cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1", (str(user_id),))
-        row = cursor.fetchone()
+        with db_lock:
+            cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1", (str(user_id),))
+            row = cursor.fetchone()
         return row[0] if row else None
     except Exception as e:
         print("Sensitive memory error:", e)
@@ -565,10 +579,12 @@ Current continuity state:
 async def retrieve_memories(user_id, query, limit=8):
     try:
         q_emb = await get_embedding(query)
-        cursor.execute("SELECT content, embedding, timestamp FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 100", (str(user_id),))
+        with db_lock:
+            cursor.execute("SELECT content, embedding, timestamp FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 100", (str(user_id),))
+            rows = cursor.fetchall()
         scored = []
         now = time.time()
-        for content, emb_blob, ts in cursor.fetchall():
+        for content, emb_blob, ts in rows:
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             cosine = cosine_similarity(q_emb, emb)
             try:
@@ -596,13 +612,15 @@ async def retrieve_memories(user_id, query, limit=8):
         return []
 
 def load_profile(user_id):
-    cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
-    row = cursor.fetchone()
+    with db_lock:
+        cursor.execute("SELECT data FROM profiles WHERE user_id=?", (str(user_id),))
+        row = cursor.fetchone()
     return json.loads(row[0]) if row else {"facts": [], "preferences": [], "events": []}
 
 def save_profile(user_id, profile):
-    cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
-    conn.commit()
+    with db_lock:
+        cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), json.dumps(profile)))
+        conn.commit()
 
 async def extract_and_store(user_id, text):
     try:
@@ -641,9 +659,10 @@ async def store_memory(user_id, text):
         txt = text.lower()
         tag = "sensitive" if any(w in txt for w in ["pelkään", "häpeän", "nolottaa", "arka", "haluan", "fantasia", "ahdistaa", "kiusaa"]) else "general"
         emb = await get_embedding(text)
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), text, emb.tobytes(), tag))
-        conn.commit()
+        with db_lock:
+            cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                           (str(user_id), text, emb.tobytes(), tag))
+            conn.commit()
     except Exception as e:
         print("Memory store error:", e)
 
@@ -658,9 +677,11 @@ async def store_dialogue_turn(user_id, user_text, assistant_text):
             "tension": get_or_create_state(user_id)["tension"],
             "timestamp": time.time()
         })
-        cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
-                       (str(user_id), combined, (await get_embedding(combined)).tobytes(), "dynamic"))
-        conn.commit()
+        emb = await get_embedding(combined)
+        with db_lock:
+            cursor.execute("INSERT INTO memories (user_id, content, embedding, type) VALUES (?, ?, ?, ?)",
+                           (str(user_id), combined, emb.tobytes(), "dynamic"))
+            conn.commit()
     except Exception as e:
         print("Dialogue turn store error:", e)
 
@@ -1162,6 +1183,10 @@ Before answering:
             if s >= 3:
                 break
 
+        # Fallback jos best_reply jäi Noneksi
+        if not best_reply:
+            best_reply = "…mä mietin hetken."
+
         reply = best_reply
 
         if user_id not in last_replies:
@@ -1217,7 +1242,7 @@ Before answering:
             await message.reply_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
         return
 
-# ====================== PROAKTIIVISET VIESTIT ======================
+# ====================== PROAKTIIVISET VIESTIT (throttle lisätty) ======================
 def should_send_proactive(user_id):
     state = get_or_create_state(user_id)
     if state["intent"] == "intimate" and random.random() < 0.4: return True
@@ -1260,6 +1285,9 @@ async def independent_message_loop(application: Application):
             await asyncio.sleep(30)
             print("⏱️ Proactive tick")
             for user_id in list(conversation_history.copy().keys()):
+                # Throttle lisätty
+                if len(conversation_history.get(user_id, [])) < 2 or random.random() < 0.8:
+                    continue
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
                         text = await generate_proactive_message(user_id)
@@ -1287,10 +1315,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal Simulation + Memory-State Pipeline käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + Memory Pipeline + Loop-fiksit käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Memory-State-Prompt Pipeline) on nyt käynnissä")
+    print("✅ Megan 6.1 (Loop-fiksit) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
