@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (MemoryEngine v3)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (MemoryEngine v3 + Prediction + Evolution + Multi-Character)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -260,6 +260,30 @@ PERSONA_BASELINE = {
     "playfulness": 0.4
 }
 
+PERSONALITY_LIMITS = {
+    "curiosity": (0.2, 0.9),
+    "patience": (0.2, 0.9),
+    "expressiveness": (0.2, 0.9),
+    "initiative": (0.2, 0.9),
+    "stability": (0.3, 1.0),
+}
+
+# ====================== DEFAULT SIDE CHARACTERS ======================
+DEFAULT_SIDE_CHARACTERS = {
+    "friend": {
+        "name": "Aino",
+        "role": "friend",
+        "tone": "warm and casual",
+        "description": "A relaxed friend occasionally mentioned in everyday context."
+    },
+    "coworker": {
+        "name": "Mika",
+        "role": "coworker",
+        "tone": "professional but friendly",
+        "description": "A coworker related to work or scheduling topics."
+    }
+}
+
 # ====================== STATE SNAPSHOT ======================
 def build_state_snapshot(user_id):
     state = get_or_create_state(user_id)
@@ -374,6 +398,84 @@ def update_emotion(user_id, text):
         emo[k] = max(0.0, min(1.0, emo[k]))
     return emo
 
+def evolve_personality(user_id, text):
+    state = get_or_create_state(user_id)
+    if "personality_evolution" not in state:
+        state["personality_evolution"] = {
+            "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
+            "initiative": 0.5, "stability": 0.7, "last_evolved": 0
+        }
+    evo = state["personality_evolution"]
+    now = time.time()
+    if now - evo.get("last_evolved", 0) < 300:
+        return evo
+    t = text.lower()
+    if any(w in t for w in ["miksi", "miten", "entä", "?"]):
+        evo["curiosity"] = min(1.0, evo["curiosity"] + 0.03)
+    if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
+        evo["patience"] = min(1.0, evo["patience"] + 0.02)
+        evo["initiative"] = max(0.0, evo["initiative"] - 0.02)
+    if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
+        evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.03)
+    if len(text.strip()) < 8:
+        evo["initiative"] = min(1.0, evo["initiative"] + 0.02)
+    evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.995))
+    evo["last_evolved"] = now
+    return evo
+
+def clamp_personality_evolution(user_id):
+    state = get_or_create_state(user_id)
+    evo = state["personality_evolution"]
+    for k, (low, high) in PERSONALITY_LIMITS.items():
+        evo[k] = min(high, max(low, evo[k]))
+    return evo
+
+def detect_side_character_trigger(text):
+    t = text.lower()
+    if any(w in t for w in ["kaveri", "ystävä", "aino"]):
+        return "friend"
+    if any(w in t for w in ["duuni", "työkaveri", "mika", "palaveri"]):
+        return "coworker"
+    return None
+
+async def update_prediction(user_id, text):
+    state = get_or_create_state(user_id)
+    now = time.time()
+    if now - state["prediction"].get("updated_at", 0) < 120:
+        return state["prediction"]
+    history = conversation_history.get(user_id, [])[-8:]
+    history_text = "\n".join(
+        f"{m.get('role')}: {m.get('content')}"
+        for m in history
+        if isinstance(m, dict)
+    )
+    try:
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6",
+            max_tokens=120,
+            temperature=0.3,
+            messages=[
+                {"role": "user", "content": (
+                    "Predict the user's likely next move in JSON only. "
+                    "Format: "
+                    "{\"next_user_intent\":\"...\","
+                    "\"next_user_mood\":\"...\","
+                    "\"confidence\":0.0}"
+                )},
+                {"role": "user", "content": f"Recent conversation:\n{history_text}\n\nLatest user text:\n{text}"}
+            ]
+        )
+        parsed = json.loads(resp.content[0].text.strip())
+        state["prediction"] = {
+            "next_user_intent": parsed.get("next_user_intent"),
+            "next_user_mood": parsed.get("next_user_mood"),
+            "confidence": float(parsed.get("confidence", 0.0)),
+            "updated_at": now
+        }
+    except Exception:
+        pass
+    return state["prediction"]
+
 # ====================== BACKGROUND TASK ======================
 background_task = None
 
@@ -486,6 +588,13 @@ def get_or_create_state(user_id):
             "current_goal": None, "goal_updated": 0,
             "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
             "persona_vector": PERSONA_BASELINE.copy(),
+            "personality_evolution": {
+                "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
+                "initiative": 0.5, "stability": 0.7, "last_evolved": 0
+            },
+            "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
+            "side_characters": DEFAULT_SIDE_CHARACTERS.copy(),
+            "active_side_character": None,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -779,6 +888,11 @@ async def store_dialogue_turn(user_id, user_text, assistant_text):
             "state": state_snapshot,
             "intent": detect_intent(user_text),
             "tension": get_or_create_state(user_id)["tension"],
+            "active_arc": get_or_create_state(user_id).get("active_arc"),
+            "goal": get_or_create_state(user_id).get("current_goal"),
+            "prediction": get_or_create_state(user_id).get("prediction"),
+            "emotion": get_or_create_state(user_id).get("emotional_state"),
+            "active_side_character": get_or_create_state(user_id).get("active_side_character"),
             "timestamp": time.time()
         })
         emb = await get_embedding(combined)
@@ -1128,12 +1242,19 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
-        # === MEMORY ENGINE V3 UPDATES ===
+        # === MEMORY ENGINE V3 + NEW LAYERS ===
         update_working_memory(user_id, text)
         await update_arcs(user_id, text)
         goal = await update_goal(user_id, text)
+        prediction = await update_prediction(user_id, text)
         emo = update_emotion(user_id, text)
         persona_vec = stabilize_persona(user_id)
+        evo = evolve_personality(user_id, text)
+        evo = clamp_personality_evolution(user_id)
+
+        side_key = detect_side_character_trigger(text)
+        if side_key:
+            state["active_side_character"] = side_key
 
         system_prompt = (
             get_system_prompt(user_id)
@@ -1170,7 +1291,7 @@ Your response MUST reflect this exact situation.
             "content": f"Relevant past interactions:\n{memory_context}"
         })
 
-        # === MEMORY ENGINE V3 INJECTIONS (emotion → goal → arcs → persona) ===
+        # === MEMORY ENGINE V3 + NEW LAYERS INJECTIONS ===
         messages.insert(0, {
             "role": "user",
             "content": f"Emotional state: valence={emo['valence']}, arousal={emo['arousal']}, attachment={emo['attachment']}"
@@ -1188,10 +1309,48 @@ Your response MUST reflect this exact situation.
                 "content": f"Current relationship dynamic: {state['active_arc']}"
             })
 
+        if prediction.get("next_user_intent"):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"Predicted next user move: intent={prediction['next_user_intent']}, "
+                    f"mood={prediction.get('next_user_mood')}, "
+                    f"confidence={prediction.get('confidence')}. "
+                    f"Use this only to improve continuity, not to force the conversation."
+                )
+            })
+
         messages.insert(0, {
             "role": "user",
             "content": f"Persona calibration: dominance={persona_vec['dominance']}, warmth={persona_vec['warmth']}"
         })
+
+        messages.insert(0, {
+            "role": "user",
+            "content": (
+                "Personality evolution state: "
+                f"curiosity={evo['curiosity']}, "
+                f"patience={evo['patience']}, "
+                f"expressiveness={evo['expressiveness']}, "
+                f"initiative={evo['initiative']}, "
+                f"stability={evo['stability']}. "
+                "Let this affect tone gradually, not abruptly."
+            )
+        })
+
+        active_side = state.get("active_side_character")
+        if active_side:
+            side = state["side_characters"].get(active_side)
+            if side:
+                messages.insert(0, {
+                    "role": "user",
+                    "content": (
+                        f"Relevant side character: {side['name']} "
+                        f"({side['role']}, tone={side['tone']}). "
+                        f"Description: {side['description']}. "
+                        "Only mention this character if naturally relevant."
+                    )
+                })
 
         # === DIRECTION LAYER ===
         direction = f"""
@@ -1444,10 +1603,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (MemoryEngine v3) on nyt käynnissä")
+    print("✅ Megan 6.1 (MemoryEngine v3 + Prediction + Evolution + Multi-Character) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
