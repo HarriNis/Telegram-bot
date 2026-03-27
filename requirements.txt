@@ -1,6 +1,6 @@
+cloudinary
 flask
 python-telegram-bot
 anthropic
-aiohttp
-numpy
 openai
+numpy
