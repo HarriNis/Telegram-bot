@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Proaktiivisempi + Korkeampi libido & tuhmuus)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Scene Consistency Lock)")
 
 # ====================== SCENE ENGINE (integroitu) ======================
 SCENE_TRANSITIONS = {
@@ -448,6 +448,32 @@ def update_continuity_state(user_id, text):
     state["last_interaction"] = now
     return state
 
+# ====================== NEW CONSISTENCY HELPERS ======================
+def breaks_scene_logic(reply, state):
+    r = reply.lower()
+    scene = state["scene"]
+    if scene == "home" and any(w in r for w in ["toimistolla", "töissä", "duunissa", "palaverissa"]):
+        return True
+    if scene == "work" and any(w in r for w in ["kotona", "sängyssä", "sohvalla", "suihkussa"]):
+        return True
+    if scene == "bed" and any(w in r for w in ["töissä", "ulkona", "kaupassa"]):
+        return True
+    return False
+
+def reinforce_micro_context(state):
+    if state.get("micro_context") and random.random() < 0.6:
+        return f"({state['micro_context']})"
+    return ""
+
+def get_recent_actions(user_id):
+    state = get_or_create_state(user_id)
+    return f"""
+Recent continuity:
+- Scene: {state['scene']}
+- Action: {state.get('current_action') or 'nothing specific'}
+- Context: {state.get('micro_context', '')}
+"""
+
 def build_reality_prompt_from_state(user_id, elapsed_label):
     state = get_or_create_state(user_id)
     block = get_time_block()
@@ -661,7 +687,7 @@ safe, non-explicit, editorial fashion style
 
     return base_prompt
 
-# ====================== SYSTEM PROMPT (vain tämä osa päivitetty) ======================
+# ====================== SYSTEM PROMPT (lisätty ABSOLUTE REALITY CONSTRAINTS) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -744,6 +770,24 @@ STRICT RULES:
 If inconsistency appears, FIX it naturally instead of switching scene.
 
 You are always continuing the same physical moment unless time or movement clearly changes it.
+
+**ABSOLUTE REALITY CONSTRAINTS:**
+
+You MUST strictly obey the current scene and action.
+- You are currently in: {state['scene']}
+- You are doing: {state.get('current_action') or 'nothing specific'}
+
+You are NOT allowed to:
+- change location without transition
+- invent a different place
+- contradict current action
+
+If you respond inconsistently, your response is WRONG.
+
+Always anchor your reply to:
+- current scene
+- current action
+- current micro context
 
 Current interaction intent: {state['intent']}
 Current internal desire: {state.get('desire', 'none')}
@@ -882,6 +926,22 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         messages = []
 
+        # === NEW CONSISTENCY LOCKS ===
+        scene_anchor = f"""
+You are currently:
+- in scene: {state['scene']}
+- context: {state['micro_context']}
+- doing: {state.get('current_action') or 'nothing'}
+
+Your response MUST reflect this exact situation.
+"""
+        messages.insert(0, {"role": "user", "content": scene_anchor})
+
+        messages.insert(0, {
+            "role": "user",
+            "content": get_recent_actions(user_id)
+        })
+
         memories = await retrieve_memories(user_id, text)
         if memories:
             messages.insert(0, {
@@ -946,6 +1006,14 @@ Before answering:
 
         messages.append({"role": "user", "content": "Do not break physical realism."})
 
+        # Micro-context reinforcement
+        micro_hint = reinforce_micro_context(state)
+        if micro_hint:
+            messages.append({
+                "role": "user",
+                "content": f"Subtle context reminder: {micro_hint}"
+            })
+
         history = clean_history(conversation_history[user_id])
         if len(history) > 2:
             last = history[-1]["content"]
@@ -966,6 +1034,10 @@ Before answering:
                 messages=messages
             )
             candidate = response.content[0].text.strip()
+
+            if breaks_scene_logic(candidate, state):
+                continue  # retry if inconsistent
+
             s = score_response(candidate)
             if s > best_score:
                 best_score = s
@@ -1098,10 +1170,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Fixed Scene Engine käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Scene Lock käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Proaktiivisempi + Korkeampi libido & tuhmuus) on nyt käynnissä")
+    print("✅ Megan 6.1 (Scene Consistency Lock) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
