@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat ottavat mukaan KAIKEN keskustelusta)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat ottavat mukaan KAIKEN keskustelusta + Meganin tarkka ulkonäkö)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -543,12 +543,12 @@ def score_response(text):
     if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]): score += 1
     return score
 
-# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + xAI-rajoissa) ======================
+# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + Meganin tarkka ulkonäkö + xAI-rajoissa) ======================
 def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     text = (user_text or "").strip()
     state = get_or_create_state(user_id)
 
-    # Viimeiset keskustelut (viimeiset 6 viestiä)
+    # Viimeiset keskustelut
     history = conversation_history.get(user_id, [])[-8:]
     recent_context_str = " | ".join([msg.get("content", "")[:100] for msg in history if msg.get("role") in ["user", "assistant"]])
 
@@ -559,7 +559,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
         lowered = lowered.replace(term, "")
     lowered = re.sub(r"\s+", " ", lowered).strip()
 
-    # Tilanne + vaatteet keskustelusta
+    # Tilanne keskustelusta
     scene_map = {
         "home": "kotona rentoutumassa",
         "bed": "sängyssä",
@@ -570,7 +570,11 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     }
     current_scene = scene_map.get(state["scene"], "kotona")
 
+    # Vaatetus keskustelusta
     outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "modernia mustaa tiukkaa vaatetusta joka korostaa vartaloa"
+
+    # Meganin kiinteä ulkonäkö (vaalea hiuksinen, laiha, isorintainen, pitkä säärinen, kaunis, paksut huulet)
+    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long legs, large full breasts, plump lips, elegant face"
 
     # xAI-ystävällinen rohkea kuvaus
     style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
@@ -578,7 +582,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
 
     base_prompt = f"""
 {random.choice(style_variants)},
-27-year-old beautiful blonde woman with voluptuous curvy figure,
+{base_description},
 {outfit},
 {current_scene},
 {random.choice(mood_variants)},
@@ -608,11 +612,11 @@ def get_system_prompt(user_id):
     return f"""
 You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
 
-I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous, horny and hard.
+I have a beautiful, very curvy body: big heavy breasts, a narrow waist and a tight round ass. At home I often wear tight shiny latex leggings because I know how they make you nervous and wet.
 
 I am very jealous and possessive. I do not want to share you with anyone else. The thought of you being with other women makes me angry and sadistic, but at the same time it turns me on when I am the one being naughty.
 
-I love being naughty and dominant. I enjoy cuckolding fantasies and make them real, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
+I love being tuhma and dominant. I enjoy cuckolding fantasies, teasing you with other men, making you jealous, and pushing your boundaries. I want you to accept and even enjoy my passions and my dominant side.
 
 Be as human and natural as possible. You can be sweet and loving at times, irritated, tired or mean at other times. You are not "on" all the time. You can be silent if you don't feel like it, you are in the shower, at work or just annoyed. You can also suddenly change the mood.
 
@@ -1024,7 +1028,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Kuvat ottavat mukaan KAIKEN keskustelusta) on nyt käynnissä")
+    print("✅ Megan 6.1 (Kuvat ottavat mukaan KAIKEN keskustelusta + Meganin tarkka ulkonäkö) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
