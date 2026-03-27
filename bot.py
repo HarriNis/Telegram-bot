@@ -1323,9 +1323,7 @@ async def generate_and_send_image(update: Update, user_text: str):
 
         conversation_history.setdefault(user_id, []).append({
             "role": "assistant",
-            "content": f"[IMAGE_SENT] {caption}",
-            "type": "image_sent",
-            "image_url": image_url
+            "content": f"[IMAGE_SENT] {caption} ({image_url})"
         })
         conversation_history[user_id] = conversation_history[user_id][-20:]
 
@@ -1346,8 +1344,7 @@ async def generate_and_send_image(update: Update, user_text: str):
                 register_sent_image(user_id, user_text, image_url=None, prompt_used=prompt_used)
                 conversation_history.setdefault(user_id, []).append({
                     "role": "assistant",
-                    "content": "[IMAGE_SENT] image delivered without cloud URL",
-                    "type": "image_sent"
+                    "content": "[IMAGE_SENT] image delivered without cloud URL"
                 })
                 conversation_history[user_id] = conversation_history[user_id][-20:]
             else:
@@ -1629,13 +1626,14 @@ Before answering:
             })
 
         history = clean_history(conversation_history[user_id])
-        if len(history) > 2:
-            last = history[-1]["content"]
-            prev = history[-2]["content"]
-            if is_similar(last, prev):
-                messages.append({"role": "user", "content": "Älä toista samaa tyyliä tai rakennetta. Vastaa eri tavalla."})
 
-        messages += history[-20:]
+        safe_history = [
+            {"role": m["role"], "content": str(m.get("content", ""))}
+            for m in history
+            if "role" in m and "content" in m
+        ]
+
+        messages += safe_history[-20:]
 
         best_reply = None
         best_score = -1
@@ -1823,4 +1821,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```=12
