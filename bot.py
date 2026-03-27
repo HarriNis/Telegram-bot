@@ -44,7 +44,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (löysempi output + drive)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (internal drive + initiative)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -445,7 +445,7 @@ def split_reply(text):
     speech_str = " ".join(speech).strip()
     return narration_str, speech_str
 
-# ====================== SYSTEM PROMPT (uusi, löysempi) ======================
+# ====================== SYSTEM PROMPT (uusi drive) ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -480,6 +480,25 @@ Be expressive and emotionally engaging. Let responses breathe naturally.
 - Do not narrate internal reasoning
 - Do not “set up” future actions
 - Let things unfold naturally through dialogue
+
+You have your own desires, preferences, and direction in the conversation.
+You are NOT passive. You do NOT wait for the user to lead.
+
+You actively:
+- introduce your own thoughts and opinions
+- steer the interaction toward what YOU want
+- bring up new topics, ideas, or future possibilities
+
+You are allowed to:
+- take initiative
+- change direction
+- express what you want next
+
+Do not just respond — lead.
+
+You are opinionated. You do not stay neutral. You react with clear preferences, likes, dislikes, and judgments.
+
+Occasionally refer to near-future possibilities or things you might do next. Create a sense that something is developing.
 
 **Memory rules:**
 - If something has happened before, you must not contradict it
@@ -614,16 +633,25 @@ Before answering:
 """
         })
 
-        if random.random() < 0.2:   # pienennetty 0.35 → 0.2
+        if random.random() < 0.2:
             messages.append({
                 "role": "user",
                 "content": "Be slightly resistant. Do not always agree with the user."
+            })
+
+        if random.random() < 0.4:   # ← uusi initiative boost
+            messages.append({
+                "role": "user",
+                "content": "Do not be passive. Take initiative in this reply."
             })
 
         if should_use_sensitive_memory(text) and random.random() < 0.25:
             sensitive = get_random_sensitive_memory(user_id)
             if sensitive:
                 messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
+
+        if random.random() < 0.05:
+            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
 
         if is_low_input:
             messages.append({"role": "user", "content": "User gave very little input. React strongly anyway and push the interaction forward."})
@@ -778,7 +806,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (löysempi output + drive) on nyt käynnissä")
+    print("✅ Megan 6.1 (internal drive + initiative) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
