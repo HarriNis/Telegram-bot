@@ -40,8 +40,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
+VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 
-if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
+if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY or not VENICE_API_KEY:
     raise ValueError("Puuttuva API-avain!")
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
@@ -52,13 +53,18 @@ grok_client = AsyncOpenAI(
     base_url="https://api.x.ai/v1"
 )
 
+venice_client = AsyncOpenAI(
+    api_key=VENICE_API_KEY,
+    base_url="https://api.venice.ai/v1"
+)
+
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
     api_key=os.getenv("CLOUDINARY_API_KEY"),
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (MemoryEngine v3 + Prediction + Evolution + Multi-Character)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Venice.ai ensisijainen kuvagenerointi)")
 
 # ====================== SCENE ENGINE (Temporal Layer) ======================
 SCENE_TRANSITIONS = {
@@ -1167,10 +1173,22 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== HYBRID IMAGE GENERATION ======================
+# ====================== HYBRID IMAGE GENERATION (VENICE ENSISIJAINEN) ======================
 async def generate_image_hybrid(user_text: str, user_id: int):
     prompt = build_safe_image_prompt(user_text, user_id)
 
+    # ===== 1. VENICE (PRIMARY) =====
+    try:
+        response = await venice_client.images.generate(
+            model="venice-image",
+            prompt=prompt,
+            size="1024x1024"
+        )
+        return base64.b64decode(response.data[0].b64_json)
+    except Exception as e:
+        print("Venice error:", repr(e))
+
+    # ===== 2. GROK (fallback 1) =====
     try:
         response = await grok_client.images.generate(
             model="grok-2-image",
@@ -1179,8 +1197,9 @@ async def generate_image_hybrid(user_text: str, user_id: int):
         )
         return base64.b64decode(response.data[0].b64_json)
     except Exception as e:
-        print("Grok image error:", repr(e))
+        print("Grok error:", repr(e))
 
+    # ===== 3. OPENAI (fallback 2) =====
     try:
         response = await openai_client.images.generate(
             model="gpt-image-1",
@@ -1189,8 +1208,9 @@ async def generate_image_hybrid(user_text: str, user_id: int):
         )
         return base64.b64decode(response.data[0].b64_json)
     except Exception as e:
-        print("OpenAI fallback error:", repr(e))
-        return None
+        print("OpenAI error:", repr(e))
+
+    return None
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
@@ -1203,7 +1223,7 @@ async def generate_and_send_image(update: Update, user_text: str):
 
         image_data = await generate_image_hybrid(user_text, user_id)
         if image_data is None:
-            raise Exception("Both Grok and OpenAI failed")
+            raise Exception("All providers failed")
 
         upload_result = cloudinary.uploader.upload(BytesIO(image_data), folder="megan_images")
         image_url = upload_result.get("secure_url")
@@ -1654,10 +1674,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (MemoryEngine v3 + Prediction + Evolution + Multi-Character + Reset commands) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai ensisijainen) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
