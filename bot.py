@@ -284,6 +284,32 @@ DEFAULT_SIDE_CHARACTERS = {
     }
 }
 
+# ====================== RESET HELPERS ======================
+async def new_game_reset(user_id):
+    conversation_history[user_id] = []
+    last_replies[user_id] = deque(maxlen=3)
+    working_memory[user_id] = {}
+
+    if user_id in continuity_state:
+        del continuity_state[user_id]
+
+    if user_id in last_proactive_sent:
+        del last_proactive_sent[user_id]
+
+    print(f"[NEW GAME] Reset session state for user {user_id}")
+
+
+async def wipe_all_memory(user_id):
+    await new_game_reset(user_id)
+
+    with db_lock:
+        cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
+        conn.commit()
+
+    print(f"[WIPE MEMORY] Fully wiped all memory for user {user_id}")
+
+
 # ====================== STATE SNAPSHOT ======================
 def build_state_snapshot(user_id):
     state = get_or_create_state(user_id)
@@ -1209,8 +1235,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (message.text or message.caption or "").strip()
 
     if text.lower() in ["stop", "lopeta kaikki", "keskeytä"]:
-        conversation_history[user_id] = []
-        await message.reply_text("…Okei. Lopetetaan sitten. 💔")
+        await new_game_reset(user_id)
+        await message.reply_text("…Okei. Aloitetaan sitten alusta, jos haluat.")
         return
 
     image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic", "kuvaa"]
@@ -1587,6 +1613,29 @@ async def independent_message_loop(application: Application):
     except asyncio.CancelledError:
         print("Loop stopped cleanly")
 
+# ====================== COMMAND HANDLERS ======================
+async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await new_game_reset(user_id)
+    await update.message.reply_text(
+        "Uusi peli aloitettu. Sessio nollattiin, mutta pitkäaikainen muisti säilyi."
+    )
+
+async def wipememory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if not context.args or context.args[0].lower() != "confirm":
+        await update.message.reply_text(
+            "Tämä poistaa kaiken pysyvän muistin.\n"
+            "Vahvista komennolla:\n/wipememory confirm"
+        )
+        return
+
+    await wipe_all_memory(user_id)
+    await update.message.reply_text(
+        "Kaikki muisti poistettiin. Aloitetaan täysin puhtaalta pöydältä."
+    )
+
 # ====================== START ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1598,6 +1647,8 @@ def main():
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("newgame", newgame_command))
+    application.add_handler(CommandHandler("wipememory", wipememory_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
 
     async def post_init(app: Application):
@@ -1606,7 +1657,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (MemoryEngine v3 + Prediction + Evolution + Multi-Character) on nyt käynnissä")
+    print("✅ Megan 6.1 (MemoryEngine v3 + Prediction + Evolution + Multi-Character + Reset commands) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
