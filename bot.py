@@ -1253,10 +1253,8 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== HYBRID IMAGE GENERATION (VENICE ENSISIJAINEN) ======================
-async def generate_image_hybrid(user_text: str, user_id: int):
-    prompt = build_safe_image_prompt(user_text, user_id)
-
+# ====================== HYBRID IMAGE GENERATION ======================
+async def generate_image_hybrid(prompt: str):
     # ===== 1. VENICE (PRIMARY) =====
     try:
         response = await venice_client.images.generate(
@@ -1292,7 +1290,7 @@ async def generate_image_hybrid(user_text: str, user_id: int):
 
     return None
 
-# ====================== KUVAGENEROINTI (päivitetty täydellä muistilla) ======================
+# ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
     user_id = update.effective_user.id
     image_data = None
@@ -1304,7 +1302,7 @@ async def generate_and_send_image(update: Update, user_text: str):
         # Prompt talteen heti alussa
         prompt_used = build_safe_image_prompt(user_text, user_id)
 
-        image_data = await generate_image_hybrid(user_text, user_id)
+        image_data = await generate_image_hybrid(prompt_used)
         if image_data is None:
             raise Exception("All providers failed")
 
@@ -1347,6 +1345,13 @@ async def generate_and_send_image(update: Update, user_text: str):
                     "content": "[IMAGE_SENT] image delivered without cloud URL"
                 })
                 conversation_history[user_id] = conversation_history[user_id][-20:]
+
+                await store_image_event(
+                    user_id,
+                    user_text,
+                    image_url=None,
+                    prompt_used=prompt_used
+                )
             else:
                 await update.message.reply_text("...en saanut kuvaa luotua nyt.")
         except:
@@ -1365,10 +1370,11 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Aloitetaan sitten alusta, jos haluat.")
         return
 
-    image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic", "kuvaa"]
+    image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic"]
     if any(kw in text.lower() for kw in image_keywords):
-        await generate_and_send_image(update, text)
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+        await generate_and_send_image(update, text)
         await extract_and_store(user_id, text)
         return
 
