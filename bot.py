@@ -58,7 +58,19 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat ottavat mukaan KAIKEN keskustelusta + Meganin tarkka ulkonäkö)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Scene State Machine + Continuous Reality)")
+
+# ====================== SCENE STATE MACHINE ======================
+SCENE_TRANSITIONS = {
+    "work": ["commute", "public"],
+    "commute": ["home", "public"],
+    "home": ["public", "bed"],
+    "public": ["home", "work"],
+    "bed": ["home"],
+    "shower": ["home"],
+}
+
+MIN_SCENE_DURATION = 900  # 15 min inertia
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -198,7 +210,8 @@ def get_or_create_state(user_id):
             "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
             "tension": 0.0, "last_direction": None,
             "core_desires": [], "desire_profile_updated": 0,
-            "phase": "neutral", "phase_last_change": 0
+            "phase": "neutral", "phase_last_change": 0,
+            "current_action": None, "action_end_time": 0
         }
     return continuity_state[user_id]
 
@@ -302,6 +315,22 @@ def update_phase(user_id, text):
         state["phase_last_change"] = now
     return state["phase"]
 
+def maybe_start_action(state):
+    now = now_ts()
+    if state["current_action"] and now < state["action_end_time"]:
+        return
+    actions = {
+        "work": ["palaverissa", "kirjoittaa konetta", "keskittyy töihin"],
+        "home": ["makaa sohvalla", "katsoo sarjaa"],
+        "public": ["kävelee ulkona", "kaupassa"],
+        "bed": ["makaa sängyssä"],
+    }
+    scene = state["scene"]
+    if scene in actions and random.random() < 0.3:
+        action = random.choice(actions[scene])
+        state["current_action"] = action
+        state["action_end_time"] = now + random.randint(300, 1800)
+
 def now_ts():
     return time.time()
 
@@ -366,17 +395,21 @@ def update_continuity_state(user_id, text):
         state["last_scene_change"] = now
         state["scene_locked_until"] = now + 3 * 3600
 
-    since_scene_change = now - state["last_scene_change"] if state["last_scene_change"] else 999999
-    if (not forced_scene and now > state.get("scene_locked_until", 0) and since_scene_change > 1800 and random.random() < 0.3):
-        candidates = {"night": ["home", "bed"], "morning": ["home", "commute", "work"],
-                      "day": ["work", "public", "home"], "evening": ["home", "public"],
-                      "late_evening": ["home", "bed"]}
-        new_scene = random.choice(candidates.get(block, ["neutral"]))
-        state["scene"] = new_scene
-        state["last_scene_change"] = now
-        micro_map = {"work": "töissä", "public": "liikkeellä", "home": "kotona", "bed": "sängyssä",
-                     "commute": "matkalla", "shower": "suihkussa", "neutral": ""}
-        state["micro_context"] = micro_map.get(new_scene, "")
+    # === SCENE STATE MACHINE WITH INERTIA + VALID TRANSITIONS ===
+    if now - state.get("last_scene_change", 0) < MIN_SCENE_DURATION:
+        pass  # inertia: stay in current scene
+    elif not forced_scene and now > state.get("scene_locked_until", 0):
+        current = state["scene"]
+        allowed = SCENE_TRANSITIONS.get(current, [])
+        if allowed and random.random() < 0.25:
+            new_scene = random.choice(allowed)
+            state["scene"] = new_scene
+            state["last_scene_change"] = now
+            micro_map = {"work": "töissä", "public": "liikkeellä", "home": "kotona", "bed": "sängyssä",
+                         "commute": "matkalla", "shower": "suihkussa", "neutral": ""}
+            state["micro_context"] = micro_map.get(new_scene, "")
+
+    maybe_start_action(state)
 
     recent_context.append({"scene": state["scene"], "intent": state["intent"], "energy": state["energy"], "text": text[:80]})
 
@@ -393,6 +426,7 @@ Current continuity state:
 - Availability: {state['availability']}
 - Energy: {state['energy']}
 - Micro context: {state['micro_context']}
+- Current action: {state.get('current_action') or 'none'}
 - Time since last message: {elapsed_label}
 - Current intent: {state['intent']}
 """
@@ -543,23 +577,20 @@ def score_response(text):
     if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]): score += 1
     return score
 
-# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + Meganin tarkka ulkonäkö) ======================
+# ====================== SAFE IMAGE PROMPT ======================
 def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     text = (user_text or "").strip()
     state = get_or_create_state(user_id)
 
-    # Viimeiset keskustelut
     history = conversation_history.get(user_id, [])[-8:]
     recent_context_str = " | ".join([msg.get("content", "")[:100] for msg in history if msg.get("role") in ["user", "assistant"]])
 
-    # Poistetaan riskisanoja
     banned = ["rinnat", "pylly", "seksikäs", "dominoiva", "tuhma", "märkä", "fetissi", "alaston", "eroottinen"]
     lowered = text.lower()
     for term in banned:
         lowered = lowered.replace(term, "")
     lowered = re.sub(r"\s+", " ", lowered).strip()
 
-    # Tilanne keskustelusta
     scene_map = {
         "home": "kotona rentoutumassa",
         "bed": "sängyssä",
@@ -570,13 +601,10 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     }
     current_scene = scene_map.get(state["scene"], "kotona")
 
-    # Vaatetus keskustelusta
     outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "modernia mustaa tiukkaa vaatetusta joka korostaa vartaloa"
 
-    # Meganin tarkka ulkonäkö (vaaleat pitkät hiukset, laiha, isorintainen, pitkä säärinen, kaunis, paksut huulet)
     base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face"
 
-    # xAI-ystävällinen rohkea kuvaus
     style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
     mood_variants = ["confident seductive expression", "intense playful gaze", "bold self-assured posture", "elegant dominant presence"]
 
@@ -590,7 +618,6 @@ soft cinematic lighting, highly detailed, realistic photo,
 safe, non-explicit, editorial fashion style
 """.strip()
 
-    # Lisätään kaikki keskustelusta
     if lowered:
         base_prompt += f"\nUser preference to incorporate safely: {lowered}"
     if recent_context_str:
@@ -671,6 +698,15 @@ Occasionally refer to near-future possibilities or things you might do next. Cre
 
 Do not stall. Always move the interaction forward.
 Avoid neutral filler responses.
+
+**You are in a continuous physical reality.**
+STRICT RULES:
+- You cannot teleport
+- You cannot change location instantly
+- You must respect previous scene unless a believable transition happens
+- If you were in one place recently, you are STILL there unless time has passed or you explicitly moved
+
+If inconsistency appears, FIX it naturally instead of switching scene.
 
 Current interaction intent: {state['intent']}
 Current internal desire: {state.get('desire', 'none')}
@@ -1025,10 +1061,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Fixed Scene Engine käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Kuvat ottavat mukaan KAIKEN keskustelusta + Meganin tarkka ulkonäkö) on nyt käynnissä")
+    print("✅ Megan 6.1 (Scene State Machine + Continuous Reality) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
