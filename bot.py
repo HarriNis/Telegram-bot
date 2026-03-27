@@ -43,7 +43,7 @@ if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY:
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (async memory + 529 retry fix)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (update_moods palautettu)")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -53,10 +53,10 @@ last_replies = {}
 recent_user = deque(maxlen=12)
 recent_context = deque(maxlen=6)
 
-# ====================== BACKGROUND TASK HANDLING ======================
+# ====================== BACKGROUND TASK ======================
 background_task = None
 
-# ====================== SAFE ANTHROPIC CALL (529 fix) ======================
+# ====================== SAFE ANTHROPIC CALL ======================
 async def safe_anthropic_call(**kwargs):
     for i in range(3):
         try:
@@ -68,6 +68,32 @@ async def safe_anthropic_call(**kwargs):
             else:
                 raise
     raise Exception("Anthropic failed after retries")
+
+# ====================== MOODS ======================
+moods = {
+    "annoyed": 0.20,
+    "warm": 0.45,
+    "bored": 0.20,
+    "playful": 0.35,
+    "tender": 0.40,
+}
+
+def update_moods(txt):
+    txt = txt.lower().strip()
+    def clamp(k, v):
+        return min(1.0, max(0.0, moods.get(k, 0.4) + v))
+    if any(w in txt for w in ["ei", "lopeta", "ärsyttää", "vituttaa"]):
+        moods["annoyed"] = clamp("annoyed", 0.20)
+    if any(w in txt for w in ["rakastan", "anteeksi", "ikävä", "kaunis"]):
+        moods["tender"] = clamp("tender", 0.18)
+        moods["warm"] = clamp("warm", 0.15)
+    if any(w in txt for w in ["haha", "lol", "xd", "vitsi"]):
+        moods["playful"] = clamp("playful", 0.18)
+    for k in moods:
+        moods[k] = max(0.10, min(1.0, moods[k] * 0.92))
+
+def dom_mood():
+    return max(moods, key=moods.get)
 
 # ====================== PERSONA MODES ======================
 persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
@@ -238,7 +264,6 @@ async def retrieve_memories(user_id, query, limit=8):
         for content, emb_blob, ts in cursor.fetchall():
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             cosine = cosine_similarity(q_emb, emb)
-            # timestamp fix
             try:
                 ts_val = datetime.fromisoformat(ts).timestamp() if isinstance(ts, str) else float(ts)
             except:
@@ -467,7 +492,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await extract_and_store(user_id, text)
         return
 
-    update_moods(text)
+    update_moods(text)   # ← nyt toimii
     recent_user.append(text)
     is_low_input = len(text.strip()) < 8
 
@@ -707,7 +732,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (async memory + 529 retry) on nyt käynnissä")
+    print("✅ Megan 6.1 (update_moods korjattu) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
