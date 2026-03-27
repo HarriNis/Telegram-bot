@@ -1086,7 +1086,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     }
     current_scene = scene_map.get(state["scene"], "kotona")
 
-    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "modernia mustaa tiukkaa vaatetusta joka korostaa vartaloa"
+    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "tiukkoja kiiltäviä mustia lateksileggingsejä joissa on vetoketju haaroihin saakka ja musta korsetti tai tiukka toppi"
 
     base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face"
 
@@ -1823,3 +1823,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```=12
