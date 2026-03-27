@@ -58,7 +58,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat tilanteen & vaatteiden mukaan)")
+print("🚀 Megan 6.1 – Claude Sonnet 4.6 (Kuvat ottavat mukaan KAIKEN keskustelusta)")
 
 # ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -543,49 +543,62 @@ def score_response(text):
     if any(w in text.lower() for w in ["mitä jos", "entä jos", "pitäiskö", "voisit"]): score += 1
     return score
 
-# ====================== SAFE IMAGE PROMPT (tilanne + vaatteet keskustelusta) ======================
-def build_safe_image_prompt(user_text: str, user_id: int = None) -> str:
+# ====================== SAFE IMAGE PROMPT (KAIKKI keskustelusta + xAI-rajoissa) ======================
+def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     text = (user_text or "").strip()
+    state = get_or_create_state(user_id)
 
-    banned_terms = ["rinnat", "pylly", "seksikäs", "dominoiva", "tuhma", "märkä", "fetissi", "alaston", "eroottinen"]
+    # Viimeiset keskustelut (viimeiset 6 viestiä)
+    history = conversation_history.get(user_id, [])[-8:]
+    recent_context_str = " | ".join([msg.get("content", "")[:100] for msg in history if msg.get("role") in ["user", "assistant"]])
+
+    # Poistetaan riskisanoja
+    banned = ["rinnat", "pylly", "seksikäs", "dominoiva", "tuhma", "märkä", "fetissi", "alaston", "eroottinen"]
     lowered = text.lower()
-    for term in banned_terms:
+    for term in banned:
         lowered = lowered.replace(term, "")
     lowered = re.sub(r"\s+", " ", lowered).strip()
 
-    state = get_or_create_state(user_id) if user_id else {"scene": "neutral", "micro_context": "", "phase": "neutral"}
-
+    # Tilanne + vaatteet keskustelusta
     scene_map = {
-        "home": "kotona sohvalle",
+        "home": "kotona rentoutumassa",
         "bed": "sängyssä",
         "shower": "suihkussa",
         "work": "toimistossa",
-        "public": "liikkeellä",
+        "public": "liikkeellä kaupungilla",
         "neutral": "kotona"
     }
     current_scene = scene_map.get(state["scene"], "kotona")
-    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if "lateks" in state.get("micro_context", "").lower() or "legging" in state.get("micro_context", "").lower() else "modernia mustaa vaatetusta"
 
-    style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait", "editorial fashion portrait"]
-    mood_variants = ["confident expression", "calm but intense presence", "self-assured posture", "elegant and bold styling"]
+    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "modernia mustaa tiukkaa vaatetusta joka korostaa vartaloa"
+
+    # xAI-ystävällinen rohkea kuvaus
+    style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
+    mood_variants = ["confident seductive expression", "intense playful gaze", "bold self-assured posture", "elegant dominant presence"]
 
     base_prompt = f"""
 {random.choice(style_variants)},
-27-year-old blonde woman,
+27-year-old beautiful blonde woman with voluptuous curvy figure,
 {outfit},
 {current_scene},
 {random.choice(mood_variants)},
-soft cinematic lighting,
-highly detailed,
-realistic photo,
-safe, non-explicit, fashion photography
+soft cinematic lighting, highly detailed, realistic photo,
+safe, non-explicit, editorial fashion style
 """.strip()
 
+    # Lisätään kaikki keskustelusta
     if lowered:
-        return f"{base_prompt}\nUser preference to incorporate if safe: {lowered}"
+        base_prompt += f"\nUser preference to incorporate safely: {lowered}"
+    if recent_context_str:
+        base_prompt += f"\nRecent conversation context: {recent_context_str[:350]}"
+    if state.get("core_desires"):
+        base_prompt += f"\nLong-term desires: {', '.join(state['core_desires'])}"
+    if state.get("phase") in ["testing", "intense"]:
+        base_prompt += "\nAtmosphere: slightly bold and teasing"
+
     return base_prompt
 
-# ====================== SYSTEM PROMPT (täysi versio palautettu) ======================
+# ====================== SYSTEM PROMPT ======================
 def get_system_prompt(user_id):
     mood = dom_mood()
     state = get_or_create_state(user_id)
@@ -936,7 +949,7 @@ Before answering:
             await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
         else:
             await message.reply_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
-        return   # ← estää mahdollisen loopin
+        return
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 def should_send_proactive(user_id):
@@ -1011,7 +1024,7 @@ def main():
         print("✅ Taustaviestit + Cinematic Narration + Consistency käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Kuvat tilanteen & vaatteiden mukaan) on nyt käynnissä")
+    print("✅ Megan 6.1 (Kuvat ottavat mukaan KAIKEN keskustelusta) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
