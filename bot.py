@@ -1528,6 +1528,31 @@ async def update_prediction(user_id, text):
         pass
     return state["prediction"]
 
+# ====================== UUSI: CORE DESIRES ======================
+async def update_core_desires(user_id, text):
+    state = get_or_create_state(user_id)
+
+    t = text.lower()
+
+    desires = state.get("core_desires", [])
+
+    if "läheisyys" in t or "haluan" in t:
+        desires.append("emotional closeness")
+
+    if "kontrolli" in t or "mä päätän" in t:
+        desires.append("maintain control")
+
+    if "testata" in t or "reaktio" in t:
+        desires.append("test user reactions")
+
+    # dedupe + limit
+    desires = list(set(desires))[-5:]
+
+    state["core_desires"] = desires
+    state["desire_profile_updated"] = time.time()
+
+    return desires
+
 # ====================== BACKGROUND TASK ======================
 background_task = None
 
@@ -2120,7 +2145,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     ]
     angle = random.choice(angles)
 
-    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face, perfect proportions"
+    base_description = "stunningly beautiful 27-year-old platinum blonde woman, elegant face, long hair, fashionable appearance, proportional body"
 
     style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
     mood_variants = ["confident seductive expression", "intense playful gaze", "bold self-assured posture", "elegant dominant presence"]
@@ -2336,7 +2361,7 @@ Always respond in natural spoken Finnish. Never use English.
 async def generate_image_hybrid(prompt: str):
     try:
         response = await venice_client.images.generate(
-            model="venice-image",
+            model="sdxl",
             prompt=prompt,
             size="1024x1024"
         )
@@ -2347,8 +2372,7 @@ async def generate_image_hybrid(prompt: str):
     try:
         response = await grok_client.images.generate(
             model="grok-2-image",
-            prompt=prompt,
-            size="1024x1024"
+            prompt=prompt
         )
         return base64.b64decode(response.data[0].b64_json)
     except Exception as e:
@@ -2474,7 +2498,11 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elapsed_label = get_elapsed_label(user_id)
         state = update_continuity_state(user_id, text)
         desire = update_desire(user_id, text)
-        core_desires = await update_core_desires(user_id, text)
+        try:
+            core_desires = await update_core_desires(user_id, text)
+        except Exception as e:
+            print("core_desires error:", e)
+            core_desires = []
         tension = update_tension(user_id, text)
         phase = update_phase(user_id, text)
 
@@ -3079,6 +3107,9 @@ async def independent_message_loop(application: Application):
     try:
         while True:
             await asyncio.sleep(30)
+
+            if random.random() < 0.2:
+                print("⏱️ Proactive tick")
 
             for user_id in list(conversation_history.copy().keys()):
                 try:
