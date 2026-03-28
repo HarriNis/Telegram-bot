@@ -2771,7 +2771,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("newgame", newgame_command))
     application.add_handler(CommandHandler("wipememory", wipememory_command))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Caption.ALL, megan_chat))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, megan_chat))
     application.add_error_handler(error_handler)
 
     print("✅ Megan 6.1 (refaktoroitu mieli-pipeline + virheenkäsittely) on nyt käynnissä")
