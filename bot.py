@@ -28,6 +28,37 @@ logging.basicConfig(level=logging.INFO)
 def now_ts():
     return time.time()
 
+def now_local():
+    return datetime.now(HELSINKI_TZ)
+
+def get_time_block():
+    hour = now_local().hour
+    if 0 <= hour < 6:
+        return "night"
+    elif 6 <= hour < 10:
+        return "morning"
+    elif 10 <= hour < 17:
+        return "day"
+    elif 17 <= hour < 22:
+        return "evening"
+    return "late_evening"
+
+def get_elapsed_label(user_id):
+    state = get_or_create_state(user_id)
+    if not state["last_interaction"]:
+        return "first_contact"
+
+    elapsed = now_ts() - state["last_interaction"]
+
+    if elapsed < 120:
+        return "immediate"
+    elif elapsed < 1800:
+        return "recent"
+    elif elapsed < 14400:
+        return "hours"
+    else:
+        return "long_gap"
+
 # ====================== RENDER HEALTH CHECK ======================
 app = Flask(__name__)
 
@@ -2454,7 +2485,7 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Megan 6.1 valmis – now_ts määritelty alussa")
+        print("✅ Megan 6.1 valmis – get_elapsed_label + time helpers lisätty")
 
     application.post_init = post_init
     print("✅ Megan 6.1 on nyt käynnissä")
