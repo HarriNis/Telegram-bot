@@ -799,7 +799,8 @@ async def extract_plan_structured(text):
                 {"role": "user", "content": text}
             ]
         )
-        parsed = json.loads(resp.content[0].text.strip())
+        raw = resp.content[0].text.strip()
+        parsed = json.loads(raw)
         return parsed
     except Exception:
         return {
@@ -1297,13 +1298,14 @@ async def update_arcs(user_id, text):
                 {"role": "user", "content": joined}
             ]
         )
-        parsed = json.loads(resp.content[0].text.strip())
+        raw = resp.content[0].text.strip()
+        parsed = json.loads(raw)
         arcs = parsed.get("arcs", [])
         if arcs:
             state["relationship_arcs"] = arcs
             state["active_arc"] = arcs[0]
             state["arc_last_update"] = now
-    except:
+    except Exception:
         pass
 
 async def update_goal(user_id, text):
@@ -1412,7 +1414,8 @@ async def update_prediction(user_id, text):
                 {"role": "user", "content": f"Recent conversation:\n{history_text}\n\nLatest user text:\n{text}"}
             ]
         )
-        parsed = json.loads(resp.content[0].text.strip())
+        raw = resp.content[0].text.strip()
+        parsed = json.loads(raw)
         state["prediction"] = {
             "next_user_intent": parsed.get("next_user_intent"),
             "next_user_mood": parsed.get("next_user_mood"),
@@ -1662,12 +1665,13 @@ async def update_core_desires(user_id, text):
             temperature=0.4,
             messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
         )
-        parsed = json.loads(resp.content[0].text.strip())
+        raw = resp.content[0].text.strip()
+        parsed = json.loads(raw)
         desires = parsed.get("desires", [])
         if desires:
             state["core_desires"] = desires[:4]
             state["desire_profile_updated"] = now
-    except:
+    except Exception:
         pass
     return state["core_desires"]
 
@@ -1851,19 +1855,20 @@ async def extract_and_store(user_id, text):
             messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
                       {"role": "user", "content": text}]
         )
-        data = resp.content[0].text.strip()
-        profile = load_profile(user_id)
+        raw = resp.content[0].text.strip()
         try:
-            parsed = json.loads(data)
-            for k in ["facts", "preferences", "events"]:
-                if k in parsed:
-                    for item in parsed[k]:
-                        if item not in profile[k]:
-                            profile[k].append(item)
-                    profile[k] = profile[k][-20:]
-            save_profile(user_id, profile)
-        except:
-            pass
+            parsed = json.loads(raw)
+        except Exception:
+            print("JSON parse failed in extract_and_store:", raw)
+            return
+        profile = load_profile(user_id)
+        for k in ["facts", "preferences", "events"]:
+            if k in parsed:
+                for item in parsed[k]:
+                    if item not in profile[k]:
+                        profile[k].append(item)
+                profile[k] = profile[k][-20:]
+        save_profile(user_id, profile)
         await store_memory(user_id, text)
     except Exception as e:
         print("Extraction error:", e)
