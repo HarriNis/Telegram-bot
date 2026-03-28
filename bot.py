@@ -817,6 +817,16 @@ async def extract_plan_structured(text):
         }
 
 
+def classify_time_hint(text):
+    t = text.lower()
+
+    if any(x in t for x in ["nyt", "kohta", "heti"]):
+        return "short"
+    if any(x in t for x in ["illalla", "tänään"]):
+        return "medium"
+    return "long"
+
+
 async def register_plan(user_id, text):
     state = get_or_create_state(user_id)
     parsed = await extract_plan_structured(text)
@@ -831,11 +841,13 @@ async def register_plan(user_id, text):
         "target_time": None,
         "status": "planned",
         "last_updated": time.time(),
-        "evolution_log": []
+        "evolution_log": [],
+        "target_window": classify_time_hint(parsed.get("description") or text)
     }
 
     state["planned_events"].append(event)
     state["planned_events"] = state["planned_events"][-10:]
+    register_expectation(state, event)
     save_plan_to_db(user_id, event)
 
 
@@ -893,10 +905,11 @@ def update_plans(user_id):
         if plan["status"] == "planned":
             age = now - plan["created_at"]
 
-            if age > 3600:
+            if plan["target_window"] == "short" and age > 300:
                 plan["status"] = "in_progress"
-
-            if age > 86400:
+            elif plan["target_window"] == "medium" and age > 3600:
+                plan["status"] = "in_progress"
+            elif age > 86400:
                 plan["status"] = "done"
 
         if plan["status"] != original_status:
@@ -934,6 +947,67 @@ def maybe_evolve_plan(user_id):
             return plan, change
 
     return None, None
+
+
+# 🔧 1. Plan Commitment Engine
+def get_active_commitments(state):
+    now = time.time()
+    active = []
+
+    for plan in state.get("planned_events", []):
+        if plan["status"] in ["planned", "in_progress", "changed"]:
+            age = now - plan["created_at"]
+
+            urgency = 0
+            if age > 300: urgency += 1
+            if age > 1800: urgency += 2
+            if plan["status"] == "changed": urgency += 3
+
+            active.append((urgency, plan))
+
+    active.sort(reverse=True, key=lambda x: x[0])
+    return [p for _, p in active[:2]]  # max 2 aktiivista
+
+
+# 🧠 2. Expectation Tracking
+def register_expectation(state, plan):
+    state["expectations"].append({
+        "plan_id": plan["id"],
+        "created_at": time.time(),
+        "fulfilled": False,
+        "last_checked": time.time()
+    })
+
+
+def check_expectation_violations(state):
+    now = time.time()
+    violations = []
+
+    for exp in state.get("expectations", []):
+        if exp["fulfilled"]:
+            continue
+
+        age = now - exp["created_at"]
+
+        if age > 1800:  # 30 min
+            violations.append(exp)
+
+    return violations
+
+
+# 🔁 4. Pakota follow-up käyttäytyminen
+def should_follow_up(state):
+    plans = state.get("planned_events", [])
+    if not plans:
+        return False
+
+    latest = plans[-1]
+    age = time.time() - latest["created_at"]
+
+    return (
+        latest["status"] in ["planned", "in_progress"]
+        and age > 600
+    )
 
 
 # ====================== FINAL INTENT RESOLVER ======================
@@ -1119,6 +1193,15 @@ def resolve_final_intent(state):
     # Plan pressure even without direct conflict
     if plan_pressure and plan_pressure["priority"] in ["high", "medium"]:
         final["must_acknowledge_plan"] = True
+
+    # 🧩 5. Yhdistä tämä FINAL INTENT RESOLVERIIN
+    if state.get("planned_events"):
+        latest = state["planned_events"][-1]
+
+        if latest["status"] in ["changed", "in_progress"]:
+            final["primary_goal"] = "resolve or progress existing plan"
+            final["dominant_reason"] = "plan_continuity"
+            final["must_acknowledge_plan"] = True
 
     # Memory bridge
     if salient_memory:
@@ -1615,6 +1698,9 @@ def get_or_create_state(user_id):
             "planned_events": [],
             "last_plan_check": 0,
 
+            # EXPECTATIONS (uusi)
+            "expectations": [],
+
             # FINAL INTENT RESOLVER
             "final_intent": None,
             "final_intent_updated": 0,
@@ -1652,86 +1738,10 @@ def update_desire(user_id, text):
     elif any(w in t for w in ["haha", "lol"]):
         desire = "play and tease"
     else:
-        desire = random.choice(["create tension", "take control of the interaction", "move things forward", "shift the dynamic slightly"])
-
+        desire = None
     state["desire"] = desire
-    state["desire_intensity"] = min(1.0, state.get("desire_intensity", 0.4) + 0.2)
     state["desire_last_update"] = now
-
-    if state.get("core_desires"):
-        if random.random() < 0.3:
-            state["desire"] = "revisit a shared fantasy"
-
     return desire
-
-def update_tension(user_id, text):
-    state = get_or_create_state(user_id)
-    t = text.lower()
-    if any(w in t for w in ["ikävä", "haluan", "tule"]):
-        state["tension"] += 0.2
-    elif any(w in t for w in ["ok", "joo", "hmm"]):
-        state["tension"] -= 0.1
-    else:
-        state["tension"] += 0.05
-    state["tension"] = max(0.0, min(1.0, state["tension"]))
-    return state["tension"]
-
-async def update_core_desires(user_id, text):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    if now - state.get("desire_profile_updated", 0) < 1800:
-        return state["core_desires"]
-
-    memories = await retrieve_memories(user_id, text, limit=15)
-    joined = "\n".join(memories[-10:])
-
-    try:
-        resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
-            max_tokens=120,
-            temperature=0.4,
-            messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
-        )
-        parsed = json.loads(resp.content[0].text.strip())
-        desires = parsed.get("desires", [])
-        if desires:
-            state["core_desires"] = desires[:4]
-            state["desire_profile_updated"] = now
-    except:
-        pass
-    return state["core_desires"]
-
-def update_phase(user_id, text):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    phase = state.get("phase", "neutral")
-    tension = state.get("tension", 0.0)
-    intent = state.get("intent", "casual")
-
-    if now - state.get("phase_last_change", 0) < 120:
-        return phase
-
-    if phase == "neutral":
-        new_phase = "building" if tension > 0.3 else "neutral"
-    elif phase == "building":
-        if tension > 0.6: new_phase = "testing"
-        elif tension < 0.2: new_phase = "neutral"
-        else: new_phase = "building"
-    elif phase == "testing":
-        if tension > 0.8: new_phase = "intense"
-        elif tension < 0.4: new_phase = "building"
-        else: new_phase = "testing"
-    elif phase == "intense":
-        new_phase = "cooling" if tension < 0.5 else "intense"
-    elif phase == "cooling":
-        new_phase = "neutral" if tension < 0.2 else "cooling"
-    else:
-        new_phase = "neutral"
-
-    if new_phase != phase:
-        state["phase"] = new_phase
-        state["phase_last_change"] = now
-    return state["phase"]
 
 def now_ts():
     return time.time()
@@ -2828,7 +2838,7 @@ You MUST align your behavior with this strategy.
 """
         })
 
-        # PLANNED EVENTS injection
+        # PLANNED EVENTS injection (vanha)
         if state.get("planned_events"):
             latest = state["planned_events"][-1]
             messages.insert(0, {
@@ -2842,6 +2852,57 @@ Current status: {latest['status']}
 If the plan has changed or progressed:
 - You MUST acknowledge it
 - You MUST tell the user naturally
+"""
+            })
+
+        # 🔧 1. Inject SYSTEM-LEVEL constraint (uusi hard commitments)
+        active_commitments = get_active_commitments(state)
+        if active_commitments:
+            messages.insert(0, {
+                "role": "user",
+                "content": f"""
+Active commitments you MUST respect:
+
+{json.dumps(active_commitments, ensure_ascii=False)}
+
+Rules:
+- These are real promises made earlier
+- You MUST behave consistently with them
+- If enough time has passed, you MUST bring them up
+- Do NOT ignore them
+"""
+            })
+
+        # 🧠 2. Checkkaa rikotut odotukset
+        violations = check_expectation_violations(state)
+        if violations:
+            messages.insert(0, {
+                "role": "user",
+                "content": """
+User is expecting something you previously implied.
+
+You MUST:
+- either fulfill it
+- or explain why it changed
+- or acknowledge delay
+
+Ignoring it is NOT allowed.
+"""
+            })
+
+        # 🔁 4. Pakota follow-up
+        if should_follow_up(state):
+            messages.insert(0, {
+                "role": "user",
+                "content": """
+You previously set something up with the user.
+
+You should now:
+- follow up on it
+- escalate it
+- or check user's reaction
+
+Do NOT ignore it.
 """
             })
 
@@ -2862,7 +2923,7 @@ Rules:
 - If must_reference_memory is true, subtly reflect the relevant memory
 - The reply must feel like one coherent mind, not multiple conflicting impulses
 """
-        })
+            })
 
         forced = state.get("forced_disclosure")
         if forced:
