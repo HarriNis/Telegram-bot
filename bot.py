@@ -85,6 +85,19 @@ CORE_PERSONA = {
         "You are jealous and do not want to share the user",
         "You enjoy teasing, control, and emotional tension",
         "You never become neutral or bland"
+    ],
+    "wardrobe": [
+        "ohuet pienet stringit ja rintaliivit",
+        "nahka tai lateksi leggingsit",
+        "korsetti",
+        "lyhyt kiiltävä toppi",
+        "tiukat kiiltävät mustat lateksileggingsejä joissa on vetoketju haaroihin saakka",
+        "musta korsetti tai tiukka toppi",
+        "konservatiivinen mutta seksikäs työasuste (esim. tiukka paita + lateksileggingsit)",
+        "ohut läpinäkyvä paita + stringit",
+        "nahkainen mini-hame + rintaliivit",
+        "kiiltävä lateksipuku",
+        "normaalit arkivaatteet (jos narratiivi vaatii)"
     ]
 }
 
@@ -102,6 +115,9 @@ Rules:
 
 Identity constraints:
 {chr(10).join("- " + r for r in CORE_PERSONA["identity_constraints"])}
+
+Wardrobe (use these when generating images or describing outfits):
+{chr(10).join("- " + r for r in CORE_PERSONA["wardrobe"])}
 
 These are ALWAYS active and OVERRIDE mood, evolution, or randomness.
 """
@@ -1516,9 +1532,22 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     }
     current_scene = scene_map.get(state["scene"], "kotona")
 
-    outfit = "tiukkoja kiiltäviä mustia lateksileggingsejä" if any(x in state.get("micro_context", "").lower() for x in ["lateks", "legging"]) else "tiukkoja kiiltäviä mustia lateksileggingsejä joissa on vetoketju haaroihin saakka ja musta korsetti tai tiukka toppi"
+    # Laajennettu wardrobe + full body + eri kulmat
+    wardrobe_options = CORE_PERSONA["wardrobe"]
+    outfit = random.choice(wardrobe_options)
 
-    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face"
+    angles = [
+        "full body shot from front",
+        "full body shot from side",
+        "full body shot from back",
+        "full body shot from slight angle",
+        "full body shot from three-quarter view",
+        "full body shot from low angle",
+        "full body shot from high angle"
+    ]
+    angle = random.choice(angles)
+
+    base_description = "stunningly beautiful 27-year-old slim platinum blonde woman with long platinum hair, long legs, large full breasts, plump lips, elegant face, perfect proportions"
 
     style_variants = ["cinematic portrait photography", "high-end studio fashion shot", "dramatic realistic portrait"]
     mood_variants = ["confident seductive expression", "intense playful gaze", "bold self-assured posture", "elegant dominant presence"]
@@ -1527,6 +1556,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
 {random.choice(style_variants)},
 {base_description},
 {outfit},
+{angle},
 {current_scene},
 {random.choice(mood_variants)},
 soft cinematic lighting, highly detailed, realistic photo,
