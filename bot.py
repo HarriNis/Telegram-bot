@@ -152,7 +152,7 @@ SCENE_ACTIONS = {
     "bed": ["makaa sängyssä"],
 }
 
-MIN_SCENE_DURATION = 900
+MIN_SCENE_DURATION = 1800
 ACTION_MIN = 300
 ACTION_MAX = 1800
 
@@ -199,19 +199,18 @@ def maybe_transition_scene(state, now):
     if not allowed:
         return current
     
-    # Vaihda vain jos on narratiivinen syy
     time_of_day = get_time_block()
     
-    # Realistiset siirtymät kellonajan mukaan
-    if current == "home" and time_of_day == "morning" and random.random() < 0.25:
+    # PIENEMPI todennäköisyys (oli 0.25-0.5, nyt 0.10-0.25)
+    if current == "home" and time_of_day == "morning" and random.random() < 0.10:
         new_scene = "work"
-    elif current == "work" and time_of_day == "evening" and random.random() < 0.35:
+    elif current == "work" and time_of_day == "evening" and random.random() < 0.20:
         new_scene = "commute"
-    elif current == "commute" and random.random() < 0.5:
+    elif current == "commute" and random.random() < 0.35:
         new_scene = "home"
-    elif current == "home" and time_of_day in ["day", "evening"] and random.random() < 0.15:
+    elif current == "home" and time_of_day in ["day", "evening"] and random.random() < 0.08:
         new_scene = "public"
-    elif current == "public" and random.random() < 0.3:
+    elif current == "public" and random.random() < 0.25:
         new_scene = "home"
     else:
         return current  # Pysy paikallaan oletuksena
@@ -344,29 +343,32 @@ def update_jealousy_stage(user_id):
 
 def maybe_trigger_jealousy(user_id, text):
     state = get_or_create_state(user_id)
-
+    
     if not can_trigger_exit(state):
         return False
-
+    
     if state["jealousy_stage"] > 0:
         return False
-
+    
     intent = state["intent"]
     tension = state["tension"]
-
-    if intent == "conflict" and tension > 0.4:
+    
+    # TIUKEMMAT EHDOT (oli 0.4/0.5, nyt 0.6/0.7)
+    if intent == "conflict" and tension > 0.6 and random.random() < 0.25:  # Lisätty satunnaisuus
         stage = 2
-    elif intent in ["playful", "intimate"] and tension > 0.5:
+    elif intent in ["playful", "intimate"] and tension > 0.7 and random.random() < 0.15:
         stage = 1
     else:
         return False
-
+    
     state["jealousy_stage"] = stage
     state["jealousy_started"] = time.time()
-    state["ignore_until"] = time.time() + random.randint(300, 900)
-
+    
+    # LYHYEMPI IGNORE-AIKA (oli 300-900, nyt 180-600)
+    state["ignore_until"] = time.time() + random.randint(180, 600)
+    
     state["jealousy_context"] = build_exit_story(user_id, "tease_exit")
-
+    
     return True
 
 def should_ignore_user(user_id):
@@ -397,7 +399,7 @@ async def handle_delayed_return(application, user_id):
     seed = state["pending_narrative"]
 
     response = await safe_anthropic_call(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-20250514",
         max_tokens=220,
         temperature=0.85,
         system=get_system_prompt(user_id),
@@ -817,7 +819,7 @@ def detect_future_commitment(text):
 async def extract_plan_structured(text):
     try:
         resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.2,
             messages=[
@@ -955,33 +957,36 @@ async def maybe_evolve_plan(user_id):
         
         # Vahvoja sitoumuksia EI SAA muuttaa ilman erittäin vahvaa syytä
         if plan.get("must_fulfill", False):
-            if random.random() < 0.03:  # Vain 3% todennäköisyys
+            # PIENEMPI todennäköisyys (oli 0.03, nyt 0.01)
+            if random.random() < 0.01:
                 pass
             else:
                 continue
         
         # Tarkista onko suunnitelman muutos realistinen kontekstissa
         if plan.get("needs_check") and state.get("scene") in ["home", "public"]:
-            # Vain 8% todennäköisyys muutokselle (oli 20%)
-            if random.random() < 0.08:
+            # PIENEMPI todennäköisyys (oli 0.08, nyt 0.03)
+            if random.random() < 0.03:
                 # Vaadi vahva narratiivinen peruste
                 if state.get("emotional_mode") in ["provocative", "testing", "jealous"]:
-                    change = random.choice([
-                        "muutin vähän suunnitelmaa",
-                        "se meni vähän eri tavalla kuin ajattelin",
-                        "jotain tuli väliin"
-                    ])
-                    
-                    plan["status"] = "changed"
-                    plan["last_updated"] = time.time()
-                    plan["evolution_log"].append({
-                        "time": time.time(),
-                        "change": change,
-                        "reason": f"emotional_mode={state['emotional_mode']}, scene={state['scene']}"
-                    })
-                    
-                    save_plan_to_db(user_id, plan)
-                    return plan, change
+                    # JA tension pitää olla korkea
+                    if state.get("tension", 0.0) > 0.6:
+                        change = random.choice([
+                            "muutin vähän suunnitelmaa",
+                            "se meni vähän eri tavalla kuin ajattelin",
+                            "jotain tuli väliin"
+                        ])
+                        
+                        plan["status"] = "changed"
+                        plan["last_updated"] = time.time()
+                        plan["evolution_log"].append({
+                            "time": time.time(),
+                            "change": change,
+                            "reason": f"emotional_mode={state['emotional_mode']}, scene={state['scene']}, tension={state['tension']:.2f}"
+                        })
+                        
+                        save_plan_to_db(user_id, plan)
+                        return plan, change
     
     return None, None
 
@@ -1385,7 +1390,7 @@ async def update_arcs(user_id, text):
     joined = "\n".join(memories[-10:])
     try:
         resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.4,
             messages=[
@@ -1409,7 +1414,7 @@ async def update_goal(user_id, text):
         return state.get("current_goal")
     try:
         resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=60,
             temperature=0.5,
             messages=[
@@ -1450,19 +1455,30 @@ def evolve_personality(user_id, text):
         }
     evo = state["personality_evolution"]
     now = time.time()
-    if now - evo.get("last_evolved", 0) < 300:
+    
+    # HITAAMPI PÄIVITYS (oli 300s, nyt 900s = 15 min)
+    if now - evo.get("last_evolved", 0) < 900:
         return evo
+    
     t = text.lower()
+    
+    # PIENEMMÄT MUUTOKSET (oli 0.03, nyt 0.01)
     if any(w in t for w in ["miksi", "miten", "entä", "?"]):
-        evo["curiosity"] = min(1.0, evo["curiosity"] + 0.03)
+        evo["curiosity"] = min(1.0, evo["curiosity"] + 0.01)
+    
     if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
-        evo["patience"] = min(1.0, evo["patience"] + 0.02)
-        evo["initiative"] = max(0.0, evo["initiative"] - 0.02)
+        evo["patience"] = min(1.0, evo["patience"] + 0.01)
+        evo["initiative"] = max(0.0, evo["initiative"] - 0.01)
+    
     if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.03)
+        evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.01)
+    
     if len(text.strip()) < 8:
-        evo["initiative"] = min(1.0, evo["initiative"] + 0.02)
-    evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.995))
+        evo["initiative"] = min(1.0, evo["initiative"] + 0.01)
+    
+    # HITAAMPI STABILOINTI (oli 0.995, nyt 0.998)
+    evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.998))
+    
     evo["last_evolved"] = now
     return evo
 
@@ -1494,7 +1510,7 @@ async def update_prediction(user_id, text):
     )
     try:
         resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.3,
             messages=[
@@ -1552,13 +1568,18 @@ def update_moods(txt):
     txt = txt.lower().strip()
     def clamp(k, v):
         return min(1.0, max(0.0, moods.get(k, 0.4) + v))
+    
     if any(w in txt for w in ["ei", "lopeta", "ärsyttää", "vituttaa"]):
         moods["annoyed"] = clamp("annoyed", 0.20)
+    
     if any(w in txt for w in ["rakastan", "anteeksi", "ikävä", "kaunis"]):
         moods["tender"] = clamp("tender", 0.18)
         moods["warm"] = clamp("warm", 0.15)
+    
     if any(w in txt for w in ["haha", "lol", "xd", "vitsi"]):
         moods["playful"] = clamp("playful", 0.18)
+    
+    # Luonnollinen haalistuminen
     for k in moods:
         moods[k] = max(0.10, min(1.0, moods[k] * 0.92))
 
@@ -1733,12 +1754,18 @@ def update_desire(user_id, text):
 def update_tension(user_id, text):
     state = get_or_create_state(user_id)
     t = text.lower()
+    
+    # PIENEMMÄT MUUTOKSET (oli 0.2/0.1/0.05, nyt 0.08/0.05/0.02)
     if any(w in t for w in ["ikävä", "haluan", "tule"]):
-        state["tension"] += 0.2
+        state["tension"] += 0.08
     elif any(w in t for w in ["ok", "joo", "hmm"]):
-        state["tension"] -= 0.1
+        state["tension"] -= 0.05
     else:
-        state["tension"] += 0.05
+        state["tension"] += 0.02
+    
+    # LUONNOLLINEN HAALISTUMINEN (uusi)
+    state["tension"] = state["tension"] * 0.98
+    
     state["tension"] = max(0.0, min(1.0, state["tension"]))
     return state["tension"]
 
@@ -1753,7 +1780,7 @@ async def update_core_desires(user_id, text):
 
     try:
         resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.4,
             messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
@@ -1964,19 +1991,9 @@ async def store_memory(user_id, content, mem_type="general"):
 
 # ====================== IMAGE GENERATION V3 (GROK + CLOUDINARY) ======================
 async def generate_image_grok(prompt):
-    try:
-        response = await grok_client.images.generate(
-            model="grok-2-vision-1212",
-            prompt=prompt,
-            n=1,
-            size="1024x1024",
-            response_format="b64_json"
-        )
-        b64_data = response.data[0].b64_json
-        return base64.b64decode(b64_data)
-    except Exception as e:
-        print(f"[grok image error] {e}")
-        return None
+    """HUOM: Grok ei tue kuvagenerointia - käytä vain Venicea"""
+    print("[GROK] Skipping - no image generation support")
+    return None  # Palaa suoraan Veniceen
 
 async def generate_image_venice(prompt):
     try:
@@ -2007,10 +2024,10 @@ async def upload_to_cloudinary(image_bytes):
 
 async def handle_image_request(update: Update, user_id, text):
     state = get_or_create_state(user_id)
-
+    
     outfit = random.choice(CORE_PERSONA["wardrobe"])
     scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
-
+    
     base_prompt = f"""
 A highly realistic photograph of a beautiful Finnish woman in her mid-20s.
 
@@ -2031,39 +2048,38 @@ Mood:
 Confident, slightly playful, natural expression
 
 Style:
-Photorealistic, professional photography, natural lighting, high detail
+Photorealistic, professional photography, natural lighting, high detail, 8K quality
 """
-
+    
     await update.message.reply_text("Hetki, otan kuvan...")
-
-    image_bytes = await generate_image_grok(base_prompt)
-
-    if not image_bytes:
-        print("[Trying Venice fallback]")
-        image_bytes = await generate_image_venice(base_prompt)
-
+    
+    # Käytä VAIN Venicea (toimii varmasti)
+    image_bytes = await generate_image_venice(base_prompt)
+    
     if not image_bytes:
         await update.message.reply_text("En saanut kuvaa generoitua, yritä uudestaan.")
         return
-
+    
     image_url = await upload_to_cloudinary(image_bytes)
-
+    
     if not image_url:
         await update.message.reply_text("Kuvan lataus epäonnistui.")
         return
-
+    
     await update.message.reply_photo(photo=image_url)
-
+    
+    # Tallenna kuvahistoria
     state["last_image"] = {
         "url": image_url,
         "prompt": base_prompt,
         "user_request": text,
         "timestamp": time.time()
     }
-
+    
     state.setdefault("image_history", []).append(state["last_image"])
     state["image_history"] = state["image_history"][-20:]
-
+    
+    # Tallenna muistiin
     mem_entry = json.dumps({
         "type": "image_sent",
         "user_request": text,
@@ -2071,7 +2087,7 @@ Photorealistic, professional photography, natural lighting, high detail
         "scene": scene_desc,
         "timestamp": time.time()
     }, ensure_ascii=False)
-
+    
     await store_memory(user_id, mem_entry, mem_type="image_sent")
 
 # ====================== SYSTEM PROMPT BUILDER ======================
