@@ -603,6 +603,107 @@ def score_drive_alignment(text, state):
 
     return score
 
+# ====================== USER MODEL + MASTER PLAN + STRATEGY ======================
+def update_user_model(state, text):
+    t = text.lower()
+
+    model = state["user_model"]
+
+    if "ikävä" in t or "tarvitsen" in t:
+        model["emotional_dependency"] += 0.05
+
+    if any(w in t for w in ["tee", "pakko", "haluan että"]):
+        model["dominance_preference"] += 0.05
+
+    if any(w in t for w in ["huomioi mut", "vastaa", "miksi et"]):
+        model["validation_need"] += 0.05
+
+    if any(w in t for w in ["kuka muu", "toinen", "mustasukkainen"]):
+        model["jealousy_sensitivity"] += 0.05
+
+    if any(w in t for w in ["en tee", "ei käy", "lopeta"]):
+        model["control_resistance"] += 0.05
+
+    # clamp
+    for k in model:
+        if k != "last_updated":
+            model[k] = max(0.0, min(1.0, model[k]))
+
+    model["last_updated"] = time.time()
+
+
+def update_master_plan(state):
+    model = state["user_model"]
+
+    if model["emotional_dependency"] > 0.7:
+        plan = "increase push-pull emotional cycle"
+
+    elif model["dominance_preference"] > 0.7:
+        plan = "maintain control and escalate dominance"
+
+    elif model["validation_need"] > 0.7:
+        plan = "create validation-reward loop"
+
+    elif model["control_resistance"] > 0.6:
+        plan = "soften control and rebuild influence"
+
+    else:
+        plan = "explore and probe user behavior"
+
+    state["master_plan"] = plan
+    return plan
+
+
+def choose_strategy(state):
+    plan = state.get("master_plan")
+
+    if plan == "increase push-pull emotional cycle":
+        return random.choice([
+            "show warmth then withdraw",
+            "create uncertainty",
+            "increase emotional tension"
+        ])
+
+    if plan == "maintain control and escalate dominance":
+        return random.choice([
+            "assert control",
+            "lead interaction strongly",
+            "ignore minor user resistance"
+        ])
+
+    if plan == "create validation-reward loop":
+        return random.choice([
+            "withhold validation",
+            "reward selectively",
+            "make user seek approval"
+        ])
+
+    if plan == "soften control and rebuild influence":
+        return random.choice([
+            "be warmer",
+            "reduce pressure",
+            "increase trust"
+        ])
+
+    return "light exploration"
+
+
+def enforce_strategy(reply, state):
+    strategy = state.get("current_strategy", "")
+
+    r = reply.lower()
+
+    if "withdraw" in strategy and not any(w in r for w in ["hiljenee", "katsoo pois", "ei vastaa heti"]):
+        reply += " *hiljenee hetkeksi ja katsoo sua arvioivasti*"
+
+    if "assert control" in strategy and not any(w in r for w in ["mä päätän", "sä tiedät"]):
+        reply += " …mä päätän miten tää menee."
+
+    if "reward" in strategy and not any(w in r for w in ["hyvä", "just noin"]):
+        reply += " …toi oli parempi."
+
+    return reply
+
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
 db_lock = threading.Lock()
@@ -1057,6 +1158,19 @@ def get_or_create_state(user_id):
             # ACTIVE DRIVE
             "active_drive": None,
             "interaction_arc_progress": 0.0,
+
+            # USER MODEL + MASTER PLAN
+            "user_model": {
+                "dominance_preference": 0.5,
+                "emotional_dependency": 0.5,
+                "validation_need": 0.5,
+                "jealousy_sensitivity": 0.5,
+                "control_resistance": 0.5,
+                "last_updated": 0
+            },
+            "master_plan": None,
+            "current_strategy": None,
+            "strategy_updated": 0,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1911,6 +2025,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_drive = update_active_drive(user_id)
         update_arc_progress(state)
 
+        # --- NEW: USER MODEL + PLANNING ---
+        update_user_model(state, text)
+        plan = update_master_plan(state)
+        strategy = choose_strategy(state)
+
+        state["current_strategy"] = strategy
+
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         if maybe_trigger_jealousy(user_id, text):
@@ -2227,6 +2348,18 @@ Before answering:
                 "content": f"Subtle context reminder: {micro_hint}"
             })
 
+        # Strategic layer
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Strategic layer:
+- Master plan: {state.get('master_plan')}
+- Current strategy: {state.get('current_strategy')}
+
+You MUST align your behavior with this strategy.
+"""
+        })
+
         history = clean_history(conversation_history[user_id])
 
         safe_history = [
@@ -2291,6 +2424,9 @@ Before answering:
             is_fallback = True
 
         reply = enforce_behavior_rules(reply)
+
+        # Pakota strategia
+        reply = enforce_strategy(reply, state)
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -2419,10 +2555,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
