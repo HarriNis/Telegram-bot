@@ -1,6 +1,3 @@
-# OSA 1/3 - Imports, Config, Core Systems
-
-```python
 import os
 import random
 import json
