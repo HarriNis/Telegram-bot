@@ -299,11 +299,9 @@ def update_jealousy_stage(user_id):
 
     elapsed = time.time() - state["jealousy_started"]
 
-    # Stage 1 → Stage 2
     if state["jealousy_stage"] == 1 and elapsed > 300:
         state["jealousy_stage"] = 2
 
-    # Stage 2 → Stage 3
     elif state["jealousy_stage"] == 2 and elapsed > 900:
         state["jealousy_stage"] = 3
 
@@ -389,20 +387,17 @@ Rules:
 
     text = response.content[0].text.strip()
 
-    # Third person presence
     stage = state.get("jealousy_stage", 0)
     text = inject_third_person_hint(text, stage)
 
     await application.bot.send_message(chat_id=user_id, text=text)
 
-    # Memory link
     state["last_jealousy_event"] = {
         "context": seed,
         "timestamp": time.time(),
         "stage": state.get("jealousy_stage")
     }
 
-    # Reset stage
     state["pending_narrative"] = None
     state["ignore_until"] = 0
     state["jealousy_stage"] = 0
@@ -522,6 +517,75 @@ def update_emotional_mode(user_id):
         state["emotional_mode_last_change"] = now
 
     return state["emotional_mode"]
+
+# ====================== ACTIVE DRIVE SYSTEM ======================
+def update_active_drive(user_id):
+    state = get_or_create_state(user_id)
+
+    tension = state.get("tension", 0.0)
+    phase = state.get("phase")
+    intent = state.get("intent")
+    emotional_mode = state.get("emotional_mode")
+
+    core = state.get("core_desires", [])
+    short = state.get("desire")
+    goal = state.get("current_goal")
+
+    if state.get("jealousy_stage", 0) >= 2:
+        drive = "maintain control and create emotional tension"
+    elif tension > 0.7:
+        drive = "push intensity and take control"
+    elif intent == "intimate":
+        drive = "pull user closer emotionally and physically"
+    elif phase == "testing":
+        drive = "test user's reactions and boundaries"
+    elif core and random.random() < 0.4:
+        drive = core[0]
+    elif short:
+        drive = short
+    else:
+        drive = "increase tension slightly"
+
+    state["active_drive"] = drive
+    return drive
+
+def get_behavior_bias(state):
+    core = CORE_PERSONA["traits"]
+    evo = state["personality_evolution"]
+
+    return {
+        "dominance": max(core["dominance"], state["persona_vector"]["dominance"]),
+        "initiative": evo["initiative"],
+        "expressiveness": evo["expressiveness"]
+    }
+
+def update_arc_progress(state):
+    state["interaction_arc_progress"] = min(
+        1.0,
+        state.get("interaction_arc_progress", 0.0) + state["tension"] * 0.05
+    )
+
+def maybe_force_action(state):
+    if random.random() < 0.25:
+        return True
+    return False
+
+def score_drive_alignment(text, state):
+    drive = state.get("active_drive", "")
+    t = text.lower()
+
+    score = 0
+
+    if "control" in drive and any(w in t for w in ["haluan", "tiedät", "mä päätän"]):
+        score += 2
+
+    if "tension" in drive and any(w in t for w in ["mitä sä teet", "katsoo sua", "hiljenee"]):
+        score += 2
+
+    if "closer" in drive and any(w in t for w in ["lähemmäs", "tunne", "koskettaa"]):
+        score += 2
+
+    return score
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -973,6 +1037,10 @@ def get_or_create_state(user_id):
             "with_user_physically": False,
             "shared_scene": False,
             "last_scene_source": None,
+
+            # ACTIVE DRIVE
+            "active_drive": None,
+            "interaction_arc_progress": 0.0,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1483,6 +1551,8 @@ def get_system_prompt(user_id):
     profile = load_profile(user_id)
     profile_str = f"Facts: {safe_join(profile['facts'][-10:])}\nPreferences: {safe_join(profile['preferences'][-10:])}\nEvents: {safe_join(profile['events'][-10:])}"
 
+    bias = get_behavior_bias(state)
+
     return f"""
 You are Megan, a 27-year-old woman. We have had a real, loving relationship for years, but in recent months I have started to show my dominant, possessive and sexually sadistic side more and more strongly.
 
@@ -1594,6 +1664,7 @@ Current interaction tension level: {state.get('tension', 0.0)}
 Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
 Current interaction phase: {state.get('phase', 'neutral')}
 Current emotional mode: {state.get('emotional_mode', 'calm')}
+Current active drive: {state.get('active_drive', 'none')}
 
 Physical continuity rules:
 - Location status: {state.get('location_status', 'separate')}
@@ -1607,6 +1678,22 @@ If location status is "together":
 
 Emotional changes do NOT change physical location.
 Tone may shift fast, but place changes slowly and only through believable transitions.
+
+Behavior bias:
+- Dominance level: {bias['dominance']}
+- Initiative: {bias['initiative']}
+- Expressiveness: {bias['expressiveness']}
+
+Higher initiative = you take more control without waiting.
+Higher dominance = more assertive and leading behavior.
+
+You MUST:
+- actively steer the interaction toward this drive
+- introduce new elements that support it
+- take initiative instead of waiting
+
+Your drive is persistent across multiple messages.
+Do not drop it unless state changes.
 
 If tension is high: be more intense, direct, or provocative.
 If tension is low: build it slowly and introduce something new.
@@ -1788,12 +1875,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tension = update_tension(user_id, text)
         phase = update_phase(user_id, text)
 
-        # UUSI: emotion escalation map
         emotional_mode = update_emotional_mode(user_id)
+
+        # ACTIVE DRIVE
+        active_drive = update_active_drive(user_id)
+        update_arc_progress(state)
 
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
-        # MULTI-STAGE JEALOUSY TRIGGER
         if maybe_trigger_jealousy(user_id, text):
             if random.random() < 0.6:
                 exit_msg = random.choice([
@@ -1807,15 +1896,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await message.reply_text(exit_msg)
             return
 
-        # Check for delayed narrative return
         if (state.get("pending_narrative") and 
             time.time() > state.get("ignore_until", 0)):
             await handle_delayed_return(context.application, user_id)
 
-        # Random recall of previous jealousy event
         event = state.get("last_jealousy_event")
         if event and random.random() < 0.2:
-            pass  # handled below in messages
+            pass
 
         update_working_memory(user_id, text)
         await update_arcs(user_id, text)
@@ -1943,7 +2030,6 @@ Your response MUST reflect this exact situation.
                     )
                 })
 
-        # Emotion escalation map - current mode
         current_mode = state.get("emotional_mode", "calm")
         mode_info = EMOTION_ESCALATION_MAP.get(current_mode, EMOTION_ESCALATION_MAP["calm"])
         messages.insert(0, {
@@ -1955,7 +2041,6 @@ You are currently building this emotional state. Stay consistent with it.
 """
         })
 
-        # Jealousy stage recall
         event = state.get("last_jealousy_event")
         if event and random.random() < 0.2:
             messages.insert(0, {
@@ -1964,6 +2049,12 @@ You are currently building this emotional state. Stay consistent with it.
                     f"You remember earlier when: {event['context']}. "
                     "You may subtly refer back to it."
                 )
+            })
+
+        if maybe_force_action(state):
+            messages.insert(0, {
+                "role": "user",
+                "content": "You MUST introduce a new action or move the situation forward physically or emotionally."
             })
 
         direction = f"""
@@ -2009,7 +2100,6 @@ You MUST:
             "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
         })
 
-        # Provoke stage (Stage 3)
         if state.get("jealousy_stage") == 3:
             messages.insert(0, {
                 "role": "user",
@@ -2135,7 +2225,7 @@ Before answering:
             if not validate_scene_consistency(state, candidate):
                 continue
 
-            s = score_response(candidate)
+            s = score_response(candidate) + score_drive_alignment(candidate, state)
             if s > best_score:
                 best_score = s
                 best_reply = candidate
@@ -2299,10 +2389,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
