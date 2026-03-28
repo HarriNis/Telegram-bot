@@ -385,9 +385,6 @@ def inject_third_person_hint(text, stage):
             "*hymyilee vähän itsekseen*",
             "…mä en kerro ihan kaikkea vielä"
         ]
-        # OSA 2/3 - Jealousy, Physical Reality, Plans, Memory
-
-```python
     }
 
     if stage in hints and random.random() < 0.6:
@@ -808,10 +805,6 @@ def detect_future_commitment(text):
     
     # Tarkista myös tulevaisuusviittaukset + toimintaverbit
     future_markers = ["huomenna", "myöhemmin", "kohta", "illalla", "ensi yönä", "seuraavaksi"]
-    # OSA 2/3 jatkuu - Plans & Memory Systems
-
-```python
-    future_markers = ["huomenna", "myöhemmin", "kohta", "illalla", "ensi yönä", "seuraavaksi"]
     action_verbs = ["teen", "lähetän", "kerron", "näytän", "tulen", "aion"]
     
     if any(f in t for f in future_markers) and any(a in t for a in action_verbs):
@@ -1224,10 +1217,6 @@ CREATE TABLE IF NOT EXISTS memories (
 )
 """)
 
-cursor.execute
-    # OSA 2/3 jatkuu - Database & State Management
-
-```python
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS profiles (
     user_id TEXT PRIMARY KEY,
@@ -1597,10 +1586,6 @@ persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
 def get_mode_prompt(mode):
     mapping = {
         "warm": "Be emotionally present, soft, and natural.",
-        "
-    # OSA 3/4 - Continuity, Intent, Memory & Image Systems
-
-```python
         "playful": "Be light, slightly teasing, and relaxed.",
         "distracted": "You are a bit busy or thinking about something else. Responses can be shorter.",
         "calm": "Be grounded, simple, and steady.",
@@ -1939,10 +1924,6 @@ async def retrieve_memories(user_id, query, limit=8):
             if intent and intent in seen_intents:
                 continue
             seen_intents.add(intent)
-            unique.
-    # OSA 3/4 jatkuu - Memory, Embedding & Image Systems
-
-```python
             unique.append(content)
             if len(unique) >= limit:
                 break
@@ -2407,8 +2388,7 @@ MEMORY CONTEXT:
         "user": text,
         "assistant": reply,
         "intent": state["intent"],
-        "state": build
-    "state": build_state_snapshot(user_id),
+        "state": build_state_snapshot(user_id),
         "timestamp": time.time()
     }, ensure_ascii=False)
 
@@ -2540,7 +2520,7 @@ async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     args = context.args
     if not args:
-        await update.message.reply_text("Käyttö: /scene <scene_name>\nVaihtoehdot: home, work, public, bed, shower, commute, neutral")
+        await update.message.reply_text("Käyttö: /scene \nVaihtoehdot: home, work, public, bed, shower, commute, neutral")
         return
     
     new_scene = args[0].lower()
@@ -2629,10 +2609,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /memory - Show memory stats
 
 **Manual Control:**
-/scene <name> - Force scene change
+/scene  - Force scene change
 /together - Set location_status to together
 /separate - Set location_status to separate
-/mood <name> - Force emotional mode
+/mood  - Force emotional mode
 /tension <0.0-1.0> - Set tension manually
 
 **Info:**
