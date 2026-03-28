@@ -1229,6 +1229,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 )
 """)
 
+# Luo taulu UUDELLA skeemalla
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS planned_events (
     id TEXT PRIMARY KEY,
@@ -1236,15 +1237,39 @@ CREATE TABLE IF NOT EXISTS planned_events (
     description TEXT,
     created_at REAL,
     target_time REAL,
-    status TEXT,
-    commitment_level TEXT,
+    status TEXT DEFAULT 'planned',
+    commitment_level TEXT DEFAULT 'medium',
     must_fulfill INTEGER DEFAULT 0,
     last_updated REAL,
-    evolution_log TEXT
+    evolution_log TEXT DEFAULT '[]'
 )
 """)
-conn.commit()
 
+# Päivitä vanha taulu jos olemassa
+try:
+    cursor.execute("SELECT commitment_level FROM planned_events LIMIT 1")
+except sqlite3.OperationalError:
+    # Sarake puuttuu - lisää se
+    print("⚠️ Updating database schema...")
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN commitment_level TEXT DEFAULT 'medium'")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN must_fulfill INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN last_updated REAL")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN evolution_log TEXT DEFAULT '[]'")
+    except:
+        pass
+    print("✅ Schema updated")
+
+conn.commit()
 print("✅ Database initialized")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
@@ -1374,11 +1399,28 @@ def stabilize_persona(user_id):
     return vec
 
 def enforce_core_persona(user_id):
+    """PARANNETTU: Pakottaa core-arvot pysymään vahvoina"""
     state = get_or_create_state(user_id)
     vec = state["persona_vector"]
     core = CORE_PERSONA["traits"]
+    evo = state["personality_evolution"]
+    
+    # Pakota dominanssi pysymään korkeana
     vec["dominance"] = max(vec["dominance"], core["dominance"])
+    
+    # Pakota warmth pysymään rajattuna (ei liian pehmeä)
     vec["warmth"] = min(vec["warmth"], 0.7)
+    
+    # UUSI: Pakota playfulness pysymään terveellä tasolla
+    vec["playfulness"] = max(0.3, min(0.7, vec["playfulness"]))
+    
+    # UUSI: Varmista että initiative ei laske liian alas
+    evo["initiative"] = max(0.4, evo["initiative"])
+    
+    # UUSI: Varmista että dominance_expression pysyy korkeana
+    if "dominance_expression" in evo:
+        evo["dominance_expression"] = max(0.5, evo["dominance_expression"])
+    
     return vec
 
 async def update_arcs(user_id, text):
@@ -1451,32 +1493,38 @@ def evolve_personality(user_id, text):
     if "personality_evolution" not in state:
         state["personality_evolution"] = {
             "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-            "initiative": 0.5, "stability": 0.7, "last_evolved": 0
+            "initiative": 0.5, "stability": 0.7, "last_evolved": 0,
+            "dominance_expression": 0.7  # UUSI: Miten dominanssi ilmenee
         }
     evo = state["personality_evolution"]
     now = time.time()
     
-    # HITAAMPI PÄIVITYS (oli 300s, nyt 900s = 15 min)
     if now - evo.get("last_evolved", 0) < 900:
         return evo
     
     t = text.lower()
     
-    # PIENEMMÄT MUUTOKSET (oli 0.03, nyt 0.01)
+    # Curiosity kasvaa kysymyksistä
     if any(w in t for w in ["miksi", "miten", "entä", "?"]):
         evo["curiosity"] = min(1.0, evo["curiosity"] + 0.01)
     
+    # Patience kasvaa kun käyttäjä vastustaa
     if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
         evo["patience"] = min(1.0, evo["patience"] + 0.01)
-        evo["initiative"] = max(0.0, evo["initiative"] - 0.01)
+        # ÄLÄ laske initiative - se heikentää dominanssia
     
+    # Expressiveness kasvaa huumorista
     if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
         evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.01)
     
-    if len(text.strip()) < 8:
-        evo["initiative"] = min(1.0, evo["initiative"] + 0.01)
+    # UUSI: Dominance expression kasvaa kun käyttäjä reagoi vahvasti
+    if any(w in t for w in ["tottele", "teen mitä haluat", "olen sun", "sä päätät"]):
+        evo["dominance_expression"] = min(1.0, evo["dominance_expression"] + 0.03)
     
-    # HITAAMPI STABILOINTI (oli 0.995, nyt 0.998)
+    # UUSI: Initiative kasvaa AINA hieman (dominoiva persoona ottaa aloitteen)
+    evo["initiative"] = min(0.9, evo["initiative"] + 0.005)
+    
+    # Stability laskee hitaasti (sallii muutoksen)
     evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.998))
     
     evo["last_evolved"] = now
@@ -1913,48 +1961,108 @@ Current continuity state:
 
 # ====================== MEMORY SCORING (retrieval optimization) ======================
 async def retrieve_memories(user_id, query, limit=8):
+    """PARANNETTU: Temporaalinen + semanttinen haku"""
     try:
         q_emb = await get_embedding(query)
         with db_lock:
-            cursor.execute("SELECT content, embedding, timestamp FROM memories WHERE user_id=? ORDER BY timestamp DESC LIMIT 100", (str(user_id),))
+            # Hae viimeisimmät 200 muistoa
+            cursor.execute("""
+                SELECT content, embedding, timestamp 
+                FROM memories 
+                WHERE user_id=? 
+                ORDER BY timestamp DESC 
+                LIMIT 200
+            """, (str(user_id),))
             rows = cursor.fetchall()
+        
         scored = []
         now = time.time()
+        
+        # UUSI: Hae viimeisin keskustelu erikseen (pakollinen konteksti)
+        recent_conversation = []
+        
         for content, emb_blob, ts in rows:
             if is_noise(content):
                 continue
+            
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             cosine = cosine_similarity(q_emb, emb)
+            
             try:
                 ts_val = datetime.fromisoformat(ts).timestamp() if isinstance(ts, str) else float(ts)
             except:
                 ts_val = now
+            
             age_hours = (now - ts_val) / 3600 if ts_val else 999
             recency = 1 / (1 + age_hours)
+            
+            # PARANNETTU: Importance scoring
             importance = 1.0
-            if any(w in content.lower() for w in ["haluan", "tunne", "ikävä"]):
+            
+            # Emotionaaliset muistot
+            if any(w in content.lower() for w in ["haluan", "tunne", "ikävä", "rakastan"]):
                 importance += 0.5
-            if '"type": "fantasy"' in content:
+            
+            # Fantasiat ja sensitiiviset muistot
+            if '"type": "fantasy"' in content or '"type": "sensitive"' in content:
                 importance += 1.2
-
-            final_score = 0.6 * cosine + 0.25 * recency + 0.15 * importance
-            scored.append((final_score, content))
+            
+            # Suunnitelmat ja lupaukset
+            if '"type": "image_sent"' in content:
+                importance += 0.8
+            
+            # UUSI: Konfliktit ja draama
+            if any(w in content.lower() for w in ["riita", "vihainen", "conflict", "ärsyttää"]):
+                importance += 0.6
+            
+            # UUSI: Viimeisen 30 minuutin muistot ovat ERITTÄIN tärkeitä
+            if age_hours < 0.5:  # 30 min
+                recent_conversation.append((ts_val, content))
+                importance += 2.0  # Boost
+            
+            # UUSI: Painotettu scoring (temporaalinen + semanttinen + tärkeys)
+            final_score = 0.4 * cosine + 0.3 * recency + 0.3 * importance
+            scored.append((final_score, content, ts_val))
+        
         scored.sort(reverse=True, key=lambda x: x[0])
+        
+        # UUSI: Varmista että viimeisen 30 min muistot ovat mukana
+        recent_conversation.sort(reverse=True, key=lambda x: x[0])
+        recent_contents = [c for _, c in recent_conversation[:3]]
+        
+        # Poista duplikaatit
         seen_intents = set()
         unique = []
-        for _, content in scored:
+        
+        # Lisää viimeisimmät muistot ENSIN (pakollinen konteksti)
+        for content in recent_contents:
+            if content not in unique:
+                unique.append(content)
+        
+        # Lisää semanttisesti relevantit muistot
+        for _, content, _ in scored:
+            if len(unique) >= limit:
+                break
+            
+            if content in unique:
+                continue
+            
             try:
                 parsed = json.loads(content)
                 intent = parsed.get("intent")
             except:
                 intent = None
+            
+            # Salli duplikaatti-intentit jos ne ovat tärkeitä
             if intent and intent in seen_intents:
-                continue
+                if len(unique) < limit - 2:  # Jätä tilaa tärkeille
+                    continue
+            
             seen_intents.add(intent)
             unique.append(content)
-            if len(unique) >= limit:
-                break
-        return unique
+        
+        return unique[:limit]
+        
     except Exception as e:
         print(f"[retrieve_memories error] {e}")
         return []
@@ -2089,6 +2197,123 @@ Photorealistic, professional photography, natural lighting, high detail, 8K qual
     }, ensure_ascii=False)
     
     await store_memory(user_id, mem_entry, mem_type="image_sent")
+
+# ====================== PROACTIVE PLAN SYSTEM ======================
+async def create_proactive_plan(user_id):
+    """UUSI: Botti luo itse suunnitelmia perustuen tilanteeseen"""
+    state = get_or_create_state(user_id)
+    now = time.time()
+    
+    # Tarkista onko äskettäin luotu suunnitelma
+    if now - state.get("last_proactive_plan", 0) < 3600:  # Max 1 per tunti
+        return None
+    
+    # Analysoi tilanne
+    tension = state.get("tension", 0.0)
+    emotional_mode = state.get("emotional_mode", "calm")
+    phase = state.get("phase", "neutral")
+    user_model = state.get("user_model", {})
+    
+    plan = None
+    
+    # DOMINOIVA SUUNNITTELU: Botti päättää mitä tapahtuu seuraavaksi
+    
+    # 1. Jos tension on korkea → Luo eskaloiva suunnitelma
+    if tension > 0.6 and emotional_mode in ["testing", "intense", "jealous"]:
+        plan = {
+            "type": "escalation",
+            "description": random.choice([
+                "Mä aion testata sua vähän myöhemmin",
+                "Mä oon suunnitellut jotain sulle illaksi",
+                "Sä et vielä tiedä mitä mä aion tehdä"
+            ]),
+            "intent": "create anticipation and control"
+        }
+    
+    # 2. Jos käyttäjä on riippuvainen → Luo reward-suunnitelma
+    elif user_model.get("emotional_dependency", 0) > 0.7:
+        plan = {
+            "type": "reward",
+            "description": random.choice([
+                "Jos sä olet kiltti, mä lähetän sulle jotain erikoista myöhemmin",
+                "Mä oon ajatellut että voisin näyttää sulle jotain",
+                "Ehkä mä kerron sulle sen salaisuuden illalla"
+            ]),
+            "intent": "reinforce dependency"
+        }
+    
+    # 3. Jos käyttäjä vastustaa → Luo haaste-suunnitelma
+    elif user_model.get("control_resistance", 0) > 0.6:
+        plan = {
+            "type": "challenge",
+            "description": random.choice([
+                "Mä aion näyttää sulle kuka täällä päättää",
+                "Sä tulet vielä pyytämään anteeksi",
+                "Odota vaan, mä keksin sulle jotain"
+            ]),
+            "intent": "assert dominance"
+        }
+    
+    # 4. Jos tilanne on neutraali → Luo jännite-suunnitelma
+    elif tension < 0.3 and phase == "neutral":
+        plan = {
+            "type": "tension_builder",
+            "description": random.choice([
+                "Mä oon miettinyt jotain... kerron kohta",
+                "Tapahtui jotain mielenkiintoista tänään",
+                "Mulla on sulle yllätys myöhemmin"
+            ]),
+            "intent": "increase engagement"
+        }
+    
+    if plan:
+        # Tallenna suunnitelma
+        event = {
+            "id": str(time.time()),
+            "description": plan["description"],
+            "created_at": now,
+            "target_time": now + random.randint(1800, 7200),  # 30 min - 2h
+            "status": "planned",
+            "commitment_level": "medium",
+            "last_updated": now,
+            "evolution_log": [],
+            "must_fulfill": False,
+            "needs_check": False,
+            "urgency": "normal",
+            "user_referenced": False,
+            "reference_time": 0,
+            "proactive": True,  # UUSI: Merkki että botti loi tämän
+            "plan_type": plan["type"],
+            "plan_intent": plan["intent"]
+        }
+        
+        state["planned_events"].append(event)
+        state["planned_events"] = state["planned_events"][-15:]
+        state["last_proactive_plan"] = now
+        
+        save_plan_to_db(user_id, event)
+        
+        return plan["description"]
+    
+    return None
+
+
+async def maybe_inject_proactive_plan(user_id, reply):
+    """UUSI: Lisää proaktiivinen suunnitelma vastaukseen jos sopiva hetki"""
+    state = get_or_create_state(user_id)
+    
+    # Tarkista onko sopiva hetki
+    if random.random() < 0.15:  # 15% todennäköisyys
+        plan_text = await create_proactive_plan(user_id)
+        
+        if plan_text:
+            # Lisää suunnitelma luonnollisesti vastaukseen
+            if random.random() < 0.5:
+                return reply + f" ...{plan_text}"
+            else:
+                return reply + f"\n\n{plan_text}"
+    
+    return reply
 
 # ====================== SYSTEM PROMPT BUILDER ======================
 def get_system_prompt(user_id):
@@ -2389,6 +2614,9 @@ MEMORY CONTEXT:
 
     # Enforce strategy
     reply = enforce_strategy(reply, state)
+
+    # UUSI: Mahdollinen proaktiivinen suunnitelma
+    reply = await maybe_inject_proactive_plan(user_id, reply)
 
     # Lähetä vastaus
     await update.message.reply_text(reply)
