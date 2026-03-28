@@ -1989,6 +1989,19 @@ def clean_history(history):
         cleaned.append(msg)
     return cleaned
 
+def sanitize_messages(history):
+    safe = []
+    for msg in history:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") not in {"user", "assistant"}:
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        safe.append({"role": msg["role"], "content": content})
+    return safe
+
 def safe_join(items):
     return "\n".join([str(x) for x in items if x])
 
@@ -2044,6 +2057,29 @@ def enforce_behavior_rules(reply: str):
     if not any(w in r for w in ["haluan", "tiedät", "sä", "mä"]):
         reply += " …sä tiedät kyllä mitä mä haluan sulta."
     return reply
+
+# ====================== VALIDATION HELPERS ======================
+def validate_final_intent_alignment(reply, final_intent):
+    if not final_intent:
+        return True
+
+    r = reply.lower()
+
+    if final_intent.get("must_acknowledge_plan"):
+        plan_markers = [
+            "suunnitelma", "muutin", "meni eri tavalla", "palaan siihen",
+            "aiemmin sanoin", "se muuttui", "toisin kuin ajattelin"
+        ]
+        if not any(x in r for x in plan_markers):
+            return False
+
+    if final_intent.get("must_reference_memory"):
+        return True
+
+    if final_intent.get("behavior_constraint") == "continue same interrupted moment":
+        return True
+
+    return True
 
 # ====================== SAFE IMAGE PROMPT ======================
 def build_safe_image_prompt(user_text: str, user_id: int) -> str:
@@ -2416,11 +2452,12 @@ def validate_final_intent_alignment(reply, final_intent):
 
     return True
 
-
 # ====================== REFAKTOROIDUT FUNKTIOT ======================
 
 def extract_input(update: Update):
     user_id = update.effective_user.id
+    if not update.message:
+        return user_id, ""
     text = (update.message.text or update.message.caption or "").strip()
     return user_id, text
 
@@ -2526,7 +2563,7 @@ def build_prompt(user_id, text, state, memory_bundle):
             "content": f"Final intent:\n{json.dumps(state['final_intent'], ensure_ascii=False)}"
         })
 
-    history = clean_history(conversation_history.get(user_id, []))
+    history = sanitize_messages(clean_history(conversation_history.get(user_id, [])))
     messages += history[-12:]
 
     messages.append({"role": "user", "content": text})
@@ -2580,30 +2617,49 @@ async def commit_reply(update, user_id, text, reply):
     await store_dialogue_turn(user_id, text, reply)
 
 
-# ====================== MEGAN_CHAT – UUSI PUHDAS PIPELINE ======================
-async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id, text = extract_input(update)
-
-    if handle_commands(user_id, text, update):
-        return
-
-    state = update_internal_state(user_id, text)
-
-    memory_bundle = await handle_memory_layer(user_id, text)
-
-    resolve_mind(state, memory_bundle)
-
-    system_prompt, messages = build_prompt(user_id, text, state, memory_bundle)
-
-    reply = await generate_validated_reply(system_prompt, messages, state)
-
-    await commit_reply(update, user_id, text, reply)
-
-
 # ====================== ERROR HANDLER ======================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("Exception while handling update:", repr(context.error))
-    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+    logging.exception("Unhandled exception while processing update", exc_info=context.error)
+
+    try:
+        if update and isinstance(update, Update) and update.effective_chat:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Botti törmäsi virheeseen tämän viestin käsittelyssä."
+            )
+    except Exception:
+        logging.exception("Failed to notify user about the error")
+
+
+# ====================== MEGAN_CHAT – UUSI PUHDAS PIPELINE ======================
+async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id, text = extract_input(update)
+        if not text:
+            return
+
+        if handle_commands(user_id, text, update):
+            return
+
+        state = update_internal_state(user_id, text)
+
+        memory_bundle = await handle_memory_layer(user_id, text)
+
+        resolve_mind(state, memory_bundle)
+
+        system_prompt, messages = build_prompt(user_id, text, state, memory_bundle)
+
+        reply = await generate_validated_reply(system_prompt, messages, state)
+
+        await commit_reply(update, user_id, text, reply)
+
+    except Exception:
+        logging.exception("Error inside megan_chat")
+        try:
+            await update.message.reply_text("Virhe viestin käsittelyssä.")
+        except Exception:
+            pass
+        raise
 
 
 # ====================== PROAKTIIVISET VIESTIT ======================
@@ -2700,20 +2756,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("newgame", newgame_command))
-    application.add_handler(CommandHandler("wipememory", wipememory_command))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
-    application.add_error_handler(error_handler)
-
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
         print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) + PLANNED EVENTS / COMMITMENTS SYSTEM + FINAL INTENT RESOLVER käynnissä")
 
-    application.post_init = post_init
-    print("✅ Megan 6.1 (refaktoroitu mieli-pipeline) on nyt käynnissä")
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("newgame", newgame_command))
+    application.add_handler(CommandHandler("wipememory", wipememory_command))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Caption.ALL, megan_chat))
+    application.add_error_handler(error_handler)
+
+    print("✅ Megan 6.1 (refaktoroitu mieli-pipeline + virheenkäsittely) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
