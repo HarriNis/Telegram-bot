@@ -654,40 +654,6 @@ def update_master_plan(state):
     return plan
 
 
-def choose_strategy(state):
-    plan = state.get("master_plan")
-
-    if plan == "increase push-pull emotional cycle":
-        return random.choice([
-            "show warmth then withdraw",
-            "create uncertainty",
-            "increase emotional tension"
-        ])
-
-    if plan == "maintain control and escalate dominance":
-        return random.choice([
-            "assert control",
-            "lead interaction strongly",
-            "ignore minor user resistance"
-        ])
-
-    if plan == "create validation-reward loop":
-        return random.choice([
-            "withhold validation",
-            "reward selectively",
-            "make user seek approval"
-        ])
-
-    if plan == "soften control and rebuild influence":
-        return random.choice([
-            "be warmer",
-            "reduce pressure",
-            "increase trust"
-        ])
-
-    return "light exploration"
-
-
 def enforce_strategy(reply, state):
     strategy = state.get("current_strategy", "")
 
@@ -703,6 +669,97 @@ def enforce_strategy(reply, state):
         reply += " …toi oli parempi."
 
     return reply
+
+# ====================== STRATEGY LEARNING (REWARD SYSTEM) ======================
+
+def detect_reward_signals(text):
+    t = text.lower()
+
+    signals = {
+        "jealousy": 0.0,
+        "arousal": 0.0,
+        "submission": 0.0,
+        "emotional_attachment": 0.0
+    }
+
+    # Mustasukkaisuus
+    if any(w in t for w in ["kuka se oli", "kenen kanssa", "toinen mies", "et kuulu muille"]):
+        signals["jealousy"] += 1.0
+
+    # Kiihotus (pidä ei-graafisena)
+    if any(w in t for w in ["haluan sua", "kiihottaa", "en kestä", "pakko saada"]):
+        signals["arousal"] += 1.0
+
+    # Alistuminen
+    if any(w in t for w in ["teen mitä haluat", "mä totteelen", "sä päätät", "olen sun"]):
+        signals["submission"] += 1.0
+
+    # Emotionaalinen kiinnittyminen
+    if any(w in t for w in ["ikävä", "tarvitsen sua", "älä jätä", "olet tärkeä"]):
+        signals["emotional_attachment"] += 1.0
+
+    return signals
+
+
+REWARD_WEIGHTS = {
+    "jealousy": 1.2,
+    "arousal": 1.0,
+    "submission": 1.5,
+    "emotional_attachment": 1.3
+}
+
+
+def compute_reward(signals):
+    score = 0.0
+    for k, v in signals.items():
+        score += v * REWARD_WEIGHTS.get(k, 1.0)
+    return score
+
+
+def update_strategy_score(state, strategy, reward):
+    if not strategy:
+        return
+
+    stats = state.setdefault("strategy_stats", {})
+
+    if strategy not in stats:
+        stats[strategy] = {
+            "used": 0,
+            "score": 0.0
+        }
+
+    stats[strategy]["used"] += 1
+    stats[strategy]["score"] += reward
+
+
+def choose_strategy(state):
+    stats = state.get("strategy_stats", {})
+
+    # fallback jos ei dataa
+    if not stats:
+        return random.choice([
+            "assert control",
+            "create tension",
+            "reward selectively",
+            "increase emotional tension"
+        ])
+
+    scored = []
+
+    for strat, data in stats.items():
+        used = data["used"]
+        total = data["score"]
+
+        avg = total / used if used > 0 else 0
+        scored.append((avg, strat))
+
+    scored.sort(reverse=True)
+
+    # 20% eksploraatio
+    if random.random() < 0.2:
+        return random.choice(list(stats.keys()))
+
+    return scored[0][1]
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -1171,6 +1228,7 @@ def get_or_create_state(user_id):
             "master_plan": None,
             "current_strategy": None,
             "strategy_updated": 0,
+            "strategy_stats": {},
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -2032,6 +2090,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state["current_strategy"] = strategy
 
+        # === REWARD LEARNING ===
+        signals = detect_reward_signals(text)
+        reward = compute_reward(signals)
+
+        update_strategy_score(state, state.get("current_strategy"), reward)
+
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         if maybe_trigger_jealousy(user_id, text):
@@ -2555,10 +2619,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
