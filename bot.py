@@ -1692,6 +1692,52 @@ def adapt_mode_to_user(user_id, text):
         state["persona_mode"] = "slightly_irritated"
 
 # ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
+def get_time_context():
+    """UUSI: Palauttaa realistisen aikakontekstin"""
+    now = now_local()
+    hour = now.hour
+    weekday = now.weekday()  # 0=maanantai, 6=sunnuntai
+    
+    # Viikonpäivä
+    is_weekend = weekday >= 5
+    is_workday = weekday < 5
+    
+    # Kellonajan lohko
+    if 0 <= hour < 6:
+        time_block = "night"
+        typical_activity = "sleeping" if not is_weekend else "awake_late"
+    elif 6 <= hour < 9:
+        time_block = "early_morning"
+        typical_activity = "waking_up" if is_workday else "sleeping"
+    elif 9 <= hour < 12:
+        time_block = "morning"
+        typical_activity = "work" if is_workday else "home"
+    elif 12 <= hour < 14:
+        time_block = "lunch"
+        typical_activity = "lunch_break" if is_workday else "home"
+    elif 14 <= hour < 17:
+        time_block = "afternoon"
+        typical_activity = "work" if is_workday else "free"
+    elif 17 <= hour < 19:
+        time_block = "evening"
+        typical_activity = "commute" if is_workday else "home"
+    elif 19 <= hour < 22:
+        time_block = "late_evening"
+        typical_activity = "home"
+    else:
+        time_block = "night"
+        typical_activity = "home" if not is_weekend else "out"
+    
+    return {
+        "hour": hour,
+        "weekday": weekday,
+        "is_weekend": is_weekend,
+        "is_workday": is_workday,
+        "time_block": time_block,
+        "typical_activity": typical_activity,
+        "day_name": ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"][weekday]
+    }
+
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
@@ -1758,6 +1804,33 @@ def get_or_create_state(user_id):
             "salient_memory": None,
             "salient_memory_updated": 0,
             "forced_disclosure": None,
+
+            # UUSI: Teemojen seuranta
+            "conversation_themes": {
+                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            },
+            
+            # UUSI: Käyttäjän mieltymysprofili (pitkäaikainen)
+            "user_preferences": {
+                "fantasy_themes": [],  # Lista käyttäjän suosimista fantasioista
+                "turn_ons": [],  # Mikä kiihottaa käyttäjää
+                "turn_offs": [],  # Mikä ei toimi
+                "communication_style": "neutral",  # "submissive", "dominant", "playful", etc.
+                "resistance_level": 0.5,  # Kuinka paljon vastustaa (0=ei lainkaan, 1=paljon)
+                "last_updated": 0
+            },
+            
+            # UUSI: Keskustelun kehityskaari
+            "conversation_arc": {
+                "current_theme": None,
+                "theme_depth": 0.0,  # 0.0-1.0, kuinka syvälle teemaan on menty
+                "theme_started": 0,
+                "previous_themes": []  # Historia
+            }
         }
         continuity_state[user_id].update(init_scene_state())
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
@@ -1910,37 +1983,55 @@ def update_working_memory(user_id, text):
 def update_continuity_state(user_id, text):
     state = get_or_create_state(user_id)
     now = now_ts()
+    
+    # UUSI: Hae realistinen aikakonteksti
+    time_ctx = get_time_context()
+    state["time_context"] = time_ctx
+    
     block = get_time_block()
     state["intent"] = detect_intent(text)
-
-    if block == "night":
-        state["availability"] = "sleeping" if random.random() < 0.6 else "low_presence"
-        state["energy"] = "low"
-    elif block == "morning":
-        state["availability"] = "busy" if random.random() < 0.35 else "free"
-        state["energy"] = "low" if random.random() < 0.5 else "normal"
-    elif block == "day":
-        state["availability"] = "busy" if random.random() < 0.55 else "free"
+    
+    # PARANNETTU: Availability perustuu REALISTISEEN aikaan
+    if time_ctx["typical_activity"] == "sleeping":
+        state["availability"] = "sleeping"
+        state["energy"] = "very_low"
+    elif time_ctx["typical_activity"] == "work":
+        state["availability"] = "busy" if random.random() < 0.7 else "free"
         state["energy"] = "normal"
-    elif block == "evening":
+    elif time_ctx["typical_activity"] == "commute":
+        state["availability"] = "limited"  # Bussissa, voi vastata mutta lyhyesti
+        state["energy"] = "normal"
+    elif time_ctx["typical_activity"] == "lunch_break":
         state["availability"] = "free"
-        state["energy"] = "normal" if random.random() < 0.6 else "high"
+        state["energy"] = "normal"
+    elif time_ctx["typical_activity"] in ["home", "free"]:
+        state["availability"] = "free"
+        state["energy"] = "high" if time_ctx["time_block"] == "late_evening" else "normal"
     else:
         state["availability"] = "free"
-        state["energy"] = "low" if random.random() < 0.4 else "normal"
-
+        state["energy"] = "normal"
+    
+    # PARANNETTU: Scene perustuu aikaan
+    if not force_scene_from_text(state, text, now):
+        # Jos käyttäjä ei pakota skeneä, käytä realistista
+        if state["scene"] == "neutral" or now - state["last_scene_change"] > MIN_SCENE_DURATION:
+            state["scene"] = time_ctx["typical_activity"]
+            state["micro_context"] = random.choice(SCENE_MICRO.get(state["scene"], [""]))
+            state["last_scene_change"] = now
+            state["last_scene_source"] = "realistic_time"
+    
     maybe_interrupt_action(state, text)
-
-    # UUSI: Tarkista suunnitelmaviittaukset
     check_plan_references(user_id, text)
-
-    forced = force_scene_from_text(state, text, now)
-    if not forced:
-        maybe_transition_scene(state, now)
     update_action(state, now)
-
-    recent_context.append({"scene": state["scene"], "intent": state["intent"], "energy": state["energy"], "text": text[:80]})
-
+    
+    recent_context.append({
+        "scene": state["scene"],
+        "intent": state["intent"],
+        "energy": state["energy"],
+        "text": text[:80],
+        "time": time_ctx["day_name"] + " " + time_ctx["time_block"]
+    })
+    
     state["last_interaction"] = now
     return state
 
@@ -2315,6 +2406,93 @@ async def maybe_inject_proactive_plan(user_id, reply):
     
     return reply
 
+# ====================== UUSI: AIKAREALISMI & TEEMA-TRACKING ======================
+def update_conversation_themes(user_id, text, reply):
+    """UUSI: Seuraa keskustelun teemoja ja päivittää niitä"""
+    state = get_or_create_state(user_id)
+    themes = state["conversation_themes"]
+    now = time.time()
+    
+    t = text.lower()
+    r = reply.lower()
+    combined = t + " " + r
+    
+    # FANTASY teema
+    if any(w in combined for w in ["fantasia", "kuvittele", "haaveile", "ajattele että", "entä jos"]):
+        themes["fantasy"]["count"] += 1
+        themes["fantasy"]["last_discussed"] = now
+        themes["fantasy"]["intensity"] = min(1.0, themes["fantasy"]["intensity"] + 0.1)
+        
+        # Tallenna avainsanat
+        fantasy_words = [w for w in combined.split() if len(w) > 4]
+        themes["fantasy"]["keywords"].extend(fantasy_words[:5])
+        themes["fantasy"]["keywords"] = list(set(themes["fantasy"]["keywords"]))[-20:]  # Max 20
+    
+    # DOMINANCE teema
+    if any(w in combined for w in ["tottele", "käske", "pakota", "hallitse", "oma", "kuulut"]):
+        themes["dominance"]["count"] += 1
+        themes["dominance"]["last_discussed"] = now
+        themes["dominance"]["intensity"] = min(1.0, themes["dominance"]["intensity"] + 0.15)
+    
+    # INTIMACY teema
+    if any(w in combined for w in ["ikävä", "haluan", "kosketa", "tunne", "läheisyys", "hellä"]):
+        themes["intimacy"]["count"] += 1
+        themes["intimacy"]["last_discussed"] = now
+        themes["intimacy"]["intensity"] = min(1.0, themes["intimacy"]["intensity"] + 0.1)
+    
+    # JEALOUSY teema
+    if any(w in combined for w in ["kuka", "toinen", "muut", "mustasukkainen", "vain minä"]):
+        themes["jealousy"]["count"] += 1
+        themes["jealousy"]["last_discussed"] = now
+        themes["jealousy"]["intensity"] = min(1.0, themes["jealousy"]["intensity"] + 0.12)
+    
+    # DAILY_LIFE teema
+    if any(w in combined for w in ["työ", "päivä", "ruoka", "nukkua", "väsynyt", "kiire"]):
+        themes["daily_life"]["count"] += 1
+        themes["daily_life"]["last_discussed"] = now
+        themes["daily_life"]["intensity"] = min(1.0, themes["daily_life"]["intensity"] + 0.05)
+    
+    # Haalistuminen (teema heikkenee ajan myötä jos ei käsitellä)
+    for theme_name, theme_data in themes.items():
+        age = now - theme_data["last_discussed"]
+        if age > 3600:  # 1 tunti
+            theme_data["intensity"] *= 0.95
+    
+    # Päivitä aktiivinen teema
+    active_theme = max(themes.items(), key=lambda x: x[1]["intensity"])
+    state["conversation_arc"]["current_theme"] = active_theme[0]
+    state["conversation_arc"]["theme_depth"] = active_theme[1]["intensity"]
+
+def learn_user_preferences(user_id, text):
+    """UUSI: Oppii käyttäjän mieltymykset pitkäaikaisesti"""
+    state = get_or_create_state(user_id)
+    prefs = state["user_preferences"]
+    now = time.time()
+    
+    t = text.lower()
+    
+    # Tunnista TURN ONS (positiiviset reaktiot)
+    if any(w in t for w in ["tykkään", "pidän", "hyvä", "jatka", "lisää", "enemmän", "kiihottaa"]):
+        # Etsi mitä käyttäjä tykkää (edellinen botin viesti)
+        history = conversation_history.get(user_id, [])
+        if len(history) >= 2:
+            last_bot_msg = history[-2].get("content", "").lower()
+            
+            # Tallenna avainsanat
+            keywords = [w for w in last_bot_msg.split() if len(w) > 4][:5]
+            prefs["turn_ons"].extend(keywords)
+            prefs["turn_ons"] = list(set(prefs["turn_ons"]))[-30:]  # Max 30
+    
+    # Tunnista TURN OFFS (negatiiviset reaktiot)
+    if any(w in t for w in ["en tykkää", "lopeta", "ei noin", "liikaa", "ärsyttää", "en halua"]):
+        history = conversation_history.get(user_id, [])
+        if len(history) >= 2:
+            last_bot_msg = history[-2].get("content", "").lower()
+            
+            keywords = [w for w in last_bot_msg.split() if len(w) > 4][:5]
+            prefs["turn_offs"].extend(keywords)
+            prefs["turn_offs"] = list(set(prefs["turn_offs"]))[-30:]
+
 # ====================== SYSTEM PROMPT BUILDER ======================
 def get_system_prompt(user_id):
     state = get_or_create_state(user_id)
@@ -2617,6 +2795,10 @@ MEMORY CONTEXT:
 
     # UUSI: Mahdollinen proaktiivinen suunnitelma
     reply = await maybe_inject_proactive_plan(user_id, reply)
+
+    # UUSI: Päivitä teemat ja käyttäjän mieltymykset
+    update_conversation_themes(user_id, text, reply)
+    learn_user_preferences(user_id, text)
 
     # Lähetä vastaus
     await update.message.reply_text(reply)
