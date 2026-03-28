@@ -2393,6 +2393,30 @@ async def generate_and_send_image(update: Update, user_text: str):
         except:
             await update.message.reply_text("...en saanut kuvaa luotua nyt.")
 
+# ====================== VALIDATION HELPERS ======================
+def validate_final_intent_alignment(reply, final_intent):
+    if not final_intent:
+        return True
+
+    r = reply.lower()
+
+    if final_intent.get("must_acknowledge_plan"):
+        plan_markers = [
+            "suunnitelma", "muutin", "meni eri tavalla", "palaan siihen",
+            "aiemmin sanoin", "se muuttui", "toisin kuin ajattelin"
+        ]
+        if not any(x in r for x in plan_markers):
+            return False
+
+    if final_intent.get("must_reference_memory"):
+        return True
+
+    if final_intent.get("behavior_constraint") == "continue same interrupted moment":
+        return True
+
+    return True
+
+
 # ====================== REFAKTOROIDUT FUNKTIOT ======================
 
 def extract_input(update: Update):
@@ -2531,7 +2555,8 @@ async def generate_validated_reply(system_prompt, messages, state):
         if not validate_scene_consistency(state, candidate):
             continue
 
-        if not validate_final_intent_alignment(candidate, state.get("final_intent", {})):
+        final_intent = state.get("final_intent", {})
+        if not validate_final_intent_alignment(candidate, final_intent):
             continue
 
         s = score_response(candidate)
@@ -2573,6 +2598,12 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = await generate_validated_reply(system_prompt, messages, state)
 
     await commit_reply(update, user_id, text, reply)
+
+
+# ====================== ERROR HANDLER ======================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("Exception while handling update:", repr(context.error))
+    traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
 
 
 # ====================== PROAKTIIVISET VIESTIT ======================
@@ -2674,6 +2705,7 @@ def main():
     application.add_handler(CommandHandler("newgame", newgame_command))
     application.add_handler(CommandHandler("wipememory", wipememory_command))
     application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
+    application.add_error_handler(error_handler)
 
     async def post_init(app: Application):
         global background_task
