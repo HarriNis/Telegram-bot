@@ -764,29 +764,67 @@ def choose_strategy(state):
 # ====================== PLANNED EVENTS / COMMITMENTS SYSTEM ======================
 
 def detect_future_commitment(text):
-    t = text.lower()
+    t = text.lower().strip()
 
-    triggers = [
-        "huomenna", "myöhemmin", "kohta", "illalla",
-        "aion", "teen", "lupaan", "mennään", "haluan tehdä"
+    future_markers = [
+        "huomenna", "myöhemmin", "kohta", "illalla", "ensi yönä",
+        "ensi viikolla", "seuraavaksi"
     ]
 
-    if any(w in t for w in triggers):
+    intent_markers = [
+        "aion", "teen", "lupaan", "haluan tehdä", "ajattelin tehdä",
+        "mä teen", "mä aion", "mennään", "palaan siihen", "hoidan sen"
+    ]
+
+    if any(f in t for f in future_markers) and any(i in t for i in intent_markers):
         return True
+
+    if any(i in t for i in intent_markers):
+        # välttää liian lyhyet väärät osumat
+        if len(t) > 25:
+            return True
+
     return False
 
 
-def extract_plan_from_text(text):
-    # yksinkertainen versio
-    return text[:200]
+async def extract_plan_structured(text):
+    try:
+        resp = await safe_anthropic_call(
+            model="claude-sonnet-4-6",
+            max_tokens=120,
+            temperature=0.2,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        'Extract a concrete future plan from this message. '
+                        'Return JSON only: '
+                        '{"description":"...", "time_hint":"...", "is_real_plan":true}'
+                    )
+                },
+                {"role": "user", "content": text}
+            ]
+        )
+        parsed = json.loads(resp.content[0].text.strip())
+        return parsed
+    except Exception:
+        return {
+            "description": text[:200],
+            "time_hint": None,
+            "is_real_plan": True
+        }
 
 
-def register_plan(user_id, text):
+async def register_plan(user_id, text):
     state = get_or_create_state(user_id)
+    parsed = await extract_plan_structured(text)
+
+    if not parsed.get("is_real_plan", True):
+        return
 
     event = {
         "id": str(time.time()),
-        "description": extract_plan_from_text(text),
+        "description": parsed.get("description") or text[:200],
         "created_at": time.time(),
         "target_time": None,
         "status": "planned",
@@ -796,6 +834,51 @@ def register_plan(user_id, text):
 
     state["planned_events"].append(event)
     state["planned_events"] = state["planned_events"][-10:]
+    save_plan_to_db(user_id, event)
+
+
+def save_plan_to_db(user_id, event):
+    with db_lock:
+        cursor.execute("""
+            INSERT OR REPLACE INTO planned_events
+            (id, user_id, description, created_at, target_time, status, last_updated, evolution_log)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            event["id"],
+            str(user_id),
+            event["description"],
+            event["created_at"],
+            event["target_time"],
+            event["status"],
+            event["last_updated"],
+            json.dumps(event["evolution_log"], ensure_ascii=False)
+        ))
+        conn.commit()
+
+
+def load_plans_from_db(user_id):
+    with db_lock:
+        cursor.execute("""
+            SELECT id, description, created_at, target_time, status, last_updated, evolution_log
+            FROM planned_events
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (str(user_id),))
+        rows = cursor.fetchall()
+
+    plans = []
+    for row in rows:
+        plans.append({
+            "id": row[0],
+            "description": row[1],
+            "created_at": row[2],
+            "target_time": row[3],
+            "status": row[4],
+            "last_updated": row[5],
+            "evolution_log": json.loads(row[6]) if row[6] else []
+        })
+    return plans
 
 
 def update_plans(user_id):
@@ -803,17 +886,24 @@ def update_plans(user_id):
     now = time.time()
 
     for plan in state["planned_events"]:
-        if plan["status"] != "planned":
-            continue
+        original_status = plan["status"]
 
-        # yksinkertainen aging logic
-        age = now - plan["created_at"]
+        if plan["status"] == "planned":
+            age = now - plan["created_at"]
 
-        if age > 3600:
-            plan["status"] = "in_progress"
+            if age > 3600:
+                plan["status"] = "in_progress"
 
-        if age > 86400:
-            plan["status"] = "done"
+            if age > 86400:
+                plan["status"] = "done"
+
+        if plan["status"] != original_status:
+            plan["last_updated"] = now
+            plan["evolution_log"].append({
+                "time": now,
+                "change": f"status changed from {original_status} to {plan['status']}"
+            })
+            save_plan_to_db(user_id, plan)
 
 
 def maybe_evolve_plan(user_id):
@@ -838,9 +928,191 @@ def maybe_evolve_plan(user_id):
                 "change": change
             })
 
+            save_plan_to_db(user_id, plan)
             return plan, change
 
     return None, None
+
+
+# ====================== FINAL INTENT RESOLVER ======================
+
+def resolve_state_conflicts(state):
+    conflicts = []
+
+    # Emotion vs strategy
+    emotional_mode = state.get("emotional_mode")
+    strategy = state.get("current_strategy")
+    plan_events = state.get("planned_events", [])
+
+    if emotional_mode in ["jealous", "intense", "provocative"] and strategy == "reward selectively":
+        conflicts.append("emotion_overrides_reward")
+
+    # Planned event changed should override neutral flow
+    if plan_events:
+        latest = plan_events[-1]
+        if latest.get("status") == "changed":
+            conflicts.append("changed_plan_requires_acknowledgement")
+
+    # Pending narrative overrides random initiative
+    if state.get("pending_narrative"):
+        conflicts.append("pending_narrative_priority")
+
+    # Physical realism always highest
+    if state.get("location_status") == "together" and state.get("scene") in ["work", "commute", "public"]:
+        conflicts.append("shared_scene_physical_lock")
+
+    state["state_conflicts"] = conflicts
+    return conflicts
+
+
+async def select_salient_memory(user_id, text, memories):
+    state = get_or_create_state(user_id)
+
+    if not memories:
+        state["salient_memory"] = None
+        return None
+
+    # Kevyt heuristiikka ensin
+    scored = []
+
+    for m in memories:
+        score = 0
+        lower = m.lower()
+
+        if any(w in text.lower() for w in ["ikävä", "haluan", "tule", "miksi", "muistatko"]):
+            if any(x in lower for x in ["ikävä", "haluan", "tunne", "fantasy", "sensitive"]):
+                score += 2
+
+        if "image_sent" in lower:
+            score += 1
+
+        if '"type": "fantasy"' in lower:
+            score += 2
+
+        if '"type": "dynamic"' in lower:
+            score += 1
+
+        scored.append((score, m))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+    best = scored[0][1] if scored else None
+
+    state["salient_memory"] = best
+    state["salient_memory_updated"] = time.time()
+    return best
+
+
+def apply_memory_to_state(state):
+    mem = state.get("salient_memory")
+    if not mem:
+        return
+
+    lower = mem.lower()
+
+    if "ikävä" in lower or "tarvitsen" in lower:
+        state["emotional_mode"] = "warm" if state["emotional_mode"] == "calm" else state["emotional_mode"]
+
+    if "valehtelet" in lower or "väärin" in lower:
+        if state["emotional_mode"] not in ["jealous", "intense"]:
+            state["emotional_mode"] = "testing"
+
+    if '"type": "fantasy"' in lower and state.get("phase") in ["building", "testing", "intense"]:
+        state["active_drive"] = "revisit a shared fantasy"
+
+
+def get_plan_pressure(state):
+    plans = state.get("planned_events", [])
+    if not plans:
+        return None
+
+    latest = plans[-1]
+    status = latest.get("status")
+
+    if status == "changed":
+        return {
+            "priority": "high",
+            "reason": "changed_plan",
+            "event": latest
+        }
+
+    if status == "in_progress":
+        return {
+            "priority": "medium",
+            "reason": "progressed_plan",
+            "event": latest
+        }
+
+    if status == "planned":
+        age = time.time() - latest.get("created_at", time.time())
+        if age < 3600:
+            return {
+                "priority": "low",
+                "reason": "recent_plan",
+                "event": latest
+            }
+
+    return None
+
+
+def resolve_final_intent(state):
+    conflicts = resolve_state_conflicts(state)
+    plan_pressure = get_plan_pressure(state)
+
+    emotional_mode = state.get("emotional_mode", "calm")
+    strategy = state.get("current_strategy")
+    active_drive = state.get("active_drive")
+    master_plan = state.get("master_plan")
+    scene = state.get("scene")
+    action = state.get("current_action")
+    salient_memory = state.get("salient_memory")
+
+    final = {
+        "primary_mode": emotional_mode,
+        "primary_goal": active_drive or strategy or master_plan or "continue naturally",
+        "must_acknowledge_plan": False,
+        "must_reference_memory": False,
+        "must_preserve_scene": True,
+        "tone_constraint": None,
+        "behavior_constraint": None,
+        "dominant_reason": None
+    }
+
+    # Highest priority: physical continuity
+    final["must_preserve_scene"] = True
+
+    # Pending narrative override
+    if "pending_narrative_priority" in conflicts:
+        final["dominant_reason"] = "pending_narrative"
+        final["behavior_constraint"] = "continue same interrupted moment"
+
+    # Changed plan override
+    elif "changed_plan_requires_acknowledgement" in conflicts:
+        final["dominant_reason"] = "changed_plan"
+        final["must_acknowledge_plan"] = True
+        final["tone_constraint"] = "naturally acknowledge changed plan"
+
+    # Strong emotional override
+    elif emotional_mode in ["jealous", "intense", "provocative"]:
+        final["dominant_reason"] = emotional_mode
+        final["tone_constraint"] = emotional_mode
+        final["behavior_constraint"] = "emotion leads the reply"
+
+    # Strategy layer
+    elif strategy:
+        final["dominant_reason"] = "strategy"
+        final["behavior_constraint"] = strategy
+
+    # Plan pressure even without direct conflict
+    if plan_pressure and plan_pressure["priority"] in ["high", "medium"]:
+        final["must_acknowledge_plan"] = True
+
+    # Memory bridge
+    if salient_memory:
+        final["must_reference_memory"] = random.random() < 0.4
+
+    state["final_intent"] = final
+    state["final_intent_updated"] = time.time()
+    return final
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -863,6 +1135,19 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS profiles (
     user_id TEXT PRIMARY KEY,
     data TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS planned_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    description TEXT,
+    created_at REAL,
+    target_time REAL,
+    status TEXT,
+    last_updated REAL,
+    evolution_log TEXT
 )
 """)
 conn.commit()
@@ -932,6 +1217,7 @@ async def wipe_all_memory(user_id):
     with db_lock:
         cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
         conn.commit()
 
     print(f"[WIPE MEMORY] Fully wiped all memory for user {user_id}")
@@ -1314,8 +1600,18 @@ def get_or_create_state(user_id):
             # PLANNED EVENTS / COMMITMENTS
             "planned_events": [],
             "last_plan_check": 0,
+
+            # FINAL INTENT RESOLVER
+            "final_intent": None,
+            "final_intent_updated": 0,
+            "state_conflicts": [],
+            "last_plan_reference": 0,
+            "salient_memory": None,
+            "salient_memory_updated": 0,
+            "forced_disclosure": None,
         }
         continuity_state[user_id].update(init_scene_state())
+        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
     return continuity_state[user_id]
 
 def detect_intent(text):
@@ -2221,6 +2517,14 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if side_key:
             state["active_side_character"] = side_key
 
+        # Final Intent Resolver
+        memories = await retrieve_memories(user_id, text)
+        memory_context = build_memory_context(memories)
+
+        salient_memory = await select_salient_memory(user_id, text, memories)
+        apply_memory_to_state(state)
+        final_intent = resolve_final_intent(state)
+
         system_prompt = (
             get_system_prompt(user_id)
             + "\n" + reality
@@ -2247,8 +2551,6 @@ Your response MUST reflect this exact situation.
             "content": get_recent_actions(user_id)
         })
 
-        memories = await retrieve_memories(user_id, text)
-        memory_context = build_memory_context(memories)
         messages.insert(0, {
             "role": "user",
             "content": f"Relevant past interactions:\n{memory_context}"
@@ -2529,6 +2831,37 @@ If the plan has changed or progressed:
 """
             })
 
+        # Unified decision layer
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Unified decision layer for this reply:
+
+Final intent:
+{json.dumps(state.get('final_intent', {}), ensure_ascii=False)}
+
+Rules:
+- This is the single most important direction for the reply
+- Do NOT let lower-priority impulses contradict it
+- Preserve physical continuity at all times
+- If must_acknowledge_plan is true, naturally mention the relevant plan progression or change
+- If must_reference_memory is true, subtly reflect the relevant memory
+- The reply must feel like one coherent mind, not multiple conflicting impulses
+"""
+        })
+
+        forced = state.get("forced_disclosure")
+        if forced:
+            messages.insert(0, {
+                "role": "user",
+                "content": f"""
+You have a required disclosure in this reply:
+{json.dumps(forced, ensure_ascii=False)}
+
+You MUST include it naturally before moving to anything else.
+"""
+            })
+
         history = clean_history(conversation_history[user_id])
 
         safe_history = [
@@ -2599,7 +2932,10 @@ If the plan has changed or progressed:
 
         # PLANNED EVENTS: register if commitment detected
         if detect_future_commitment(reply):
-            register_plan(user_id, reply)
+            await register_plan(user_id, reply)
+
+        # Forced disclosure nollaus
+        state["forced_disclosure"] = None
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -2735,10 +3071,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) + PLANNED EVENTS / COMMITMENTS SYSTEM käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) + PLANNED EVENTS / COMMITMENTS SYSTEM + FINAL INTENT RESOLVER käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning + planned events) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning + planned events + final intent resolver) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
