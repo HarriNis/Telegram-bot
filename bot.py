@@ -1683,7 +1683,6 @@ Before answering:
                 "content": "Do not be passive. Take initiative in this reply."
             })
 
-        # PERSONA CHECK
         messages.insert(0, {
             "role": "user",
             "content": """
@@ -1942,4 +1941,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-``` 300
+``` "goal
