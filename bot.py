@@ -284,41 +284,72 @@ def build_exit_story(user_id, reason):
             f"päätin vähän katsoa mitä sä teet jos en vastaa heti"
         ])
 
-def maybe_trigger_narrative_exit(user_id, text):
+# ====================== MULTI-STAGE JEALOUSY SYSTEM ======================
+def update_jealousy_stage(user_id):
+    state = get_or_create_state(user_id)
+
+    if state["jealousy_stage"] == 0:
+        return
+
+    elapsed = time.time() - state["jealousy_started"]
+
+    # Stage 1 → Stage 2
+    if state["jealousy_stage"] == 1 and elapsed > 300:
+        state["jealousy_stage"] = 2
+
+    # Stage 2 → Stage 3
+    elif state["jealousy_stage"] == 2 and elapsed > 900:
+        state["jealousy_stage"] = 3
+
+def maybe_trigger_jealousy(user_id, text):
     state = get_or_create_state(user_id)
 
     if not can_trigger_exit(state):
         return False
 
+    if state["jealousy_stage"] > 0:
+        return False
+
     intent = state["intent"]
     tension = state["tension"]
 
-    trigger = False
-    reason = None
-
-    # 💢 Konflikti → lähtee pois
     if intent == "conflict" and tension > 0.4:
-        trigger = True
-        reason = "angry_exit"
-
-    # 😏 Flirtti / kiusoittelu → leikki mustasukkaisuudella
-    elif intent in ["playful", "intimate"] and tension > 0.5 and random.random() < 0.25:
-        trigger = True
-        reason = "tease_exit"
-
-    if not trigger:
+        stage = 2
+    elif intent in ["playful", "intimate"] and tension > 0.5:
+        stage = 1
+    else:
         return False
 
-    duration = random.randint(300, 1800)
+    state["jealousy_stage"] = stage
+    state["jealousy_started"] = time.time()
+    state["ignore_until"] = time.time() + random.randint(300, 900)
 
-    state["ignore_until"] = time.time() + duration
-    state["pending_narrative"] = build_exit_story(user_id, reason)
+    state["jealousy_context"] = build_exit_story(user_id, "tease_exit")
 
     return True
 
 def should_ignore_user(user_id):
     state = get_or_create_state(user_id)
     return time.time() < state.get("ignore_until", 0)
+
+def inject_third_person_hint(text, stage):
+    hints = {
+        2: [
+            "…tässä on vähän hälinää ympärillä",
+            "…joku just keskeytti mut",
+            "*vilkaisee sivulle hetkeksi*"
+        ],
+        3: [
+            "…sä et edes tiedä mitä täällä tapahtuu",
+            "*hymyilee vähän itsekseen*",
+            "…mä en kerro ihan kaikkea vielä"
+        ]
+    }
+
+    if stage in hints and random.random() < 0.6:
+        return text + " " + random.choice(hints[stage])
+
+    return text
 
 async def handle_delayed_return(application, user_id):
     state = get_or_create_state(user_id)
@@ -352,10 +383,23 @@ Rules:
 
     text = response.content[0].text.strip()
 
+    # Third person presence
+    stage = state.get("jealousy_stage", 0)
+    text = inject_third_person_hint(text, stage)
+
     await application.bot.send_message(chat_id=user_id, text=text)
 
+    # Memory link
+    state["last_jealousy_event"] = {
+        "context": seed,
+        "timestamp": time.time(),
+        "stage": state.get("jealousy_stage")
+    }
+
+    # Reset stage
     state["pending_narrative"] = None
     state["ignore_until"] = 0
+    state["jealousy_stage"] = 0
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -791,6 +835,12 @@ def get_or_create_state(user_id):
             "image_history": [],
             "ignore_until": 0,
             "pending_narrative": None,
+
+            # MULTI-STAGE JEALOUSY
+            "jealousy_stage": 0,
+            "jealousy_started": 0,
+            "jealousy_context": None,
+            "last_jealousy_event": None,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1558,7 +1608,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if should_ignore_user(user_id):
-        if random.random() < 0.15:
+        state = get_or_create_state(user_id)
+        if state["jealousy_stage"] >= 2 and random.random() < 0.2:
             await message.reply_text("*nähty*")
         return
 
@@ -1592,8 +1643,8 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
-        # Narrative exit trigger
-        if maybe_trigger_narrative_exit(user_id, text):
+        # MULTI-STAGE JEALOUSY TRIGGER
+        if maybe_trigger_jealousy(user_id, text):
             if random.random() < 0.6:
                 exit_msg = random.choice([
                     "*huokaa* mä en jaksa tätä nyt…",
@@ -1610,6 +1661,13 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (state.get("pending_narrative") and 
             time.time() > state.get("ignore_until", 0)):
             await handle_delayed_return(context.application, user_id)
+
+        # Random recall of previous jealousy event
+        event = state.get("last_jealousy_event")
+        if event and random.random() < 0.2:
+            # This will be inserted later in messages
+
+            pass  # handled in prompt building
 
         update_working_memory(user_id, text)
         await update_arcs(user_id, text)
@@ -1737,6 +1795,17 @@ Your response MUST reflect this exact situation.
                     )
                 })
 
+        # Jealousy stage recall
+        event = state.get("last_jealousy_event")
+        if event and random.random() < 0.2:
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"You remember earlier when: {event['context']}. "
+                    "You may subtly refer back to it."
+                )
+            })
+
         direction = f"""
 Current direction:
 - Intent: {state['intent']}
@@ -1779,6 +1848,19 @@ You MUST:
             "role": "user",
             "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
         })
+
+        # Provoke stage (Stage 3)
+        if state.get("jealousy_stage") == 3:
+            messages.insert(0, {
+                "role": "user",
+                "content": """
+You are in provocative mode:
+- slightly dominant
+- slightly secretive
+- do not reassure the user
+- maintain tension
+"""
+            })
 
         messages.append({
             "role": "user",
@@ -2054,10 +2136,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
