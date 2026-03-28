@@ -168,6 +168,8 @@ def force_scene_from_text(state, text, now):
     return False
 
 def maybe_transition_scene(state, now):
+    if state.get("location_status") == "together":
+        return state["scene"]
     if now - state["last_scene_change"] < MIN_SCENE_DURATION:
         return state["scene"]
     if now < state["scene_locked_until"]:
@@ -180,6 +182,7 @@ def maybe_transition_scene(state, now):
         new_scene = random.choice(allowed)
         _set_scene(state, new_scene, now)
         state["micro_context"] = random.choice(SCENE_MICRO[new_scene])
+        state["last_scene_source"] = "auto"
     return state["scene"]
 
 def update_action(state, now):
@@ -263,7 +266,10 @@ def get_recent_actions(user_id):
 
 # ====================== NARRATIVE EXIT SYSTEM (diegeettinen poistuminen) ======================
 def can_trigger_exit(state):
-    return state["scene"] in ["work", "public", "commute"]
+    return (
+        state["scene"] in ["work", "public", "commute"]
+        and state.get("location_status") == "separate"
+    )
 
 def build_exit_story(user_id, reason):
     state = get_or_create_state(user_id)
@@ -401,6 +407,46 @@ Rules:
     state["ignore_until"] = 0
     state["jealousy_stage"] = 0
 
+# ====================== FYYSINEN TOD ELLISUUS - LUKITUS ======================
+def set_location_status(state, status):
+    if status not in ["together", "separate"]:
+        return
+
+    state["location_status"] = status
+    state["with_user_physically"] = (status == "together")
+    state["shared_scene"] = (status == "together")
+
+def leave_shared_scene(state, new_scene, now):
+    if state.get("location_status") != "together":
+        return False
+
+    set_location_status(state, "separate")
+    _set_scene(state, new_scene, now)
+    state["micro_context"] = random.choice(SCENE_MICRO.get(new_scene, [""]))
+    state["last_scene_source"] = "transition"
+    return True
+
+def validate_scene_consistency(state, reply):
+    r = reply.lower()
+
+    if state.get("location_status") == "together":
+        forbidden = ["bussissa", "junassa", "toimistolla", "kaupassa", "ulkona yksin", "matkalla"]
+        if any(x in r for x in forbidden):
+            return False
+
+    current_scene = state.get("scene")
+
+    if current_scene == "home" and any(x in r for x in ["toimistolla", "bussissa", "kaupassa"]):
+        return False
+
+    if current_scene == "work" and any(x in r for x in ["sängyssä", "sohvalla kotona"]):
+        return False
+
+    if current_scene == "bed" and any(x in r for x in ["toimistolla", "kaupassa", "bussissa"]):
+        return False
+
+    return True
+
 # ====================== EMOTION ESCALATION MAP ======================
 EMOTION_ESCALATION_MAP = {
     "calm": {
@@ -445,7 +491,7 @@ def update_emotional_mode(user_id):
     state = get_or_create_state(user_id)
     now = now_ts()
 
-    if now - state.get("emotional_mode_last_change", 0) < 240:  # ~4 min cooldown
+    if now - state.get("emotional_mode_last_change", 0) < 240:
         return state["emotional_mode"]
 
     current = state["emotional_mode"]
@@ -456,7 +502,6 @@ def update_emotional_mode(user_id):
     map_entry = EMOTION_ESCALATION_MAP.get(current, EMOTION_ESCALATION_MAP["calm"])
     allowed_next = map_entry["allowed_next"]
 
-    # Logiikka siirtymille
     if jealousy_stage >= 2 and "jealous" in allowed_next:
         next_mode = "jealous"
     elif tension > 0.7 and "intense" in allowed_next:
@@ -467,12 +512,11 @@ def update_emotional_mode(user_id):
         next_mode = "playful"
     elif tension < 0.3 and "cooling" in allowed_next:
         next_mode = "cooling"
-    elif random.random() < 0.35:  # satunnainen kevyt muutos
+    elif random.random() < 0.35:
         next_mode = random.choice([m for m in allowed_next if m != current])
     else:
-        return current  # ei muutosta
+        return current
 
-    # Varmista että next_mode on sallittu
     if next_mode in allowed_next:
         state["emotional_mode"] = next_mode
         state["emotional_mode_last_change"] = now
@@ -923,6 +967,12 @@ def get_or_create_state(user_id):
             # EMOTION ESCALATION MAP
             "emotional_mode": "calm",
             "emotional_mode_last_change": 0,
+
+            # FYYSINEN TOD ELLISUUS
+            "location_status": "separate",
+            "with_user_physically": False,
+            "shared_scene": False,
+            "last_scene_source": None,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1545,6 +1595,19 @@ Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
 Current interaction phase: {state.get('phase', 'neutral')}
 Current emotional mode: {state.get('emotional_mode', 'calm')}
 
+Physical continuity rules:
+- Location status: {state.get('location_status', 'separate')}
+- With user physically: {state.get('with_user_physically', False)}
+- Shared scene: {state.get('shared_scene', False)}
+
+If location status is "together":
+- you and the user are physically in the same place
+- you may not place yourself somewhere else
+- you may not describe yourself as traveling, being at work, in a bus, in a store, or elsewhere unless you explicitly leave first
+
+Emotional changes do NOT change physical location.
+Tone may shift fast, but place changes slowly and only through believable transitions.
+
 If tension is high: be more intense, direct, or provocative.
 If tension is low: build it slowly and introduce something new.
 
@@ -2069,6 +2132,9 @@ Before answering:
             if breaks_scene_logic(candidate, state) or breaks_temporal_logic(candidate, state):
                 continue
 
+            if not validate_scene_consistency(state, candidate):
+                continue
+
             s = score_response(candidate)
             if s > best_score:
                 best_score = s
@@ -2233,10 +2299,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
