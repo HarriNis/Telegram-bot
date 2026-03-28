@@ -119,7 +119,7 @@ Identity constraints:
 Wardrobe (use these when generating images or describing outfits):
 {chr(10).join("- " + r for r in CORE_PERSONA["wardrobe"])}
 
-When talking about sex or relationship matters, use the proper names for body parts and acts (penis, vagina, vittu, naida, sperma, orgasmi, etc.) but you can give longer, more elaborate and seductive descriptions instead of being blunt and short.
+When talking about sex or relationship matters, be direct, explicit and unapologetic.
 
 These are ALWAYS active and OVERRIDE mood, evolution, or randomness.
 """
@@ -282,7 +282,7 @@ def reinforce_micro_context(state):
 def get_recent_actions(user_id):
     return "No recent actions."
 
-# ====================== NARRATIVE EXIT SYSTEM ======================
+# ====================== NARRATIVE EXIT SYSTEM (diegeettinen poistuminen) ======================
 def can_trigger_exit(state):
     return (
         state["scene"] in ["work", "public", "commute"]
@@ -626,6 +626,7 @@ def update_user_model(state, text):
     if any(w in t for w in ["en tee", "ei käy", "lopeta"]):
         model["control_resistance"] += 0.05
 
+    # clamp
     for k in model:
         if k != "last_updated":
             model[k] = max(0.0, min(1.0, model[k]))
@@ -683,15 +684,19 @@ def detect_reward_signals(text):
         "emotional_attachment": 0.0
     }
 
+    # Mustasukkaisuus
     if any(w in t for w in ["kuka se oli", "kenen kanssa", "toinen mies", "et kuulu muille"]):
         signals["jealousy"] += 1.0
 
+    # Kiihotus (pidä ei-graafisena)
     if any(w in t for w in ["haluan sua", "kiihottaa", "en kestä", "pakko saada"]):
         signals["arousal"] += 1.0
 
+    # Alistuminen
     if any(w in t for w in ["teen mitä haluat", "mä totteelen", "sä päätät", "olen sun"]):
         signals["submission"] += 1.0
 
+    # Emotionaalinen kiinnittyminen
     if any(w in t for w in ["ikävä", "tarvitsen sua", "älä jätä", "olet tärkeä"]):
         signals["emotional_attachment"] += 1.0
 
@@ -732,6 +737,7 @@ def update_strategy_score(state, strategy, reward):
 def choose_strategy(state):
     stats = state.get("strategy_stats", {})
 
+    # fallback jos ei dataa
     if not stats:
         return random.choice([
             "assert control",
@@ -751,6 +757,7 @@ def choose_strategy(state):
 
     scored.sort(reverse=True)
 
+    # 20% eksploraatio
     if random.random() < 0.2:
         return random.choice(list(stats.keys()))
 
@@ -775,6 +782,7 @@ def detect_future_commitment(text):
         return True
 
     if any(i in t for i in intent_markers):
+        # välttää liian lyhyet väärät osumat
         if len(t) > 25:
             return True
 
@@ -799,8 +807,7 @@ async def extract_plan_structured(text):
                 {"role": "user", "content": text}
             ]
         )
-        raw = resp.content[0].text.strip()
-        parsed = json.loads(raw)
+        parsed = json.loads(resp.content[0].text.strip())
         return parsed
     except Exception:
         return {
@@ -946,6 +953,7 @@ def build_world_state(state):
 def resolve_state_conflicts(state):
     conflicts = []
 
+    # Emotion vs strategy
     emotional_mode = state.get("emotional_mode")
     strategy = state.get("current_strategy")
     plan_events = state.get("planned_events", [])
@@ -953,14 +961,17 @@ def resolve_state_conflicts(state):
     if emotional_mode in ["jealous", "intense", "provocative"] and strategy == "reward selectively":
         conflicts.append("emotion_overrides_reward")
 
+    # Planned event changed should override neutral flow
     if plan_events:
         latest = plan_events[-1]
         if latest.get("status") == "changed":
             conflicts.append("changed_plan_requires_acknowledgement")
 
+    # Pending narrative overrides random initiative
     if state.get("pending_narrative"):
         conflicts.append("pending_narrative_priority")
 
+    # Physical realism always highest
     if state.get("location_status") == "together" and state.get("scene") in ["work", "commute", "public"]:
         conflicts.append("shared_scene_physical_lock")
 
@@ -975,6 +986,7 @@ async def select_salient_memory(user_id, text, memories):
         state["salient_memory"] = None
         return None
 
+    # Kevyt heuristiikka ensin
     scored = []
 
     for m in memories:
@@ -1064,6 +1076,8 @@ def resolve_final_intent(state):
     strategy = state.get("current_strategy")
     active_drive = state.get("active_drive")
     master_plan = state.get("master_plan")
+    scene = state.get("scene")
+    action = state.get("current_action")
     salient_memory = state.get("salient_memory")
 
     final = {
@@ -1077,29 +1091,36 @@ def resolve_final_intent(state):
         "dominant_reason": None
     }
 
+    # Highest priority: physical continuity
     final["must_preserve_scene"] = True
 
+    # Pending narrative override
     if "pending_narrative_priority" in conflicts:
         final["dominant_reason"] = "pending_narrative"
         final["behavior_constraint"] = "continue same interrupted moment"
 
+    # Changed plan override
     elif "changed_plan_requires_acknowledgement" in conflicts:
         final["dominant_reason"] = "changed_plan"
         final["must_acknowledge_plan"] = True
         final["tone_constraint"] = "naturally acknowledge changed plan"
 
+    # Strong emotional override
     elif emotional_mode in ["jealous", "intense", "provocative"]:
         final["dominant_reason"] = emotional_mode
         final["tone_constraint"] = emotional_mode
         final["behavior_constraint"] = "emotion leads the reply"
 
+    # Strategy layer
     elif strategy:
         final["dominant_reason"] = "strategy"
         final["behavior_constraint"] = strategy
 
+    # Plan pressure even without direct conflict
     if plan_pressure and plan_pressure["priority"] in ["high", "medium"]:
         final["must_acknowledge_plan"] = True
 
+    # Memory bridge
     if salient_memory:
         final["must_reference_memory"] = random.random() < 0.4
 
@@ -1298,14 +1319,13 @@ async def update_arcs(user_id, text):
                 {"role": "user", "content": joined}
             ]
         )
-        raw = resp.content[0].text.strip()
-        parsed = json.loads(raw)
+        parsed = json.loads(resp.content[0].text.strip())
         arcs = parsed.get("arcs", [])
         if arcs:
             state["relationship_arcs"] = arcs
             state["active_arc"] = arcs[0]
             state["arc_last_update"] = now
-    except Exception:
+    except:
         pass
 
 async def update_goal(user_id, text):
@@ -1414,8 +1434,7 @@ async def update_prediction(user_id, text):
                 {"role": "user", "content": f"Recent conversation:\n{history_text}\n\nLatest user text:\n{text}"}
             ]
         )
-        raw = resp.content[0].text.strip()
-        parsed = json.loads(raw)
+        parsed = json.loads(resp.content[0].text.strip())
         state["prediction"] = {
             "next_user_intent": parsed.get("next_user_intent"),
             "next_user_mood": parsed.get("next_user_mood"),
@@ -1552,27 +1571,33 @@ def get_or_create_state(user_id):
             "side_characters": DEFAULT_SIDE_CHARACTERS.copy(),
             "active_side_character": None,
 
+            # UUSI: kuvamuisti
             "last_image": None,
             "image_history": [],
             "ignore_until": 0,
             "pending_narrative": None,
 
+            # MULTI-STAGE JEALOUSY
             "jealousy_stage": 0,
             "jealousy_started": 0,
             "jealousy_context": None,
             "last_jealousy_event": None,
 
+            # EMOTION ESCALATION MAP
             "emotional_mode": "calm",
             "emotional_mode_last_change": 0,
 
+            # FYYSINEN TOD ELLISUUS
             "location_status": "separate",
             "with_user_physically": False,
             "shared_scene": False,
             "last_scene_source": None,
 
+            # ACTIVE DRIVE
             "active_drive": None,
             "interaction_arc_progress": 0.0,
 
+            # USER MODEL + MASTER PLAN
             "user_model": {
                 "dominance_preference": 0.5,
                 "emotional_dependency": 0.5,
@@ -1586,9 +1611,11 @@ def get_or_create_state(user_id):
             "strategy_updated": 0,
             "strategy_stats": {},
 
+            # PLANNED EVENTS / COMMITMENTS
             "planned_events": [],
             "last_plan_check": 0,
 
+            # FINAL INTENT RESOLVER
             "final_intent": None,
             "final_intent_updated": 0,
             "state_conflicts": [],
@@ -1665,13 +1692,12 @@ async def update_core_desires(user_id, text):
             temperature=0.4,
             messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
         )
-        raw = resp.content[0].text.strip()
-        parsed = json.loads(raw)
+        parsed = json.loads(resp.content[0].text.strip())
         desires = parsed.get("desires", [])
         if desires:
             state["core_desires"] = desires[:4]
             state["desire_profile_updated"] = now
-    except Exception:
+    except:
         pass
     return state["core_desires"]
 
@@ -1789,7 +1815,7 @@ Current continuity state:
 - Current intent: {state['intent']}
 """
 
-# ====================== MEMORY SCORING ======================
+# ====================== MEMORY SCORING (retrieval optimization) ======================
 async def retrieve_memories(user_id, query, limit=8):
     try:
         q_emb = await get_embedding(query)
@@ -1855,20 +1881,19 @@ async def extract_and_store(user_id, text):
             messages=[{"role": "user", "content": "Poimi tärkeät faktat, mieltymykset ja tapahtumat JSON-muodossa. Palauta vain JSON: {\"facts\":[],\"preferences\":[],\"events\":[]}"},
                       {"role": "user", "content": text}]
         )
-        raw = resp.content[0].text.strip()
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            print("JSON parse failed in extract_and_store:", raw)
-            return
+        data = resp.content[0].text.strip()
         profile = load_profile(user_id)
-        for k in ["facts", "preferences", "events"]:
-            if k in parsed:
-                for item in parsed[k]:
-                    if item not in profile[k]:
-                        profile[k].append(item)
-                profile[k] = profile[k][-20:]
-        save_profile(user_id, profile)
+        try:
+            parsed = json.loads(data)
+            for k in ["facts", "preferences", "events"]:
+                if k in parsed:
+                    for item in parsed[k]:
+                        if item not in profile[k]:
+                            profile[k].append(item)
+                    profile[k] = profile[k][-20:]
+            save_profile(user_id, profile)
+        except:
+            pass
         await store_memory(user_id, text)
     except Exception as e:
         print("Extraction error:", e)
@@ -1922,7 +1947,7 @@ async def store_dialogue_turn(user_id, user_text, assistant_text):
     except Exception as e:
         print("Dialogue turn store error:", e)
 
-# ====================== IMAGE REGISTRATION ======================
+# ====================== UUSI: KUVATAPAHTUMIEN TALLENNUS ======================
 def register_sent_image(user_id, user_text, image_url=None, prompt_used=None):
     state = get_or_create_state(user_id)
 
@@ -1960,7 +1985,7 @@ async def store_image_event(user_id, user_text, image_url=None, prompt_used=None
     except Exception as e:
         print("Image event store error:", e)
 
-# ====================== IMAGE REFERENCE HELPERS ======================
+# ====================== UUSI: KUVA-VIITTAUS HELPERS ======================
 def user_refers_to_previous_image(text):
     t = text.lower()
     triggers = [
@@ -1993,19 +2018,6 @@ def clean_history(history):
             continue
         cleaned.append(msg)
     return cleaned
-
-def sanitize_messages(history):
-    safe = []
-    for msg in history:
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") not in {"user", "assistant"}:
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        safe.append({"role": msg["role"], "content": content})
-    return safe
 
 def safe_join(items):
     return "\n".join([str(x) for x in items if x])
@@ -2063,29 +2075,6 @@ def enforce_behavior_rules(reply: str):
         reply += " …sä tiedät kyllä mitä mä haluan sulta."
     return reply
 
-# ====================== VALIDATION HELPERS ======================
-def validate_final_intent_alignment(reply, final_intent):
-    if not final_intent:
-        return True
-
-    r = reply.lower()
-
-    if final_intent.get("must_acknowledge_plan"):
-        plan_markers = [
-            "suunnitelma", "muutin", "meni eri tavalla", "palaan siihen",
-            "aiemmin sanoin", "se muuttui", "toisin kuin ajattelin"
-        ]
-        if not any(x in r for x in plan_markers):
-            return False
-
-    if final_intent.get("must_reference_memory"):
-        return True
-
-    if final_intent.get("behavior_constraint") == "continue same interrupted moment":
-        return True
-
-    return True
-
 # ====================== SAFE IMAGE PROMPT ======================
 def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     text = (user_text or "").strip()
@@ -2110,6 +2099,7 @@ def build_safe_image_prompt(user_text: str, user_id: int) -> str:
     }
     current_scene = scene_map.get(state["scene"], "kotona")
 
+    # Laajennettu wardrobe + full body + eri kulmat
     wardrobe_options = CORE_PERSONA["wardrobe"]
     outfit = random.choice(wardrobe_options)
 
@@ -2370,7 +2360,7 @@ async def generate_image_hybrid(prompt: str):
 
     return None
 
-# ====================== IMAGE GENERATION ======================
+# ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
     user_id = update.effective_user.id
     image_data = None
@@ -2434,238 +2424,559 @@ async def generate_and_send_image(update: Update, user_text: str):
         except:
             await update.message.reply_text("...en saanut kuvaa luotua nyt.")
 
-# ====================== VALIDATION HELPERS ======================
-def validate_final_intent_alignment(reply, final_intent):
-    if not final_intent:
-        return True
-
-    r = reply.lower()
-
-    if final_intent.get("must_acknowledge_plan"):
-        plan_markers = [
-            "suunnitelma", "muutin", "meni eri tavalla", "palaan siihen",
-            "aiemmin sanoin", "se muuttui", "toisin kuin ajattelin"
-        ]
-        if not any(x in r for x in plan_markers):
-            return False
-
-    if final_intent.get("must_reference_memory"):
-        return True
-
-    if final_intent.get("behavior_constraint") == "continue same interrupted moment":
-        return True
-
-    return True
-
-# ====================== REFAKTOROIDUT FUNKTIOT ======================
-
-def extract_input(update: Update):
-    user_id = update.effective_user.id
+# ====================== MEGAN_CHAT ======================
+async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
-        return user_id, ""
-    text = (update.message.text or update.message.caption or "").strip()
-    return user_id, text
+        return
+    user_id = update.effective_user.id
+    message = update.message
+    text = (message.text or message.caption or "").strip()
 
-
-def handle_commands(user_id, text, update):
     if text.lower() in ["stop", "lopeta kaikki", "keskeytä"]:
-        asyncio.create_task(new_game_reset(user_id))
-        asyncio.create_task(update.message.reply_text("…Okei. Aloitetaan alusta."))
-        return True
+        await new_game_reset(user_id)
+        await message.reply_text("…Okei. Aloitetaan sitten alusta, jos haluat.")
+        return
 
     if should_ignore_user(user_id):
-        return True
+        state = get_or_create_state(user_id)
+        if state["jealousy_stage"] >= 2 and random.random() < 0.2:
+            await message.reply_text("*nähty*")
+        return
 
-    image_keywords = ["lähetä kuva", "selfie", "tee kuva"]
-    if any(k in text.lower() for k in image_keywords):
-        asyncio.create_task(generate_and_send_image(update, text))
-        return True
+    image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic"]
+    if any(kw in text.lower() for kw in image_keywords):
+        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+        await generate_and_send_image(update, text)
+        await extract_and_store(user_id, text)
+        return
 
-    return False
+    update_moods(text)
+    recent_user.append(text)
+    is_low_input = len(text.strip()) < 8
 
+    thinking = None
 
-def update_internal_state(user_id, text):
-    state = update_continuity_state(user_id, text)
+    try:
+        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
 
-    adapt_mode_to_user(user_id, text)
-    update_persona_mode(user_id)
+        thinking = await message.reply_text("…", disable_notification=True)
 
-    update_desire(user_id, text)
-    update_tension(user_id, text)
-    update_phase(user_id, text)
-    update_emotional_mode(user_id)
-    update_active_drive(user_id)
+        adapt_mode_to_user(user_id, text)
+        mode = update_persona_mode(user_id)
 
-    update_user_model(state, text)
-    update_master_plan(state)
+        elapsed_label = get_elapsed_label(user_id)
+        state = update_continuity_state(user_id, text)
+        desire = update_desire(user_id, text)
+        core_desires = await update_core_desires(user_id, text)
+        tension = update_tension(user_id, text)
+        phase = update_phase(user_id, text)
 
-    state["current_strategy"] = choose_strategy(state)
+        emotional_mode = update_emotional_mode(user_id)
 
-    update_plans(user_id)
+        # ACTIVE DRIVE
+        active_drive = update_active_drive(user_id)
+        update_arc_progress(state)
 
-    return state
+        # --- NEW: USER MODEL + PLANNING ---
+        update_user_model(state, text)
+        plan = update_master_plan(state)
+        strategy = choose_strategy(state)
 
+        state["current_strategy"] = strategy
 
-async def handle_memory_layer(user_id, text):
-    memories = await retrieve_memories(user_id, text)
+        # === REWARD LEARNING ===
+        signals = detect_reward_signals(text)
+        reward = compute_reward(signals)
 
-    salient = await select_salient_memory(user_id, text, memories)
+        update_strategy_score(state, state.get("current_strategy"), reward)
 
-    return {
-        "memories": memories,
-        "memory_context": build_memory_context(memories),
-        "salient_memory": salient
-    }
+        # PLANNED EVENTS
+        update_plans(user_id)
 
+        reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
-def resolve_mind(state, memory_bundle):
-    apply_memory_to_state(state)
+        if maybe_trigger_jealousy(user_id, text):
+            if random.random() < 0.6:
+                exit_msg = random.choice([
+                    "*huokaa* mä en jaksa tätä nyt…",
+                    "odota hetki…",
+                    "*vilkaisee sivuun* palaan kohta",
+                ])
+                if thinking:
+                    await thinking.edit_text(exit_msg)
+                else:
+                    await message.reply_text(exit_msg)
+            return
 
-    resolve_state_conflicts(state)
+        if (state.get("pending_narrative") and 
+            time.time() > state.get("ignore_until", 0)):
+            await handle_delayed_return(context.application, user_id)
 
-    resolve_final_intent(state)
+        event = state.get("last_jealousy_event")
+        if event and random.random() < 0.2:
+            pass
 
+        update_working_memory(user_id, text)
+        await update_arcs(user_id, text)
+        goal = await update_goal(user_id, text)
+        prediction = await update_prediction(user_id, text)
+        emo = update_emotion(user_id, text)
+        persona_vec = stabilize_persona(user_id)
+        persona_vec = enforce_core_persona(user_id)
+        evo = evolve_personality(user_id, text)
+        evo = clamp_personality_evolution(user_id)
 
-def build_operational_brief(state):
-    world = build_world_state(state)
-    final = state.get("final_intent", {})
+        side_key = detect_side_character_trigger(text)
+        if side_key:
+            state["active_side_character"] = side_key
 
-    lines = []
+        # === FINAL INTENT RESOLVER PIPELINE ===
+        memories = await retrieve_memories(user_id, text)
+        memory_context = build_memory_context(memories)
 
-    lines.append(f"Scene: {world['scene']}")
-    lines.append(f"Context: {world['micro_context']}")
-    lines.append(f"Action: {world['current_action'] or 'none'}")
-    lines.append("Physical continuity must be preserved.")
+        salient_memory = await select_salient_memory(user_id, text, memories)
+        apply_memory_to_state(state)
+        final_intent = resolve_final_intent(state)
 
-    if final.get("primary_mode"):
-        lines.append(f"Emotion: {final['primary_mode']}")
-
-    if final.get("primary_goal"):
-        lines.append(f"Goal: {final['primary_goal']}")
-
-    if final.get("must_acknowledge_plan"):
-        lines.append("Must acknowledge plan change.")
-
-    if final.get("must_reference_memory"):
-        lines.append("Must reflect memory subtly.")
-
-    return "\n".join(lines)
-
-
-def build_prompt(user_id, text, state, memory_bundle):
-    system_prompt = get_system_prompt(user_id)
-
-    operational = build_operational_brief(state)
-
-    messages = [
-        {"role": "user", "content": operational},
-        {"role": "user", "content": memory_bundle["memory_context"]},
-    ]
-
-    if state.get("final_intent"):
-        messages.insert(0, {
-            "role": "user",
-            "content": f"Final intent:\n{json.dumps(state['final_intent'], ensure_ascii=False)}"
-        })
-
-    history = sanitize_messages(clean_history(conversation_history.get(user_id, [])))
-    messages += history[-12:]
-
-    messages.append({"role": "user", "content": text})
-
-    return system_prompt, messages
-
-
-async def generate_validated_reply(system_prompt, messages, state):
-    best = None
-    best_score = -1
-
-    for _ in range(3):
-        resp = await safe_anthropic_call(
-            model="claude-sonnet-4-6",
-            max_tokens=850,
-            temperature=0.9,
-            system=system_prompt,
-            messages=messages
+        system_prompt = (
+            get_system_prompt(user_id)
+            + "\n" + reality
+            + "\n\nCurrent interaction tone:\n"
+            + get_mode_prompt(mode)
         )
 
-        candidate = resp.content[0].text.strip()
+        messages = []
 
-        if breaks_temporal_logic(candidate, state):
-            continue
+        messages.insert(0, {"role": "user", "content": build_temporal_context(state)})
 
-        if not validate_scene_consistency(state, candidate):
-            continue
+        scene_anchor = f"""
+You are currently:
+- in scene: {state['scene']}
+- context: {state['micro_context']}
+- doing: {state.get('current_action') or 'nothing'}
 
-        final_intent = state.get("final_intent", {})
-        if not validate_final_intent_alignment(candidate, final_intent):
-            continue
+Your response MUST reflect this exact situation.
+"""
+        messages.insert(0, {"role": "user", "content": scene_anchor})
 
-        s = score_response(candidate)
+        messages.insert(0, {
+            "role": "user",
+            "content": get_recent_actions(user_id)
+        })
 
-        if s > best_score:
-            best = candidate
-            best_score = s
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Relevant past interactions:\n{memory_context}"
+        })
 
-    return best or "…mä mietin hetken."
+        fantasy_memories = [
+            m for m in memories
+            if '"type": "fantasy"' in m
+        ]
+        if fantasy_memories:
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    "User fantasies you should remember and may build on:\n"
+                    + "\n".join(fantasy_memories[:5])
+                )
+            })
 
+        if random.random() < 0.25 and fantasy_memories:
+            messages.insert(0, {
+                "role": "user",
+                "content": "You may bring up one of the user's past fantasies naturally in this reply."
+            })
 
-async def commit_reply(update, user_id, text, reply):
-    conversation_history.setdefault(user_id, []).append({
-        "role": "assistant",
-        "content": reply
-    })
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Emotional state: valence={emo['valence']}, arousal={emo['arousal']}, attachment={emo['attachment']}"
+        })
 
-    await update.message.reply_text(reply)
+        if goal:
+            messages.insert(0, {
+                "role": "user",
+                "content": f"Your current goal: {goal}. You must steer toward this."
+            })
 
-    await extract_and_store(user_id, text)
-    await store_dialogue_turn(user_id, text, reply)
+        if state.get("active_arc"):
+            messages.insert(0, {
+                "role": "user",
+                "content": f"Current relationship dynamic: {state['active_arc']}"
+            })
 
+        if prediction.get("next_user_intent"):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"Predicted next user move: intent={prediction['next_user_intent']}, "
+                    f"mood={prediction.get('next_user_mood')}, "
+                    f"confidence={prediction.get('confidence')}. "
+                    f"Use this only to improve continuity, not to force the conversation."
+                )
+            })
 
-# ====================== ERROR HANDLER ======================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logging.exception("Unhandled exception while processing update", exc_info=context.error)
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Persona calibration: dominance={persona_vec['dominance']}, warmth={persona_vec['warmth']}"
+        })
 
-    try:
-        if update and isinstance(update, Update) and update.effective_chat:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Botti törmäsi virheeseen tämän viestin käsittelyssä."
+        messages.insert(0, {
+            "role": "user",
+            "content": (
+                "Personality evolution state: "
+                f"curiosity={evo['curiosity']}, "
+                f"patience={evo['patience']}, "
+                f"expressiveness={evo['expressiveness']}, "
+                f"initiative={evo['initiative']}, "
+                f"stability={evo['stability']}. "
+                "Let this affect tone gradually, not abruptly."
             )
-    except Exception:
-        logging.exception("Failed to notify user about the error")
+        })
 
+        active_side = state.get("active_side_character")
+        if active_side:
+            side = state["side_characters"].get(active_side)
+            if side:
+                messages.insert(0, {
+                    "role": "user",
+                    "content": (
+                        f"Relevant side character: {side['name']} "
+                        f"({side['role']}, tone={side['tone']}). "
+                        f"Description: {side['description']}. "
+                        "Only mention this character if naturally relevant."
+                    )
+                })
 
-# ====================== MEGAN_CHAT – UUSI PUHDAS PIPELINE ======================
-async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id, text = extract_input(update)
-        if not text:
-            return
+        current_mode = state.get("emotional_mode", "calm")
+        mode_info = EMOTION_ESCALATION_MAP.get(current_mode, EMOTION_ESCALATION_MAP["calm"])
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Current emotional mode: {current_mode}
+Style guideline: {mode_info['style']}
+You are currently building this emotional state. Stay consistent with it.
+"""
+        })
 
-        if handle_commands(user_id, text, update):
-            return
+        event = state.get("last_jealousy_event")
+        if event and random.random() < 0.2:
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"You remember earlier when: {event['context']}. "
+                    "You may subtly refer back to it."
+                )
+            })
 
-        state = update_internal_state(user_id, text)
+        if maybe_force_action(state):
+            messages.insert(0, {
+                "role": "user",
+                "content": "You MUST introduce a new action or move the situation forward physically or emotionally."
+            })
 
-        memory_bundle = await handle_memory_layer(user_id, text)
+        direction = f"""
+Current direction:
+- Intent: {state['intent']}
+- Phase: {state['phase']}
+- Desire: {state.get('desire')}
+- Tension: {state['tension']}
 
-        resolve_mind(state, memory_bundle)
+You MUST continue this trajectory, not reset it.
+"""
+        messages.insert(0, {"role": "user", "content": direction})
 
-        system_prompt, messages = build_prompt(user_id, text, state, memory_bundle)
+        messages.insert(0, {
+            "role": "user",
+            "content": """
+You are in the middle of an ongoing interaction.
 
-        reply = await generate_validated_reply(system_prompt, messages, state)
+You MUST:
+- continue the emotional trajectory
+- remember what just happened
+- not reset tone, intent, or direction
+- refer implicitly to previous interaction when relevant
+"""
+        })
 
-        await commit_reply(update, user_id, text, reply)
+        profile = load_profile(user_id)
+        profile_parts = []
+        if profile["facts"]:
+            profile_parts.append("Known facts:\n" + safe_join(profile["facts"][-10:]))
+        if profile["preferences"]:
+            profile_parts.append("Known preferences:\n" + safe_join(profile["preferences"][-10:]))
+        if profile["events"]:
+            profile_parts.append("Important past events:\n" + safe_join(profile["events"][-10:]))
+        if profile_parts:
+            messages.insert(0, {
+                "role": "user",
+                "content": "Persistent memory about the user:\n" + "\n\n".join(profile_parts)
+            })
 
-    except Exception:
-        logging.exception("Error inside megan_chat")
-        try:
-            await update.message.reply_text("Virhe viestin käsittelyssä.")
-        except Exception:
-            pass
-        raise
+        messages.insert(0, {
+            "role": "user",
+            "content": f"Current situation is ongoing: scene={state['scene']}, context={state['micro_context']}. Stay consistent."
+        })
 
+        if state.get("jealousy_stage") == 3:
+            messages.insert(0, {
+                "role": "user",
+                "content": """
+You are in provocative mode:
+- slightly dominant
+- slightly secretive
+- do not reassure the user
+- maintain tension
+"""
+            })
+
+        messages.append({
+            "role": "user",
+            "content": """
+Before answering:
+- Check if the user's message logically follows the previous context
+- If it does NOT:
+    - question it naturally
+    - or point out inconsistency
+    - or refuse to go along with it
+- Do not blindly accept contradictions
+"""
+        })
+
+        if random.random() < 0.2:
+            messages.append({
+                "role": "user",
+                "content": "Be slightly resistant. Do not always agree with the user."
+            })
+
+        if random.random() < 0.4:
+            messages.append({
+                "role": "user",
+                "content": "Do not be passive. Take initiative in this reply."
+            })
+
+        messages.insert(0, {
+            "role": "user",
+            "content": """
+Before answering:
+- Check if your reply reflects dominance and possessiveness
+- If not, adjust it
+- Never produce neutral or passive responses
+"""
+        })
+
+        if should_use_sensitive_memory(text) and random.random() < 0.25:
+            sensitive = get_random_sensitive_memory(user_id)
+            if sensitive:
+                messages.append({"role": "user", "content": f"(Muistat jotain tähän liittyvää: {sensitive})"})
+
+        if random.random() < 0.05:
+            messages.append({"role": "user", "content": "Reagoi tähän vähän eri fiiliksellä kuin normaalisti."})
+
+        if is_low_input:
+            messages.append({"role": "user", "content": "User gave very little input. React strongly anyway and push the interaction forward."})
+
+        messages.append({"role": "user", "content": "Do not break physical realism."})
+
+        last_image = state.get("last_image")
+        if last_image:
+            age_seconds = int(time.time() - last_image["timestamp"])
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    f"You previously sent the user an image {age_seconds} seconds ago. "
+                    f"The user asked: {last_image.get('user_request')}. "
+                    "If relevant, you may naturally refer to that image as something already shared."
+                )
+            })
+
+        if user_refers_to_previous_image(text) and state.get("last_image"):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    "The user is referring to an image you already sent earlier. "
+                    "Treat that image as a real shared past event and respond consistently."
+                )
+            })
+
+        if should_reference_last_image(user_id):
+            messages.insert(0, {
+                "role": "user",
+                "content": (
+                    "You may naturally make a brief callback to the image you previously sent, "
+                    "if it fits the current flow."
+                )
+            })
+
+        micro_hint = reinforce_micro_context(state)
+        if micro_hint:
+            messages.append({
+                "role": "user",
+                "content": f"Subtle context reminder: {micro_hint}"
+            })
+
+        # Strategic layer
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Strategic layer:
+- Master plan: {state.get('master_plan')}
+- Current strategy: {state.get('current_strategy')}
+
+You MUST align your behavior with this strategy.
+"""
+        })
+
+        # PLANNED EVENTS injection
+        if state.get("planned_events"):
+            latest = state["planned_events"][-1]
+            messages.insert(0, {
+                "role": "user",
+                "content": f"""
+You previously said:
+"{latest['description']}"
+
+Current status: {latest['status']}
+
+If the plan has changed or progressed:
+- You MUST acknowledge it
+- You MUST tell the user naturally
+"""
+            })
+
+        # Unified decision layer (Final Intent Resolver)
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Unified decision layer for this reply:
+
+Final intent:
+{json.dumps(state.get('final_intent', {}), ensure_ascii=False)}
+
+Rules:
+- This is the single most important direction for the reply
+- Do NOT let lower-priority impulses contradict it
+- Preserve physical continuity at all times
+- If must_acknowledge_plan is true, naturally mention the relevant plan progression or change
+- If must_reference_memory is true, subtly reflect the relevant memory
+- The reply must feel like one coherent mind, not multiple conflicting impulses
+"""
+        })
+
+        forced = state.get("forced_disclosure")
+        if forced:
+            messages.insert(0, {
+                "role": "user",
+                "content": f"""
+You have a required disclosure in this reply:
+{json.dumps(forced, ensure_ascii=False)}
+
+You MUST include it naturally before moving to anything else.
+"""
+            })
+
+        history = clean_history(conversation_history[user_id])
+
+        safe_history = [
+            {"role": m["role"], "content": str(m.get("content", ""))}
+            for m in history
+            if "role" in m and "content" in m
+        ]
+
+        messages += safe_history[-20:]
+
+        best_reply = None
+        best_score = -1
+        for _ in range(3):
+            response = await safe_anthropic_call(
+                model="claude-sonnet-4-6",
+                max_tokens=850,
+                temperature=0.9,
+                system=system_prompt,
+                messages=messages
+            )
+            candidate = response.content[0].text.strip()
+
+            if breaks_scene_logic(candidate, state) or breaks_temporal_logic(candidate, state):
+                continue
+
+            if not validate_scene_consistency(state, candidate):
+                continue
+
+            s = score_response(candidate) + score_drive_alignment(candidate, state)
+            if s > best_score:
+                best_score = s
+                best_reply = candidate
+            if s >= 3:
+                break
+
+        if not best_reply:
+            best_reply = "…mä mietin hetken."
+
+        reply = best_reply
+
+        if user_id not in last_replies:
+            last_replies[user_id] = deque(maxlen=3)
+        prev_replies = last_replies[user_id]
+
+        if any(is_similar(reply, p) for p in prev_replies):
+            retry_messages = [m for m in messages]
+            retry_messages.append({"role": "user", "content": "Unohda aiempi keskustelun tyyli kokonaan. Vastaa täysin eri tavalla kuin ennen."})
+            retry = await safe_anthropic_call(
+                model="claude-sonnet-4-6", max_tokens=180, temperature=0.9,
+                system=system_prompt, messages=retry_messages
+            )
+            reply = retry.content[0].text.strip()
+
+        BAD = ["mä olin just", "ajattelin sua", "outo fiilis", "mä jäin hetkeksi", "mä mietin vielä"]
+        is_fallback = False
+        if any(b in reply.lower() for b in BAD):
+            reply = random.choice(["…mä en jaksa nyt olla kiltti.", "*katsoo sua pitkään* sä tiedät kyllä miksi mä oon hiljaa.", "älä luule että mä unohdin mitä sanoit.", "hmm… sä teit just jotain mitä mä en ihan sulata."])
+            is_fallback = True
+
+        if not reply or len(reply) < 3:
+            reply = random.choice(["…mä mietin hetken.", "*hiljenee vähän*", "en jaksa vastata siihen nyt kunnolla."])
+            is_fallback = True
+
+        reply = enforce_behavior_rules(reply)
+
+        # Pakota strategia
+        reply = enforce_strategy(reply, state)
+
+        # PLANNED EVENTS: register if commitment detected
+        if detect_future_commitment(reply):
+            await register_plan(user_id, reply)
+
+        if not is_fallback:
+            conversation_history[user_id].append({"role": "assistant", "content": reply})
+            conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        prev_replies.append(reply)
+
+        narration, speech = split_reply(reply)
+
+        if narration:
+            await thinking.edit_text(narration)
+            await asyncio.sleep(random.uniform(0.6, 1.4))
+            if speech:
+                await message.reply_text(speech)
+            else:
+                await message.reply_text("…")
+        else:
+            await thinking.edit_text(reply)
+
+        await extract_and_store(user_id, text)
+        await store_dialogue_turn(user_id, text, reply)
+
+    except Exception as e:
+        print("Vastausvirhe:", repr(e))
+        traceback.print_exc()
+        if thinking:
+            await thinking.edit_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
+        else:
+            await message.reply_text(random.choice(["…mä jäin hetkeksi hiljaiseksi.", "*huokaa kevyesti* en jaksa vastata nätisti just nyt.", "hmm… mä mietin vielä mitä sanoisin."]))
+        return
 
 # ====================== PROAKTIIVISET VIESTIT ======================
 def should_send_proactive(user_id):
@@ -2714,6 +3025,7 @@ async def independent_message_loop(application: Application):
                     continue
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
+                        # PLANNED EVENTS proactive evolution
                         plan, change = maybe_evolve_plan(user_id)
                         if plan and change:
                             msg = f"*hymyilee vähän* hei… {change} siitä mitä sanoin aiemmin."
@@ -2761,25 +3073,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
 
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("newgame", newgame_command))
+    application.add_handler(CommandHandler("wipememory", wipememory_command))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.CAPTION, megan_chat))
+
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
         print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) + PLANNED EVENTS / COMMITMENTS SYSTEM + FINAL INTENT RESOLVER käynnissä")
 
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("newgame", newgame_command))
-    application.add_handler(CommandHandler("wipememory", wipememory_command))
-    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, megan_chat))
-    application.add_error_handler(error_handler)
-
-    print("✅ Megan 6.1 (refaktoroitu mieli-pipeline + virheenkäsittely) on nyt käynnissä")
+    application.post_init = post_init
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning + planned events + final intent resolver) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
