@@ -261,6 +261,102 @@ def reinforce_micro_context(state):
 def get_recent_actions(user_id):
     return "No recent actions."
 
+# ====================== NARRATIVE EXIT SYSTEM (diegeettinen poistuminen) ======================
+def can_trigger_exit(state):
+    return state["scene"] in ["work", "public", "commute"]
+
+def build_exit_story(user_id, reason):
+    state = get_or_create_state(user_id)
+    scene = state["scene"]
+    micro = state["micro_context"]
+
+    if reason == "angry_exit":
+        return random.choice([
+            f"läksin pois kesken kaiken kun olin {micro}",
+            f"lopetin vastaamisen ja keskityin muuhun kun ärsyynnyin siellä missä olin",
+            f"en halunnut jatkaa keskustelua siinä tilanteessa kun olin {scene}"
+        ])
+
+    if reason == "tease_exit":
+        return random.choice([
+            f"jäin juttelemaan jonkun kanssa kun olin {micro}",
+            f"joku tuli puhumaan mulle kesken kaiken enkä heti vastannut sulle",
+            f"päätin vähän katsoa mitä sä teet jos en vastaa heti"
+        ])
+
+def maybe_trigger_narrative_exit(user_id, text):
+    state = get_or_create_state(user_id)
+
+    if not can_trigger_exit(state):
+        return False
+
+    intent = state["intent"]
+    tension = state["tension"]
+
+    trigger = False
+    reason = None
+
+    # 💢 Konflikti → lähtee pois
+    if intent == "conflict" and tension > 0.4:
+        trigger = True
+        reason = "angry_exit"
+
+    # 😏 Flirtti / kiusoittelu → leikki mustasukkaisuudella
+    elif intent in ["playful", "intimate"] and tension > 0.5 and random.random() < 0.25:
+        trigger = True
+        reason = "tease_exit"
+
+    if not trigger:
+        return False
+
+    duration = random.randint(300, 1800)
+
+    state["ignore_until"] = time.time() + duration
+    state["pending_narrative"] = build_exit_story(user_id, reason)
+
+    return True
+
+def should_ignore_user(user_id):
+    state = get_or_create_state(user_id)
+    return time.time() < state.get("ignore_until", 0)
+
+async def handle_delayed_return(application, user_id):
+    state = get_or_create_state(user_id)
+    seed = state["pending_narrative"]
+
+    response = await safe_anthropic_call(
+        model="claude-sonnet-4-6",
+        max_tokens=220,
+        temperature=0.85,
+        system=get_system_prompt(user_id),
+        messages=[
+            {
+                "role": "user",
+                "content": f"""
+You were gone for a while.
+
+Continue naturally from the SAME moment.
+
+Context:
+{seed}
+
+Rules:
+- Do NOT explain everything
+- Keep some mystery
+- Slightly provocative tone if teasing
+- If conflict: still emotional residue
+"""
+            }
+        ]
+    )
+
+    text = response.content[0].text.strip()
+
+    await application.bot.send_message(chat_id=user_id, text=text)
+
+    state["pending_narrative"] = None
+    state["ignore_until"] = 0
+
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
 db_lock = threading.Lock()
@@ -693,6 +789,8 @@ def get_or_create_state(user_id):
             # UUSI: kuvamuisti
             "last_image": None,
             "image_history": [],
+            "ignore_until": 0,
+            "pending_narrative": None,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1459,6 +1557,11 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("…Okei. Aloitetaan sitten alusta, jos haluat.")
         return
 
+    if should_ignore_user(user_id):
+        if random.random() < 0.15:
+            await message.reply_text("*nähty*")
+        return
+
     image_keywords = ["lähetä kuva", "selfie", "näytä kuva", "generoi kuva", "tee kuva", "photo", "pic"]
     if any(kw in text.lower() for kw in image_keywords):
         conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
@@ -1488,6 +1591,25 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tension = update_tension(user_id, text)
         phase = update_phase(user_id, text)
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
+
+        # Narrative exit trigger
+        if maybe_trigger_narrative_exit(user_id, text):
+            if random.random() < 0.6:
+                exit_msg = random.choice([
+                    "*huokaa* mä en jaksa tätä nyt…",
+                    "odota hetki…",
+                    "*vilkaisee sivuun* palaan kohta",
+                ])
+                if thinking:
+                    await thinking.edit_text(exit_msg)
+                else:
+                    await message.reply_text(exit_msg)
+            return
+
+        # Check for delayed narrative return
+        if (state.get("pending_narrative") and 
+            time.time() > state.get("ignore_until", 0)):
+            await handle_delayed_return(context.application, user_id)
 
         update_working_memory(user_id, text)
         await update_arcs(user_id, text)
