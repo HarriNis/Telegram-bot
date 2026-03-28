@@ -761,6 +761,87 @@ def choose_strategy(state):
 
     return scored[0][1]
 
+# ====================== PLANNED EVENTS / COMMITMENTS SYSTEM ======================
+
+def detect_future_commitment(text):
+    t = text.lower()
+
+    triggers = [
+        "huomenna", "myöhemmin", "kohta", "illalla",
+        "aion", "teen", "lupaan", "mennään", "haluan tehdä"
+    ]
+
+    if any(w in t for w in triggers):
+        return True
+    return False
+
+
+def extract_plan_from_text(text):
+    # yksinkertainen versio
+    return text[:200]
+
+
+def register_plan(user_id, text):
+    state = get_or_create_state(user_id)
+
+    event = {
+        "id": str(time.time()),
+        "description": extract_plan_from_text(text),
+        "created_at": time.time(),
+        "target_time": None,
+        "status": "planned",
+        "last_updated": time.time(),
+        "evolution_log": []
+    }
+
+    state["planned_events"].append(event)
+    state["planned_events"] = state["planned_events"][-10:]
+
+
+def update_plans(user_id):
+    state = get_or_create_state(user_id)
+    now = time.time()
+
+    for plan in state["planned_events"]:
+        if plan["status"] != "planned":
+            continue
+
+        # yksinkertainen aging logic
+        age = now - plan["created_at"]
+
+        if age > 3600:
+            plan["status"] = "in_progress"
+
+        if age > 86400:
+            plan["status"] = "done"
+
+
+def maybe_evolve_plan(user_id):
+    state = get_or_create_state(user_id)
+
+    for plan in state["planned_events"]:
+        if plan["status"] != "planned":
+            continue
+
+        if random.random() < 0.2:
+            change = random.choice([
+                "muutin vähän suunnitelmaa",
+                "se meni vähän eri tavalla",
+                "tein jotain odottamatonta"
+            ])
+
+            plan["status"] = "changed"
+            plan["last_updated"] = time.time()
+
+            plan["evolution_log"].append({
+                "time": time.time(),
+                "change": change
+            })
+
+            return plan, change
+
+    return None, None
+
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
 db_lock = threading.Lock()
@@ -1229,6 +1310,10 @@ def get_or_create_state(user_id):
             "current_strategy": None,
             "strategy_updated": 0,
             "strategy_stats": {},
+
+            # PLANNED EVENTS / COMMITMENTS
+            "planned_events": [],
+            "last_plan_check": 0,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -2096,6 +2181,9 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         update_strategy_score(state, state.get("current_strategy"), reward)
 
+        # PLANNED EVENTS
+        update_plans(user_id)
+
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         if maybe_trigger_jealousy(user_id, text):
@@ -2424,6 +2512,23 @@ You MUST align your behavior with this strategy.
 """
         })
 
+        # PLANNED EVENTS injection
+        if state.get("planned_events"):
+            latest = state["planned_events"][-1]
+            messages.insert(0, {
+                "role": "user",
+                "content": f"""
+You previously said:
+"{latest['description']}"
+
+Current status: {latest['status']}
+
+If the plan has changed or progressed:
+- You MUST acknowledge it
+- You MUST tell the user naturally
+"""
+            })
+
         history = clean_history(conversation_history[user_id])
 
         safe_history = [
@@ -2491,6 +2596,10 @@ You MUST align your behavior with this strategy.
 
         # Pakota strategia
         reply = enforce_strategy(reply, state)
+
+        # PLANNED EVENTS: register if commitment detected
+        if detect_future_commitment(reply):
+            register_plan(user_id, reply)
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
@@ -2569,6 +2678,13 @@ async def independent_message_loop(application: Application):
                     continue
                 if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
                     try:
+                        # PLANNED EVENTS proactive evolution
+                        plan, change = maybe_evolve_plan(user_id)
+                        if plan and change:
+                            msg = f"*hymyilee vähän* hei… {change} siitä mitä sanoin aiemmin."
+                            await application.bot.send_message(chat_id=user_id, text=msg)
+                            continue
+
                         text = await generate_proactive_message(user_id)
                         await application.bot.send_message(chat_id=user_id, text=text)
                         conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
@@ -2619,10 +2735,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP + FYYSINEN TOD ELLISUUS LUKITUS + ACTIVE DRIVE + USER MODEL + MASTER PLAN + STRATEGY LEARNING (REWARD SYSTEM) + PLANNED EVENTS / COMMITMENTS SYSTEM käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map + fyysinen tod ellisuus + active drive + user model + master plan + strategy learning + planned events) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
