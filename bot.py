@@ -401,6 +401,84 @@ Rules:
     state["ignore_until"] = 0
     state["jealousy_stage"] = 0
 
+# ====================== EMOTION ESCALATION MAP ======================
+EMOTION_ESCALATION_MAP = {
+    "calm": {
+        "allowed_next": ["playful", "warm", "distant"],
+        "style": "kevyt, avoin, ei painetta",
+    },
+    "playful": {
+        "allowed_next": ["testing", "warm", "jealous"],
+        "style": "kiusoitteleva, vähän arvaamaton",
+    },
+    "testing": {
+        "allowed_next": ["jealous", "intense", "cooling"],
+        "style": "haastava, tunnusteleva, ei täysin turvallinen",
+    },
+    "jealous": {
+        "allowed_next": ["provocative", "cooling"],
+        "style": "omistushaluinen, pistävä, emotionaalisesti painava",
+    },
+    "provocative": {
+        "allowed_next": ["intense", "cooling"],
+        "style": "salamyhkäinen, tietoisesti ärsyttävä tai viettelevä",
+    },
+    "intense": {
+        "allowed_next": ["cooling"],
+        "style": "vahva tunne, suora paine, ei neutraali",
+    },
+    "cooling": {
+        "allowed_next": ["warm", "distant", "calm"],
+        "style": "hidastava, jälkikaiku, pehmennys",
+    },
+    "warm": {
+        "allowed_next": ["playful", "calm", "intense"],
+        "style": "hellä, läheinen, emotionaalisesti lämmin",
+    },
+    "distant": {
+        "allowed_next": ["cooling", "calm"],
+        "style": "etäinen, vähäpuheinen, jäähdyttävä",
+    }
+}
+
+def update_emotional_mode(user_id):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+
+    if now - state.get("emotional_mode_last_change", 0) < 240:  # ~4 min cooldown
+        return state["emotional_mode"]
+
+    current = state["emotional_mode"]
+    tension = state.get("tension", 0.0)
+    jealousy_stage = state.get("jealousy_stage", 0)
+    intent = state.get("intent", "casual")
+
+    map_entry = EMOTION_ESCALATION_MAP.get(current, EMOTION_ESCALATION_MAP["calm"])
+    allowed_next = map_entry["allowed_next"]
+
+    # Logiikka siirtymille
+    if jealousy_stage >= 2 and "jealous" in allowed_next:
+        next_mode = "jealous"
+    elif tension > 0.7 and "intense" in allowed_next:
+        next_mode = "intense"
+    elif tension > 0.5 and "testing" in allowed_next:
+        next_mode = "testing"
+    elif tension > 0.3 and "playful" in allowed_next:
+        next_mode = "playful"
+    elif tension < 0.3 and "cooling" in allowed_next:
+        next_mode = "cooling"
+    elif random.random() < 0.35:  # satunnainen kevyt muutos
+        next_mode = random.choice([m for m in allowed_next if m != current])
+    else:
+        return current  # ei muutosta
+
+    # Varmista että next_mode on sallittu
+    if next_mode in allowed_next:
+        state["emotional_mode"] = next_mode
+        state["emotional_mode_last_change"] = now
+
+    return state["emotional_mode"]
+
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
 db_lock = threading.Lock()
@@ -841,6 +919,10 @@ def get_or_create_state(user_id):
             "jealousy_started": 0,
             "jealousy_context": None,
             "last_jealousy_event": None,
+
+            # EMOTION ESCALATION MAP
+            "emotional_mode": "calm",
+            "emotional_mode_last_change": 0,
         }
         continuity_state[user_id].update(init_scene_state())
     return continuity_state[user_id]
@@ -1461,6 +1543,7 @@ Current internal desire: {state.get('desire', 'none')}
 Current interaction tension level: {state.get('tension', 0.0)}
 Long-term behavioral desires: {safe_join(state.get('core_desires', []))}
 Current interaction phase: {state.get('phase', 'neutral')}
+Current emotional mode: {state.get('emotional_mode', 'calm')}
 
 If tension is high: be more intense, direct, or provocative.
 If tension is low: build it slowly and introduce something new.
@@ -1641,6 +1724,10 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         core_desires = await update_core_desires(user_id, text)
         tension = update_tension(user_id, text)
         phase = update_phase(user_id, text)
+
+        # UUSI: emotion escalation map
+        emotional_mode = update_emotional_mode(user_id)
+
         reality = build_reality_prompt_from_state(user_id, elapsed_label)
 
         # MULTI-STAGE JEALOUSY TRIGGER
@@ -1665,9 +1752,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Random recall of previous jealousy event
         event = state.get("last_jealousy_event")
         if event and random.random() < 0.2:
-            # This will be inserted later in messages
-
-            pass  # handled in prompt building
+            pass  # handled below in messages
 
         update_working_memory(user_id, text)
         await update_arcs(user_id, text)
@@ -1794,6 +1879,18 @@ Your response MUST reflect this exact situation.
                         "Only mention this character if naturally relevant."
                     )
                 })
+
+        # Emotion escalation map - current mode
+        current_mode = state.get("emotional_mode", "calm")
+        mode_info = EMOTION_ESCALATION_MAP.get(current_mode, EMOTION_ESCALATION_MAP["calm"])
+        messages.insert(0, {
+            "role": "user",
+            "content": f"""
+Current emotional mode: {current_mode}
+Style guideline: {mode_info['style']}
+You are currently building this emotional state. Stay consistent with it.
+"""
+        })
 
         # Jealousy stage recall
         event = state.get("last_jealousy_event")
@@ -2136,10 +2233,10 @@ def main():
     async def post_init(app: Application):
         global background_task
         background_task = asyncio.create_task(independent_message_loop(app))
-        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY käynnissä")
+        print("✅ Taustaviestit + Cinematic Narration + Consistency + Temporal + MemoryEngine v3 + Prediction + Evolution + Multi-Character + Venice.ai + TÄYSI KUVAMUISTI + FANTASY ENGINE + HARD CORE PERSONA + MULTI-STAGE JEALOUSY + EMOTION ESCALATION MAP käynnissä")
 
     application.post_init = post_init
-    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy) on nyt käynnissä")
+    print("✅ Megan 6.1 (Venice.ai + täysi kuvamuisti + fantasy engine + hard core persona + multi-stage jealousy + emotion escalation map) on nyt käynnissä")
 
     application.run_polling(drop_pending_updates=True)
 
