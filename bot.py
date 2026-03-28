@@ -1211,6 +1211,60 @@ def resolve_final_intent(state):
     state["final_intent_updated"] = time.time()
     return final
 
+# ====================== UUSI: update_tension & update_phase ======================
+def update_tension(user_id, text):
+    state = get_or_create_state(user_id)
+    t = text.lower()
+
+    if any(w in t for w in ["ikävä", "haluan", "tule"]):
+        state["tension"] += 0.2
+    elif any(w in t for w in ["ok", "joo", "hmm"]):
+        state["tension"] -= 0.1
+    else:
+        state["tension"] += 0.05
+
+    state["tension"] = max(0.0, min(1.0, state["tension"]))
+    return state["tension"]
+
+
+def update_phase(user_id, text):
+    state = get_or_create_state(user_id)
+    now = now_ts()
+    phase = state.get("phase", "neutral")
+    tension = state.get("tension", 0.0)
+
+    if now - state.get("phase_last_change", 0) < 120:
+        return phase
+
+    if phase == "neutral":
+        new_phase = "building" if tension > 0.3 else "neutral"
+    elif phase == "building":
+        if tension > 0.6:
+            new_phase = "testing"
+        elif tension < 0.2:
+            new_phase = "neutral"
+        else:
+            new_phase = "building"
+    elif phase == "testing":
+        if tension > 0.8:
+            new_phase = "intense"
+        elif tension < 0.4:
+            new_phase = "building"
+        else:
+            new_phase = "testing"
+    elif phase == "intense":
+        new_phase = "cooling" if tension < 0.5 else "intense"
+    elif phase == "cooling":
+        new_phase = "neutral" if tension < 0.2 else "cooling"
+    else:
+        new_phase = "neutral"
+
+    if new_phase != phase:
+        state["phase"] = new_phase
+        state["phase_last_change"] = now
+
+    return state["phase"]
+
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
 db_lock = threading.Lock()
@@ -2357,7 +2411,7 @@ My current mood: {mood.upper()}.
 Always respond in natural spoken Finnish. Never use English.
 """
 
-# ====================== HYBRID IMAGE GENERATION ======================
+# ====================== HYBRID IMAGE GENERATION (vain Venice) ======================
 async def generate_image_hybrid(prompt: str):
     try:
         response = await venice_client.images.generate(
@@ -2368,27 +2422,7 @@ async def generate_image_hybrid(prompt: str):
         return base64.b64decode(response.data[0].b64_json)
     except Exception as e:
         print("Venice error:", repr(e))
-
-    try:
-        response = await grok_client.images.generate(
-            model="grok-2-image",
-            prompt=prompt
-        )
-        return base64.b64decode(response.data[0].b64_json)
-    except Exception as e:
-        print("Grok error:", repr(e))
-
-    try:
-        response = await openai_client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024"
-        )
-        return base64.b64decode(response.data[0].b64_json)
-    except Exception as e:
-        print("OpenAI error:", repr(e))
-
-    return None
+        return None
 
 # ====================== KUVAGENEROINTI ======================
 async def generate_and_send_image(update: Update, user_text: str):
@@ -2403,7 +2437,7 @@ async def generate_and_send_image(update: Update, user_text: str):
 
         image_data = await generate_image_hybrid(prompt_used)
         if image_data is None:
-            raise Exception("All providers failed")
+            raise Exception("Venice failed")
 
         upload_result = cloudinary.uploader.upload(BytesIO(image_data), folder="megan_images")
         image_url = upload_result.get("secure_url")
@@ -2972,8 +3006,7 @@ You MUST include it naturally before moving to anything else.
         messages += safe_history[-20:]
 
         best_reply = None
-        best_score = -1
-        for i in range(3):
+        for _ in range(3):
             response = await safe_anthropic_call(
                 model="claude-sonnet-4-6",
                 max_tokens=850,
@@ -2990,14 +3023,7 @@ You MUST include it naturally before moving to anything else.
                 continue
 
             best_reply = candidate
-            break  # 🔥 heti kun validi löytyy
-
-            s = score_response(candidate) + score_drive_alignment(candidate, state)
-            if s > best_score:
-                best_score = s
-                best_reply = candidate
-            if s >= 3:
-                break
+            break   # heti kun validi löytyy
 
         if not best_reply:
             best_reply = "…mä mietin hetken."
