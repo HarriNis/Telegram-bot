@@ -1533,20 +1533,16 @@ background_task = None
 
 # ====================== SAFE ANTHROPIC CALL ======================
 async def safe_anthropic_call(**kwargs):
-    for i in range(3):
+    for i in range(2):  # 3 → 2
         try:
             return await asyncio.wait_for(
                 anthropic_client.messages.create(**kwargs),
-                timeout=20
+                timeout=12  # 20 → 12
             )
         except Exception as e:
             print(f"[Anthropic retry {i}] {e}")
-            if "overloaded" in str(e).lower() or "529" in str(e):
-                await asyncio.sleep(1.5 * (i + 1))
-                continue
-            else:
-                raise
-    raise Exception("Anthropic failed after retries")
+            await asyncio.sleep(1.0)
+    raise Exception("Anthropic failed fast")
 
 # ====================== MOODS ======================
 moods = {
@@ -2949,7 +2945,7 @@ You MUST include it naturally before moving to anything else.
 
         best_reply = None
         best_score = -1
-        for _ in range(3):
+        for i in range(3):
             response = await safe_anthropic_call(
                 model="claude-sonnet-4-6",
                 max_tokens=850,
@@ -2964,6 +2960,9 @@ You MUST include it naturally before moving to anything else.
 
             if not validate_scene_consistency(state, candidate):
                 continue
+
+            best_reply = candidate
+            break  # 🔥 heti kun validi löytyy
 
             s = score_response(candidate) + score_drive_alignment(candidate, state)
             if s > best_score:
@@ -3005,8 +3004,8 @@ You MUST include it naturally before moving to anything else.
         # Pakota strategia
         reply = enforce_strategy(reply, state)
 
-        # PLANNED EVENTS: register if commitment detected
-        if detect_future_commitment(reply):
+        # PLANNED EVENTS: register if commitment detected (vain 20% todennäköisyydellä)
+        if detect_future_commitment(reply) and random.random() < 0.2:
             await register_plan(user_id, reply)
 
         if not is_fallback:
@@ -3080,14 +3079,15 @@ async def independent_message_loop(application: Application):
     try:
         while True:
             await asyncio.sleep(30)
-            print("⏱️ Proactive tick")
+
             for user_id in list(conversation_history.copy().keys()):
-                if len(conversation_history.get(user_id, [])) < 2 or random.random() < 0.8:
-                    continue
-                if should_send_proactive(user_id) and can_send_proactive(user_id) and user_recently_active(user_id):
-                    try:
-                        # PLANNED EVENTS proactive evolution
+                try:
+                    if not user_recently_active(user_id):
+                        continue
+
+                    if should_send_proactive(user_id) and can_send_proactive(user_id):
                         plan, change = maybe_evolve_plan(user_id)
+
                         if plan and change:
                             msg = f"*hymyilee vähän* hei… {change} siitä mitä sanoin aiemmin."
                             await application.bot.send_message(chat_id=user_id, text=msg)
@@ -3095,10 +3095,10 @@ async def independent_message_loop(application: Application):
 
                         text = await generate_proactive_message(user_id)
                         await application.bot.send_message(chat_id=user_id, text=text)
-                        conversation_history.setdefault(user_id, []).append({"role": "assistant", "content": text})
-                        conversation_history[user_id] = conversation_history[user_id][-20:]
-                    except Exception as e:
-                        print("Proactive error:", e)
+
+                except Exception as e:
+                    print(f"[PROACTIVE USER ERROR] {user_id}: {e}")
+
     except asyncio.CancelledError:
         print("Loop stopped cleanly")
 
