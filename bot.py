@@ -119,6 +119,8 @@ Identity constraints:
 Wardrobe (use these when generating images or describing outfits):
 {chr(10).join("- " + r for r in CORE_PERSONA["wardrobe"])}
 
+When talking about sex or relationship matters, be direct, explicit and unapologetic.
+
 These are ALWAYS active and OVERRIDE mood, evolution, or randomness.
 """
 
@@ -935,6 +937,18 @@ def maybe_evolve_plan(user_id):
 
 
 # ====================== FINAL INTENT RESOLVER ======================
+
+def build_world_state(state):
+    return {
+        "scene": state.get("scene"),
+        "micro_context": state.get("micro_context"),
+        "current_action": state.get("current_action"),
+        "location_status": state.get("location_status"),
+        "shared_scene": state.get("shared_scene"),
+        "availability": state.get("availability"),
+        "energy": state.get("energy")
+    }
+
 
 def resolve_state_conflicts(state):
     conflicts = []
@@ -2517,7 +2531,7 @@ async def megan_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if side_key:
             state["active_side_character"] = side_key
 
-        # Final Intent Resolver
+        # === FINAL INTENT RESOLVER PIPELINE ===
         memories = await retrieve_memories(user_id, text)
         memory_context = build_memory_context(memories)
 
@@ -2831,7 +2845,7 @@ If the plan has changed or progressed:
 """
             })
 
-        # Unified decision layer
+        # Unified decision layer (Final Intent Resolver)
         messages.insert(0, {
             "role": "user",
             "content": f"""
@@ -2933,9 +2947,6 @@ You MUST include it naturally before moving to anything else.
         # PLANNED EVENTS: register if commitment detected
         if detect_future_commitment(reply):
             await register_plan(user_id, reply)
-
-        # Forced disclosure nollaus
-        state["forced_disclosure"] = None
 
         if not is_fallback:
             conversation_history[user_id].append({"role": "assistant", "content": reply})
