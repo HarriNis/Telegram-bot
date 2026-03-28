@@ -353,8 +353,7 @@ def maybe_trigger_jealousy(user_id, text):
     intent = state["intent"]
     tension = state["tension"]
     
-    # TIUKEMMAT EHDOT (oli 0.4/0.5, nyt 0.6/0.7)
-    if intent == "conflict" and tension > 0.6 and random.random() < 0.25:  # Lisätty satunnaisuus
+    if intent == "conflict" and tension > 0.6 and random.random() < 0.25:
         stage = 2
     elif intent in ["playful", "intimate"] and tension > 0.7 and random.random() < 0.15:
         stage = 1
@@ -363,11 +362,11 @@ def maybe_trigger_jealousy(user_id, text):
     
     state["jealousy_stage"] = stage
     state["jealousy_started"] = time.time()
-    
-    # LYHYEMPI IGNORE-AIKA (oli 300-900, nyt 180-600)
     state["ignore_until"] = time.time() + random.randint(180, 600)
     
+    # KRIITTINEN KORJAUS: Aseta pending_narrative
     state["jealousy_context"] = build_exit_story(user_id, "tease_exit")
+    state["pending_narrative"] = state["jealousy_context"]  # ← LISÄÄ TÄMÄ RIVI
     
     return True
 
@@ -992,7 +991,7 @@ async def maybe_evolve_plan(user_id):
 
 
 def check_plan_references(user_id, text):
-    """Tarkistaa viittaako käyttäjä aikaisempiin suunnitelmiin - UUSI"""
+    """Tarkistaa viittaako käyttäjä aikaisempiin suunnitelmiin - KORJATTU"""
     state = get_or_create_state(user_id)
     t = text.lower()
     
@@ -1002,12 +1001,38 @@ def check_plan_references(user_id, text):
         "et lähettänyt", "unohditko", "missä se"
     ]
     
-    if any(p in t for p in reference_phrases):
-        # Käyttäjä viittaa lupaukseen - merkitse tarkistettavaksi
-        for plan in state["planned_events"]:
-            if plan["status"] == "planned":
-                plan["user_referenced"] = True
-                plan["reference_time"] = time.time()
+    if not any(p in t for p in reference_phrases):
+        return  # Ei viittausta
+    
+    # KORJAUS: Merkitse vain VIIMEISIN tai RELEVANTTI suunnitelma
+    plans = state["planned_events"]
+    if not plans:
+        return
+    
+    # Yritä löytää matching plan tekstin perusteella
+    best_match = None
+    best_score = 0
+    
+    for plan in plans:
+        if plan["status"] != "planned":
+            continue
+        
+        # Yksinkertainen keyword-matching
+        desc_words = set(plan["description"].lower().split())
+        text_words = set(t.split())
+        overlap = len(desc_words & text_words)
+        
+        if overlap > best_score:
+            best_score = overlap
+            best_match = plan
+    
+    # Jos ei löydy matchingia, merkitse viimeisin
+    if not best_match and plans:
+        best_match = plans[-1]
+    
+    if best_match:
+        best_match["user_referenced"] = True
+        best_match["reference_time"] = time.time()
 
 
 def build_world_state(state):
@@ -1207,6 +1232,7 @@ def resolve_final_intent(state):
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)  # KRIITTINEN: Varmista hakemisto
 db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -1241,7 +1267,14 @@ CREATE TABLE IF NOT EXISTS planned_events (
     commitment_level TEXT DEFAULT 'medium',
     must_fulfill INTEGER DEFAULT 0,
     last_updated REAL,
-    evolution_log TEXT DEFAULT '[]'
+    evolution_log TEXT DEFAULT '[]',
+    needs_check INTEGER DEFAULT 0,
+    urgency TEXT DEFAULT 'normal',
+    user_referenced INTEGER DEFAULT 0,
+    reference_time REAL DEFAULT 0,
+    proactive INTEGER DEFAULT 0,
+    plan_type TEXT,
+    plan_intent TEXT
 )
 """)
 
@@ -1265,6 +1298,34 @@ except sqlite3.OperationalError:
         pass
     try:
         cursor.execute("ALTER TABLE planned_events ADD COLUMN evolution_log TEXT DEFAULT '[]'")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN needs_check INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN urgency TEXT DEFAULT 'normal'")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN user_referenced INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN reference_time REAL DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN proactive INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN plan_type TEXT")
+    except:
+        pass
+    try:
+        cursor.execute("ALTER TABLE planned_events ADD COLUMN plan_intent TEXT")
     except:
         pass
     print("✅ Schema updated")
@@ -1665,8 +1726,14 @@ def get_mode_prompt(mode):
 def update_persona_mode(user_id):
     state = get_or_create_state(user_id)
     now = now_ts()
+    
+    # UUSI: Tarkista onko mode juuri adaptoitu
+    if "mode_adapted_at" in state and now - state["mode_adapted_at"] < 300:
+        return state["persona_mode"]  # Älä korvaa
+    
     if now - state.get("last_mode_change", 0) < 600:
         return state["persona_mode"]
+    
     weights = {
         "warm": 0.25,
         "playful": 0.20,
@@ -1684,12 +1751,22 @@ def update_persona_mode(user_id):
 def adapt_mode_to_user(user_id, text):
     state = get_or_create_state(user_id)
     t = text.lower()
+    
+    changed = False
+    
     if any(w in t for w in ["rakastan", "ikävä", "missä oot", "haluun sua"]):
         state["persona_mode"] = "warm"
+        changed = True
     elif any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
         state["persona_mode"] = "playful"
+        changed = True
     elif any(w in t for w in ["ärsyttää", "vituttaa", "tylsää"]):
         state["persona_mode"] = "slightly_irritated"
+        changed = True
+    
+    # UUSI: Merkitse että mode on adaptoitu
+    if changed:
+        state["mode_adapted_at"] = time.time()
 
 # ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
 def get_time_context():
@@ -1874,18 +1951,24 @@ def update_desire(user_id, text):
 
 def update_tension(user_id, text):
     state = get_or_create_state(user_id)
-    t = text.lower()
+    now = time.time()
     
-    # PIENEMMÄT MUUTOKSET (oli 0.2/0.1/0.05, nyt 0.08/0.05/0.02)
+    # UUSI: Laske decay ajan perusteella
+    if "tension_last_update" in state:
+        elapsed_hours = (now - state["tension_last_update"]) / 3600
+        decay_factor = 0.98 ** elapsed_hours  # Eksponentiaalinen decay
+        state["tension"] = state["tension"] * decay_factor
+    
+    state["tension_last_update"] = now
+    
+    # Päivitä tension tekstin perusteella
+    t = text.lower()
     if any(w in t for w in ["ikävä", "haluan", "tule"]):
         state["tension"] += 0.08
     elif any(w in t for w in ["ok", "joo", "hmm"]):
         state["tension"] -= 0.05
     else:
         state["tension"] += 0.02
-    
-    # LUONNOLLINEN HAALISTUMINEN (uusi)
-    state["tension"] = state["tension"] * 0.98
     
     state["tension"] = max(0.0, min(1.0, state["tension"]))
     return state["tension"]
@@ -2660,8 +2743,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Päivitä jealousy stage
     update_jealousy_stage(user_id)
 
-    # Tarkista image request
-    if any(w in text.lower() for w in ["kuva", "pic", "picture", "näytä", "lähetä kuva"]):
+    # Tarkista image request (tarkempi trigger)
+    t = text.lower()
+    image_triggers = [
+        "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
+        "ota kuva", "lähetä pic", "send pic", "lähetä picture"
+    ]
+    if any(trigger in t for trigger in image_triggers):
         await handle_image_request(update, user_id, text)
         return
 
