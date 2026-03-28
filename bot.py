@@ -807,7 +807,7 @@ def detect_future_commitment(text):
         return None  # Ei tallenneta
     
     # Tarkista myös tulevaisuusviittaukset + toimintaverbit
-    future_markers = ["huomenna", "myöhemmin", "kohta", "illalla", "ensi yön
+    future_markers = ["huomenna", "myöhemmin", "kohta", "illalla", "ensi yönä", "seuraavaksi"]
     # OSA 2/3 jatkuu - Plans & Memory Systems
 
 ```python
