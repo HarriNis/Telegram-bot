@@ -549,7 +549,7 @@ async def handle_delayed_return(application, user_id):
 
     response = await smart_llm_call(
         context_type="core_response",
-        model="grok-2-latest",
+        model="grok-beta",
         max_tokens=220,
         temperature=0.85,
         system=get_system_prompt(user_id),
@@ -1763,7 +1763,7 @@ async def safe_grok_call(**kwargs):
     # Muunna Anthropic-formaatti → OpenAI-formaatti
     messages = kwargs.pop("messages", [])
     system = kwargs.pop("system", "")
-    max_tokens = kwargs.pop("max_tokens", 350)
+    max_tokens = kwargs.pop("max_tokens", 250)
     temperature = kwargs.pop("temperature", 0.88)
     
     # Yhdistä system-prompt ensimmäiseksi viestiksi
@@ -1783,7 +1783,7 @@ async def safe_grok_call(**kwargs):
         try:
             response = await asyncio.wait_for(
                 grok_client.chat.completions.create(
-                    model="grok-2-latest",
+                    model="grok-beta",
                     messages=openai_messages,
                     max_tokens=max_tokens,
                     temperature=temperature
@@ -1799,7 +1799,7 @@ async def safe_grok_call(**kwargs):
             return GrokResponse(response.choices[0].message.content)
             
         except Exception as e:
-            print(f"[Grok retry {i}] {e}")
+            print(f"[Grok retry {i}] {type(e).__name__}: {e}")
             if i < 2:
                 await asyncio.sleep(1.5 * (i + 1))
                 continue
@@ -3235,7 +3235,7 @@ MEMORY CONTEXT:
             
             response = await smart_llm_call(
                 context_type="core_response",
-                model="grok-2-latest",
+                model="grok-beta",
                 max_tokens=250,
                 temperature=0.88,
                 system=system_prompt,
