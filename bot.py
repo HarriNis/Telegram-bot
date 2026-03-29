@@ -15,83 +15,54 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# LOGGING
-# =========================
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =========================
-# ENV
-# =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 PORT = int(os.getenv("PORT", "10000"))
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN puuttuu ympäristömuuttujista")
+    raise ValueError("TELEGRAM_TOKEN puuttuu")
 
 if not REPLICATE_API_TOKEN:
-    raise ValueError("REPLICATE_API_TOKEN puuttuu ympäristömuuttujista")
+    raise ValueError("REPLICATE_API_TOKEN puuttuu")
 
-# =========================
-# FLASK HEALTH CHECK
-# =========================
 app = Flask(__name__)
 
 @app.route("/")
 def health_check():
-    return "Telegram photo bot is alive", 200
+    return "Bot is alive", 200
 
 def run_flask():
     app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
 
-# =========================
-# IMAGE PROMPT
-# =========================
 def build_photo_prompt(user_text: str) -> str:
-    """
-    Luo valokuvamaisen promptin käyttäjän pyynnön pohjalta.
-    """
-    user_text = user_text.strip()
-
     return f"""
-Create a photorealistic, high-quality portrait photograph.
+Create a photorealistic, high-quality image.
 
 User request:
 {user_text}
 
 Requirements:
 - photorealistic
-- natural human proportions
+- realistic lighting
 - realistic skin texture
-- cinematic but believable lighting
-- detailed eyes and face
-- professional photography look
-- high detail
-- no text, no watermark
-- natural composition
+- detailed face
+- cinematic but natural look
+- no watermark
+- no text
 """.strip()
 
-# =========================
-# REPLICATE IMAGE GENERATION
-# =========================
 async def generate_image_replicate(prompt: str) -> bytes:
-    """
-    Luo kuvan Replicate API:n kautta ja palauttaa kuvan byteseinä.
-    """
     prediction_url = "https://api.replicate.com/v1/predictions"
 
     headers = {
-        "Authorization": f"Token {REPLICATE_API_TOKEN}",
+        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
         "Content-Type": "application/json",
     }
 
     payload = {
-        # Esimerkkiversio käyttäjän alkuperäisestä pohjasta
         "version": "a6b5c5e4f0c5f7a2b8f3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
         "input": {
             "prompt": prompt,
@@ -104,33 +75,33 @@ async def generate_image_replicate(prompt: str) -> bytes:
         },
     }
 
-    timeout = aiohttp.ClientTimeout(total=60)
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        # 1. Luo prediction
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
         async with session.post(prediction_url, headers=headers, json=payload) as resp:
+            body = await resp.text()
             if resp.status != 201:
-                error_text = await resp.text()
-                raise RuntimeError(f"Prediction creation failed: {resp.status} | {error_text}")
+                raise RuntimeError(f"Prediction creation failed: {resp.status} | {body}")
 
             prediction = await resp.json()
             prediction_id = prediction["id"]
-            logger.info("Replicate prediction created: %s", prediction_id)
+            logger.info("Prediction created: %s", prediction_id)
 
-        # 2. Pollaa tulosta
+        poll_headers = {
+            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        }
+
         poll_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
 
-        for _ in range(180):  # max ~180s
+        for _ in range(180):
             await asyncio.sleep(1)
 
-            async with session.get(poll_url, headers={"Authorization": f"Token {REPLICATE_API_TOKEN}"}) as resp:
+            async with session.get(poll_url, headers=poll_headers) as resp:
+                body = await resp.text()
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(f"Prediction polling failed: {resp.status} | {error_text}")
+                    raise RuntimeError(f"Prediction polling failed: {resp.status} | {body}")
 
                 result = await resp.json()
                 status = result.get("status")
-                logger.info("Replicate status: %s", status)
+                logger.info("Prediction status: %s", status)
 
                 if status == "succeeded":
                     output = result.get("output")
@@ -138,9 +109,7 @@ async def generate_image_replicate(prompt: str) -> bytes:
                         raise RuntimeError("Prediction succeeded but output missing")
 
                     image_url = output[0] if isinstance(output, list) else output
-                    logger.info("Image URL received: %s", image_url)
 
-                    # 3. Lataa valmis kuva
                     async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
                         if img_resp.status != 200:
                             raise RuntimeError(f"Image download failed: {img_resp.status}")
@@ -150,35 +119,12 @@ async def generate_image_replicate(prompt: str) -> bytes:
                     raise RuntimeError(f"Prediction failed: {result.get('error', 'unknown error')}")
 
                 if status in ("canceled", "cancelled"):
-                    raise RuntimeError("Prediction was cancelled")
+                    raise RuntimeError("Prediction cancelled")
 
         raise TimeoutError("Image generation timed out")
 
-# =========================
-# COMMANDS
-# =========================
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hei. Lähetä viesti, jossa pyydät kuvaa.\n"
-        "Esim:\n"
-        "- tee kuva vaaleasta naisesta metsässä\n"
-        "- lähetä kuva cyberpunk-muotokuvasta\n"
-        "- haluan kuvan realistisesta mallista"
-    )
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Komennot:\n"
-        "/start - Aloitus\n"
-        "/help - Ohje\n\n"
-        "Pyydä kuvaa tavallisella viestillä."
-    )
-
-# =========================
-# MESSAGE HANDLER
-# =========================
 def is_image_request(text: str) -> bool:
-    text = text.lower()
+    t = text.lower()
     triggers = [
         "tee kuva",
         "lähetä kuva",
@@ -191,7 +137,16 @@ def is_image_request(text: str) -> bool:
         "photo of",
         "portrait of",
     ]
-    return any(trigger in text for trigger in triggers)
+    return any(x in t for x in triggers)
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Lähetä viesti kuten:\n"
+        "tee kuva realistisesta muotokuvasta"
+    )
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Pyydä kuvaa tavallisella viestillä.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -199,14 +154,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text = update.message.text.strip()
-        logger.info("User message: %s", text)
 
         if not is_image_request(text):
             await update.message.reply_text(
-                "Pyydä kuvaa esimerkiksi näin:\n"
-                "`tee kuva realistisesta muotokuvasta`\n"
-                "`lähetä kuva naisesta kaupungissa sateessa`",
-                parse_mode="Markdown"
+                "Pyydä kuvaa esim:\ntee kuva naisesta metsässä"
             )
             return
 
@@ -215,33 +166,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt = build_photo_prompt(text)
         image_bytes = await generate_image_replicate(prompt)
 
-        photo = InputFile(image_bytes, filename="generated_photo.jpg")
-
         await update.message.reply_photo(
-            photo=photo,
+            photo=InputFile(image_bytes, filename="generated.jpg"),
             caption="Tässä kuvasi."
         )
 
     except Exception as e:
-        logger.error("handle_message error: %s", e)
+        logger.error("Image generation failed: %s", e)
         traceback.print_exc()
         await update.message.reply_text(f"Kuvan generointi epäonnistui: {e}")
 
-# =========================
-# MAIN
-# =========================
 async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("Flask health check started on port %s", PORT)
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("Starting Telegram bot...")
 
     await application.initialize()
     await application.start()
