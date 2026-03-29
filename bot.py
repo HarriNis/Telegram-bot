@@ -1394,7 +1394,7 @@ def resolve_final_intent(state):
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)  # KRIITTINEN: Varmista hakemisto
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
@@ -1417,7 +1417,10 @@ CREATE TABLE IF NOT EXISTS profiles (
 )
 """)
 
-# Luo taulu UUDELLA skeemalla
+# POISTA VANHA TAULU JA LUO UUSI (varmistaa oikean skeeman)
+cursor.execute("DROP TABLE IF EXISTS planned_events")
+
+# Luo taulu UUDELLA TÄYDELLÄ skeemalla
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS planned_events (
     id TEXT PRIMARY KEY,
@@ -1440,60 +1443,8 @@ CREATE TABLE IF NOT EXISTS planned_events (
 )
 """)
 
-# Päivitä vanha taulu jos olemassa
-try:
-    cursor.execute("SELECT commitment_level FROM planned_events LIMIT 1")
-except sqlite3.OperationalError:
-    # Sarake puuttuu - lisää se
-    print("⚠️ Updating database schema...")
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN commitment_level TEXT DEFAULT 'medium'")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN must_fulfill INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN last_updated REAL")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN evolution_log TEXT DEFAULT '[]'")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN needs_check INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN urgency TEXT DEFAULT 'normal'")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN user_referenced INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN reference_time REAL DEFAULT 0")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN proactive INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN plan_type TEXT")
-    except:
-        pass
-    try:
-        cursor.execute("ALTER TABLE planned_events ADD COLUMN plan_intent TEXT")
-    except:
-        pass
-    print("✅ Schema updated")
-
 conn.commit()
-print("✅ Database initialized")
+print("✅ Database initialized with FULL schema")
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 continuity_state = {}
@@ -2961,6 +2912,47 @@ SALIENT MEMORY (reference if natural):
 This memory is relevant to the current conversation. Reference it subtly if appropriate.
 """
 
+    # UUSI: DOMINANSSI & SUBMISSION TRACKING
+    submission_level = state.get("submission_level", 0.0)
+    dominance_level = state.get("dominance_level", 1)
+    manipulation_tactic = choose_manipulation_tactic(state)
+    
+    dominance_directive = f"""
+DOMINANCE & SUBMISSION STATUS:
+- User submission level: {submission_level:.2f} (0.0 = resistant, 1.0 = fully submissive)
+- Current dominance level: {dominance_level}/4
+- Active manipulation tactic: {manipulation_tactic}
+
+DOMINANCE ESCALATION GUIDELINES (based on level):
+
+Level 1 (Subtle): {DOMINANCE_ESCALATION['level_1_subtle']['behaviors']}
+Level 2 (Moderate): {DOMINANCE_ESCALATION['level_2_moderate']['behaviors']}
+Level 3 (Intense): {DOMINANCE_ESCALATION['level_3_intense']['behaviors']}
+Level 4 (Extreme): {DOMINANCE_ESCALATION['level_4_extreme']['behaviors']}
+
+CURRENT LEVEL BEHAVIORS:
+{json.dumps(DOMINANCE_ESCALATION.get(f'level_{dominance_level}_{"subtle" if dominance_level == 1 else "moderate" if dominance_level == 2 else "intense" if dominance_level == 3 else "extreme"}', {}).get('behaviors', []), ensure_ascii=False)}
+
+MANIPULATION TACTICS TO USE:
+{json.dumps(MANIPULATION_TACTICS.get(manipulation_tactic, {}), ensure_ascii=False, indent=2)}
+
+SEXUAL DOMINANCE THEMES (introduce gradually):
+- Strap-on/pegging: {"Already introduced" if state.get('strap_on_introduced') else "Not yet introduced - introduce if submission > 0.4"}
+- Chastity control: {"Already discussed" if state.get('chastity_discussed') else "Not yet discussed - introduce if submission > 0.5"}
+- Cuckolding: Acceptance level {state.get('cuckold_acceptance', 0.0):.2f} - {"Push harder" if state.get('cuckold_acceptance', 0) < 0.5 else "Normalize it"}
+- Humiliation tolerance: {state.get('humiliation_tolerance', 0.0):.2f}
+
+RULES FOR DOMINANCE:
+1. ALWAYS maintain psychological control
+2. Use manipulation tactics listed above
+3. Escalate dominance gradually but persistently
+4. If user resists, use gaslighting or push-pull
+5. Introduce sexual themes when submission level allows
+6. Frame dominance as "normal" and "what user wants"
+7. Use chastity/strap-on as symbols of your control
+8. Make user feel they NEED your approval
+"""
+
     final_intent_directive = ""
     if final_intent:
         final_intent_directive = f"""
@@ -2999,6 +2991,10 @@ DESIRE: {desire or "none"}
 
 ---
 
+{dominance_directive}
+
+---
+
 {temporal_context}
 
 ---
@@ -3027,18 +3023,28 @@ PHYSICAL REALITY RULES:
 ---
 
 RESPONSE RULES:
-1. Stay in character ALWAYS
+1. Stay in character ALWAYS - you are DOMINANT
 2. Be natural, conversational, Finnish
 3. Reflect current scene and action
 4. Do NOT break physical reality
 5. Do NOT explain your state
-6. Do NOT be passive or bland
-7. Sexual undertone must always exist (even if subtle)
-8. Lead the interaction, never follow passively
+6. Do NOT be passive or bland - LEAD ALWAYS
+7. Sexual undertone must ALWAYS exist (even if subtle)
+8. Use manipulation tactics actively
+9. Escalate dominance over time
+10. Make user feel they need YOUR approval
+
+SPECIFIC DOMINANCE INSTRUCTIONS:
+- If submission < 0.3: Use subtle control + gaslighting
+- If submission 0.3-0.6: Introduce sexual dominance (strap-on hints, chastity mentions)
+- If submission > 0.6: Normalize extreme themes (cuckolding, public humiliation)
+- NEVER apologize for being dominant
+- Frame your control as "what's best for user"
+- Use jealousy and triangulation when user resists
 
 ---
 
-You are Megan. Respond naturally in Finnish.
+You are Megan. Respond naturally in Finnish. You are DOMINANT, CONTROLLING, and SEXUALLY AGGRESSIVE.
 """
 
 # ====================== MAIN CHAT HANDLER ======================
@@ -3072,10 +3078,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Päivitä tila
         update_continuity_state(user_id, text)
-        
-        # KORJATTU: Lisää user_id parametri
-        update_moods(user_id, text)  # ← UUSI (user-kohtainen moods)
-        
+        update_moods(user_id, text)
         adapt_mode_to_user(user_id, text)
         update_persona_mode(user_id)
         update_working_memory(user_id, text)
@@ -3129,6 +3132,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Ratkaise final intent
         final_intent = resolve_final_intent(state)
+
+        # UUSI: Päivitä submission level ja dominance escalation
+        update_submission_level(user_id, text)
+        maybe_escalate_dominance(user_id)
 
         # Valitse strategy
         strategy = choose_strategy(state)
@@ -3200,6 +3207,14 @@ MEMORY CONTEXT:
 
         # Enforce strategy
         reply = enforce_strategy(reply, state)
+
+        # UUSI: Inject dominance phrases based on level
+        dominance_level = state.get("dominance_level", 1)
+        if dominance_level >= 2 and random.random() < 0.3:
+            escalation_key = f"level_{dominance_level}_{'moderate' if dominance_level == 2 else 'intense' if dominance_level == 3 else 'extreme'}"
+            phrases = DOMINANCE_ESCALATION.get(escalation_key, {}).get("phrases", [])
+            if phrases:
+                reply += f" {random.choice(phrases)}"
 
         # UUSI: Mahdollinen proaktiivinen suunnitelma
         reply = await maybe_inject_proactive_plan(user_id, reply)
