@@ -49,6 +49,9 @@ if not XAI_API_KEY:
     print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
 else:
     print("✅ Grok API key found")
+    # ✅ LISÄÄ TÄMÄ (ONGELMA #3):
+    print(f"[DEBUG] XAI_API_KEY first 10 chars: {XAI_API_KEY[:10]}...")
+    print(f"[DEBUG] XAI_API_KEY length: {len(XAI_API_KEY)}")
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -57,6 +60,9 @@ grok_client = AsyncOpenAI(
     api_key=XAI_API_KEY,
     base_url="https://api.x.ai/v1"
 )
+
+# ✅ LISÄÄ TÄMÄ (ONGELMA #4):
+print(f"[DEBUG] Grok client base URL: {grok_client.base_url}")
 
 venice_client = AsyncOpenAI(
     api_key=VENICE_API_KEY,
@@ -1755,6 +1761,7 @@ async def safe_anthropic_call(**kwargs):
 
 
 # ====================== GROK WRAPPER (ADULT CONTENT) ======================
+# ✅ TÄYDELLINEN KORJATTU VERSIO (ONGELMAT #1, #5, #6)
 async def safe_grok_call(**kwargs):
     """
     Grok-wrapper joka käyttää OpenAI-yhteensopivaa API:a.
@@ -1765,6 +1772,11 @@ async def safe_grok_call(**kwargs):
     system = kwargs.pop("system", "")
     max_tokens = kwargs.pop("max_tokens", 250)
     temperature = kwargs.pop("temperature", 0.88)
+    
+    # Lyhennä system prompt jos liian pitkä
+    if len(system) > 50000:
+        print(f"⚠️ WARNING: System prompt too long ({len(system)} chars), truncating...")
+        system = system[:50000] + "\n\n[TRUNCATED]"
     
     # Yhdistä system-prompt ensimmäiseksi viestiksi
     openai_messages = []
@@ -1778,19 +1790,37 @@ async def safe_grok_call(**kwargs):
             "content": msg.get("content")
         })
     
+    # Validoi että viimeinen viesti on 'user'
+    if openai_messages and openai_messages[-1]["role"] != "user":
+        print(f"⚠️ WARNING: Last message is '{openai_messages[-1]['role']}', adding user message")
+        openai_messages.append({"role": "user", "content": "Continue."})
+    
+    # ✅ DEBUG-LOKIT (ONGELMA #1):
+    print(f"[GROK DEBUG] Model: grok-4-1-fast")
+    print(f"[GROK DEBUG] Messages count: {len(openai_messages)}")
+    print(f"[GROK DEBUG] Max tokens: {max_tokens}")
+    print(f"[GROK DEBUG] Temperature: {temperature}")
+    print(f"[GROK DEBUG] System prompt length: {len(system)}")
+    print(f"[GROK DEBUG] First message preview: {openai_messages[0]['content'][:200] if openai_messages else 'EMPTY'}")
+    
     # Kutsu Grokia
     for i in range(3):
         try:
+            print(f"[GROK DEBUG] Attempt {i+1}/3...")
+            
             response = await asyncio.wait_for(
                 grok_client.chat.completions.create(
-                    model="grok-4-1-fast",  # ← KORJATTU (curl-esimerkistä)
+                    model="grok-4-1-fast",
                     messages=openai_messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    stream=False  # ← LISÄÄ TÄMÄ (curl-esimerkistä)
+                    stream=False
                 ),
-                timeout=30
+                timeout=60  # ✅ NOSTETTU 30 → 60 sekuntia (ONGELMA #6)
             )
+            
+            print(f"[GROK DEBUG] Response received successfully!")
+            print(f"[GROK DEBUG] Response length: {len(response.choices[0].message.content)}")
             
             # Palauta Anthropic-yhteensopiva formaatti
             class GrokResponse:
@@ -1800,7 +1830,10 @@ async def safe_grok_call(**kwargs):
             return GrokResponse(response.choices[0].message.content)
             
         except Exception as e:
-            print(f"[Grok retry {i}] {type(e).__name__}: {e}")
+            print(f"[GROK ERROR] Attempt {i+1} failed: {type(e).__name__}: {e}")
+            if "invalid" in str(e).lower() or "not found" in str(e).lower():
+                print(f"[GROK] FATAL ERROR - stopping retries")
+                raise
             if i < 2:
                 await asyncio.sleep(1.5 * (i + 1))
                 continue
@@ -3050,7 +3083,7 @@ This is the FINAL directive. All other layers are context.
 Follow this above all else.
 """
 
-    return f"""
+    final_prompt = f"""
 {core_persona}
 
 ---
@@ -3126,6 +3159,16 @@ SPECIFIC DOMINANCE INSTRUCTIONS:
 
 You are Megan. Respond naturally in Finnish. You are DOMINANT, CONTROLLING, and SEXUALLY AGGRESSIVE.
 """
+
+    # ✅ LISÄÄ TÄMÄ (ONGELMA #2):
+    prompt_length = len(final_prompt)
+    if prompt_length > 50000:
+        print(f"⚠️ WARNING: System prompt too long: {prompt_length} chars")
+        # Lyhennä dynaamisesti
+        final_prompt = final_prompt[:50000] + "\n\n[TRUNCATED DUE TO LENGTH]"
+    
+    print(f"[SYSTEM PROMPT] Length: {len(final_prompt)} chars")
+    return final_prompt
 
 # ====================== MAIN CHAT HANDLER ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
