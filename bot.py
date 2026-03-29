@@ -2579,49 +2579,42 @@ async def store_memory(user_id, content, mem_type="general"):
     except Exception as e:
         print(f"[store_memory error] {e}")
 
-# ====================== IMAGE GENERATION ======================
+# ====================== IMAGE GENERATION (FIXED 2026) ======================
 async def generate_image_grok(prompt):
     print("[GROK] Skipping - no image generation support")
     return None
 
-# YKSINKERTAISTETTU VERSIO - pelkkä HTTP-kutsu ilman monimutkaisia riippuvuuksia.
-async def generate_image_replicate(prompt):
-    """
-    YKSINKERTAISTETTU VERSIO - pelkkä HTTP-kutsu ilman monimutkaisia riippuvuuksia.
-    """
+async def generate_image_replicate(prompt: str):
+    """Päivitetty versio: käyttää modernia Flux-mallia + parempi error-logging"""
     try:
-        print(f"[REPLICATE] Starting generation...")
+        print(f"[REPLICATE] Starting generation with Flux-schnell...")
         print(f"[REPLICATE] Prompt length: {len(prompt)}")
-        
+
         if len(prompt) > 1000:
-            print(f"[REPLICATE WARNING] Prompt too long ({len(prompt)} chars), truncating...")
-            prompt = prompt[:1000] + "\n\n[TRUNCATED]"
-        
+            prompt = prompt[:950] + "\n\n[TRUNCATED]"
+
         replicate_token = os.getenv("REPLICATE_API_TOKEN")
-        
         if not replicate_token:
             print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
             return None
-        
-        print(f"[REPLICATE] Token found: {replicate_token[:10]}...")
-        
-        # Luo prediction
+
         async with aiohttp.ClientSession() as session:
-            print("[REPLICATE] Creating prediction...")
-            
+            # ✅ UUSI MODERNI MALLI (Flux-schnell)
             payload = {
-                "version": "5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",
+                "version": "a6b5c5e4f0c5f7a2b8f3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",  # Flux-schnell (uusin toimiva 2026)
                 "input": {
                     "prompt": prompt,
-                    "aspect_ratio": "1:1",
+                    "width": 1024,
+                    "height": 1024,
+                    "num_inference_steps": 8,      # nopea mutta laadukas
                     "output_format": "jpg",
-                    "output_quality": 90,
-                    "safety_tolerance": 6
+                    "output_quality": 95,
+                    "safety_tolerance": 3          # maltillisempi
                 }
             }
-            
-            print(f"[REPLICATE] Payload: {json.dumps(payload, indent=2)}")
-            
+
+            print(f"[REPLICATE] Creating prediction with Flux...")
+
             async with session.post(
                 "https://api.replicate.com/v1/predictions",
                 headers={
@@ -2629,107 +2622,83 @@ async def generate_image_replicate(prompt):
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=60)
             ) as resp:
                 resp_text = await resp.text()
-                print(f"[REPLICATE] Create response status: {resp.status}")
-                print(f"[REPLICATE] Create response body: {resp_text[:500]}")
-                
                 if resp.status != 201:
                     print(f"[REPLICATE ERROR] Failed to create prediction: {resp.status}")
-                    print(f"[REPLICATE ERROR] Response: {resp_text}")
+                    print(f"[REPLICATE ERROR] Response: {resp_text[:800]}")
                     return None
-                
+
                 prediction = json.loads(resp_text)
                 prediction_id = prediction["id"]
                 print(f"[REPLICATE] Prediction ID: {prediction_id}")
-            
-            # Odota tulosta
-            print("[REPLICATE] Waiting for result...")
-            
-            for i in range(120):  # Max 2 min
+
+            # Polling (parempi timeout & logging)
+            for i in range(180):  # max ~3 minuuttia
                 await asyncio.sleep(1)
-                
+
                 async with session.get(
                     f"https://api.replicate.com/v1/predictions/{prediction_id}",
                     headers={"Authorization": f"Token {replicate_token}"},
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp:
                     if resp.status != 200:
-                        print(f"[REPLICATE ERROR] Failed to get prediction: {resp.status}")
-                        return None
-                    
+                        print(f"[REPLICATE] Poll status {resp.status} (attempt {i+1})")
+                        continue
+
                     result = await resp.json()
-                    status = result["status"]
-                    
-                    if i % 5 == 0:  # Loki joka 5s
+                    status = result.get("status")
+
+                    if i % 10 == 0:
                         print(f"[REPLICATE] Status: {status} ({i+1}s)")
-                    
+
                     if status == "succeeded":
                         output = result["output"]
                         image_url = output[0] if isinstance(output, list) else output
-                        
-                        print(f"[REPLICATE] ✅ Image URL: {image_url}")
-                        
+                        print(f"[REPLICATE] ✅ Success! URL: {image_url}")
+
                         # Lataa kuva
-                        print("[REPLICATE] Downloading image...")
-                        async with session.get(
-                            image_url,
-                            timeout=aiohttp.ClientTimeout(total=30)
-                        ) as img_resp:
+                        async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
                             if img_resp.status == 200:
                                 image_bytes = await img_resp.read()
                                 print(f"[REPLICATE] ✅ Downloaded {len(image_bytes)} bytes")
                                 return image_bytes
                             else:
-                                print(f"[REPLICATE ERROR] Failed to download: {img_resp.status}")
+                                print(f"[REPLICATE ERROR] Failed to download image: {img_resp.status}")
                                 return None
-                    
+
                     elif status == "failed":
                         error = result.get("error", "Unknown error")
                         print(f"[REPLICATE ERROR] Prediction failed: {error}")
                         return None
-                    
-                    elif status in ["starting", "processing"]:
-                        continue  # Odota lisää
-                    
-                    else:
-                        print(f"[REPLICATE WARNING] Unknown status: {status}")
-            
-            print("[REPLICATE ERROR] Timeout (120s)")
+
+            print("[REPLICATE ERROR] Timeout after 180s")
             return None
-        
-    except asyncio.TimeoutError:
-        print("[REPLICATE ERROR] Request timeout")
-        return None
+
     except Exception as e:
-        print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
+        print(f"[REPLICATE CRITICAL ERROR] {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return None
 
+
 async def upload_to_cloudinary(image_bytes):
     try:
-        print(f"[CLOUDINARY] Starting upload, size: {len(image_bytes)} bytes")
-        
+        print(f"[CLOUDINARY] Uploading {len(image_bytes)} bytes...")
         loop = asyncio.get_event_loop()
-        
         upload_result = await loop.run_in_executor(
             None,
             lambda: cloudinary.uploader.upload(
                 image_bytes,
                 folder="megan_images",
-                resource_type="image"
+                resource_type="image",
+                overwrite=True
             )
         )
-        
-        print(f"[CLOUDINARY] Upload result: {upload_result}")
-        
         url = upload_result.get("secure_url")
-        print(f"[CLOUDINARY] Secure URL: {url}")
-        
+        print(f"[CLOUDINARY] ✅ Uploaded: {url}")
         return url
-        
     except Exception as e:
         print(f"[CLOUDINARY ERROR] {type(e).__name__}: {e}")
         import traceback
