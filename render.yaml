@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: megan-bot
+    env: python
+    runtime: python-3.11.8
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PORT
+        value: 10000
