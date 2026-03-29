@@ -2593,6 +2593,10 @@ async def generate_image_replicate(prompt):
         print(f"[REPLICATE] Starting generation...")
         print(f"[REPLICATE] Prompt length: {len(prompt)}")
         
+        if len(prompt) > 1000:
+            print(f"[REPLICATE WARNING] Prompt too long ({len(prompt)} chars), truncating...")
+            prompt = prompt[:1000] + "\n\n[TRUNCATED]"
+        
         replicate_token = os.getenv("REPLICATE_API_TOKEN")
         
         if not replicate_token:
@@ -2738,26 +2742,26 @@ async def handle_image_request(update: Update, user_id, text):
     outfit = random.choice(CORE_PERSONA["wardrobe"])
     scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
     
-    # ✅ PARANNETTU PROMPT (realistisempi):
+    # ✅ YKSINKERTAISTETTU, NEUTRAALI PROMPT
     base_prompt = f"""
 A photorealistic portrait of a beautiful Finnish woman in her mid-20s.
 
 Physical features:
 - Natural blonde hair, shoulder-length, slightly wavy
 - Blue-green eyes, expressive and confident
-- Athletic yet feminine build, fit body
+- Athletic yet feminine build
 - Fair Nordic skin tone with natural freckles
 - Natural makeup, subtle and elegant
-- Confident, slightly playful expression
+- Confident, friendly expression
 
 Clothing:
 {outfit}
 
 Setting:
-{scene_desc}, natural lighting, intimate atmosphere
+{scene_desc}, natural lighting, warm atmosphere
 
 Style:
-Professional photography, cinematic lighting, high detail, 8K quality, realistic skin texture
+Professional photography, cinematic lighting, high detail, realistic skin texture
 """
     
     await update.message.reply_text("Hetki, otan kuvan...")
