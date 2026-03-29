@@ -8,7 +8,7 @@ import re
 import base64
 import logging
 import traceback
-import aiohttp  # ← LISÄTTY VENICE-KORJAUKSEN TAKIA
+import aiohttp  
 from collections import deque
 from io import BytesIO
 from datetime import datetime
