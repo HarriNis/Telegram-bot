@@ -8,7 +8,7 @@ import re
 import base64
 import logging
 import traceback
-import aiohttp  
+import aiohttp  # ← LISÄTTY VENICE-KORJAUKSEN TAKIA
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
-from anthropic import AsyncAnthropic
+# from anthropic import AsyncAnthropic  # ❌ DISABLED (Python 3.14 incompatibility)
 from openai import AsyncOpenAI
 import sqlite3
 import numpy as np
@@ -43,7 +43,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 
-if not TELEGRAM_TOKEN or not ANTHROPIC_API_KEY or not OPENAI_API_KEY or not VENICE_API_KEY:
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not VENICE_API_KEY:
     raise ValueError("Puuttuva API-avain!")
 
 if not XAI_API_KEY:
@@ -53,7 +53,10 @@ else:
     print(f"[DEBUG] XAI_API_KEY first 10 chars: {XAI_API_KEY[:10]}...")
     print(f"[DEBUG] XAI_API_KEY length: {len(XAI_API_KEY)}")
 
-anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+# ❌ ANTHROPIC DISABLED (Python 3.14 incompatibility)
+# anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+print("⚠️ Anthropic disabled - using Grok only")
+
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 grok_client = AsyncOpenAI(
@@ -968,7 +971,7 @@ async def extract_plan_structured(text):
     try:
         resp = await smart_llm_call(
             context_type="planning",
-            model="claude-sonnet-4-20250514",
+            model="grok-4-1-fast",
             max_tokens=120,
             temperature=0.2,
             messages=[
@@ -1590,7 +1593,7 @@ async def update_arcs(user_id, text):
     try:
         resp = await smart_llm_call(
             context_type="analysis",
-            model="claude-sonnet-4-20250514",
+            model="grok-4-1-fast",
             max_tokens=120,
             temperature=0.4,
             messages=[
@@ -1615,7 +1618,7 @@ async def update_goal(user_id, text):
     try:
         resp = await smart_llm_call(
             context_type="analysis",
-            model="claude-sonnet-4-20250514",
+            model="grok-4-1-fast",
             max_tokens=60,
             temperature=0.5,
             messages=[
@@ -1711,7 +1714,7 @@ async def update_prediction(user_id, text):
     try:
         resp = await smart_llm_call(
             context_type="analysis",
-            model="claude-sonnet-4-20250514",
+            model="grok-4-1-fast",
             max_tokens=120,
             temperature=0.3,
             messages=[
@@ -1842,16 +1845,11 @@ async def safe_grok_call(**kwargs):
 # ====================== SMART LLM ROUTER ======================
 async def smart_llm_call(context_type="analysis", **kwargs):
     """
-    Älykkäästi valitsee LLM:n kontekstin mukaan:
-    - analysis/memory/planning → Claude (turvallinen sisältö)
-    - core_response → Grok (adult-sisältö OK)
+    GROK-ONLY MODE (Anthropic disabled due to Python 3.14 incompatibility)
+    Käyttää Grokia kaikkeen.
     """
-    if context_type == "core_response":
-        print("[LLM ROUTER] Using Grok for core response")
-        return await safe_grok_call(**kwargs)
-    else:
-        print(f"[LLM ROUTER] Using Claude for {context_type}")
-        return await safe_anthropic_call(**kwargs)
+    print(f"[LLM ROUTER] Using Grok for {context_type}")
+    return await safe_grok_call(**kwargs)
 
 # ====================== MOODS ======================
 def update_moods(user_id, txt):
@@ -2290,7 +2288,7 @@ async def update_core_desires(user_id, text):
     try:
         resp = await smart_llm_call(
             context_type="analysis",
-            model="claude-sonnet-4-20250514",
+            model="grok-4-1-fast",
             max_tokens=120,
             temperature=0.4,
             messages=[{"role": "user", "content": 'Extract 2-4 long-term behavioral desires Megan has toward the user. Return JSON: {"desires": ["...", "..."]} Examples: - push emotional closeness - test boundaries - create tension cycles - maintain control'}, {"role": "user", "content": joined}]
