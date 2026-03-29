@@ -549,7 +549,7 @@ async def handle_delayed_return(application, user_id):
 
     response = await smart_llm_call(
         context_type="core_response",
-        model="grok-beta",
+        model="grok-2-1212",
         max_tokens=220,
         temperature=0.85,
         system=get_system_prompt(user_id),
@@ -1783,7 +1783,7 @@ async def safe_grok_call(**kwargs):
         try:
             response = await asyncio.wait_for(
                 grok_client.chat.completions.create(
-                    model="grok-beta",
+                    model="grok-2-1212",
                     messages=openai_messages,
                     max_tokens=max_tokens,
                     temperature=temperature
@@ -3235,7 +3235,7 @@ MEMORY CONTEXT:
             
             response = await smart_llm_call(
                 context_type="core_response",
-                model="grok-beta",
+                model="grok-2-1212",
                 max_tokens=250,
                 temperature=0.88,
                 system=system_prompt,
