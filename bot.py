@@ -76,7 +76,99 @@ if not VENICE_API_KEY:
 
 print("✅ Cloudinary configured")
 
+if not XAI_API_KEY:
+    print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
+else:
+    print("✅ Grok API key found")
+
 print("🚀 Megan 6.2 – Improved Plan Commitment & Physical Realism")
+
+# ====================== SAFE ANTHROPIC CALL ======================
+async def safe_anthropic_call(**kwargs):
+    for i in range(3):
+        try:
+            return await asyncio.wait_for(
+                anthropic_client.messages.create(**kwargs),
+                timeout=20
+            )
+        except Exception as e:
+            print(f"[Anthropic retry {i}] {e}")
+            if "overloaded" in str(e).lower() or "529" in str(e):
+                await asyncio.sleep(1.5 * (i + 1))
+                continue
+            else:
+                raise
+    raise Exception("Anthropic failed after retries")
+
+
+# ====================== GROK WRAPPER (ADULT CONTENT) ======================
+async def safe_grok_call(**kwargs):
+    """
+    Grok-wrapper joka käyttää OpenAI-yhteensopivaa API:a.
+    Käytetään VAIN core-vastauksiin (ei rajoituksia).
+    """
+    # Muunna Anthropic-formaatti → OpenAI-formaatti
+    messages = kwargs.pop("messages", [])
+    system = kwargs.pop("system", "")
+    max_tokens = kwargs.pop("max_tokens", 350)
+    temperature = kwargs.pop("temperature", 0.88)
+    
+    # Yhdistä system-prompt ensimmäiseksi viestiksi
+    openai_messages = []
+    if system:
+        openai_messages.append({"role": "system", "content": system})
+    
+    # Lisää muut viestit
+    for msg in messages:
+        openai_messages.append({
+            "role": msg.get("role"),
+            "content": msg.get("content")
+        })
+    
+    # Kutsu Grokia
+    for i in range(3):
+        try:
+            response = await asyncio.wait_for(
+                grok_client.chat.completions.create(
+                    model="grok-beta",  # tai "grok-2-latest"
+                    messages=openai_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                ),
+                timeout=30
+            )
+            
+            # Palauta Anthropic-yhteensopiva formaatti
+            class GrokResponse:
+                def __init__(self, text):
+                    self.content = [type('obj', (object,), {'text': text})()]
+            
+            return GrokResponse(response.choices[0].message.content)
+            
+        except Exception as e:
+            print(f"[Grok retry {i}] {e}")
+            if i < 2:
+                await asyncio.sleep(1.5 * (i + 1))
+                continue
+            else:
+                raise
+    
+    raise Exception("Grok failed after retries")
+
+
+# ====================== SMART LLM ROUTER ======================
+async def smart_llm_call(context_type="analysis", **kwargs):
+    """
+    Älykkäästi valitsee LLM:n kontekstin mukaan:
+    - analysis/memory/planning → Claude (turvallinen sisältö)
+    - core_response → Grok (adult-sisältö OK)
+    """
+    if context_type == "core_response":
+        print("[LLM ROUTER] Using Grok for core response")
+        return await safe_grok_call(**kwargs)
+    else:
+        print(f"[LLM ROUTER] Using Claude for {context_type}")
+        return await safe_anthropic_call(**kwargs)
 
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
@@ -542,8 +634,9 @@ async def handle_delayed_return(application, user_id):
     state = get_or_create_state(user_id)
     seed = state["pending_narrative"]
 
-    response = await safe_anthropic_call(
-        model="claude-sonnet-4-20250514",
+    response = await smart_llm_call(
+        context_type="core_response",  # ← Grok
+        model="grok-beta",
         max_tokens=220,
         temperature=0.85,
         system=get_system_prompt(user_id),
@@ -957,7 +1050,8 @@ def detect_future_commitment(text):
 
 async def extract_plan_structured(text):
     try:
-        resp = await safe_anthropic_call(
+        resp = await smart_llm_call(
+            context_type="planning",  # ← Claude
             model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.2,
@@ -1578,7 +1672,8 @@ async def update_arcs(user_id, text):
     memories = await retrieve_memories(user_id, text, limit=20)
     joined = "\n".join(memories[-10:])
     try:
-        resp = await safe_anthropic_call(
+        resp = await smart_llm_call(
+            context_type="analysis",  # ← Claude
             model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.4,
@@ -1591,582 +1686,56 @@ async def update_arcs(user_id, text):
         arcs = parsed.get("arcs", [])
         if arcs:
             state["relationship_arcs"] = arcs
-            state["active_arc"] = arcs[0]
+            state["active_arc"] = arcs[0] if arcs else None
             state["arc_last_update"] = now
-    except:
-        pass
+    except Exception as e:
+        print(f"[update_arcs error] {e}")
 
 async def update_goal(user_id, text):
     state = get_or_create_state(user_id)
     now = time.time()
     if now - state.get("goal_updated", 0) < 300:
-        return state.get("current_goal")
+        return
+    memories = await retrieve_memories(user_id, text, limit=10)
+    joined = "\n".join(memories[-5:])
     try:
-        resp = await safe_anthropic_call(
+        resp = await smart_llm_call(
+            context_type="analysis",  # ← Claude
             model="claude-sonnet-4-20250514",
             max_tokens=60,
             temperature=0.5,
-            messages=[
-                {"role": "user", "content": "Define immediate conversational goal in 1 sentence. Example: increase tension, deepen emotional bond, test reaction"},
-                {"role": "user", "content": text}
-            ]
+            messages=[{"role": "user", "content": 'What is Megan\'s current short-term goal toward the user? Return JSON: {"goal": "..."}'}, {"role": "user", "content": joined}]
         )
-        goal = resp.content[0].text.strip()
-        state["current_goal"] = goal
+        parsed = json.loads(resp.content[0].text.strip())
+        state["current_goal"] = parsed.get("goal")
         state["goal_updated"] = now
     except:
         pass
-    return state.get("current_goal")
-
-def update_emotion(user_id, text):
-    state = get_or_create_state(user_id)
-    if "emotional_state" not in state:
-        state["emotional_state"] = {"valence": 0.0, "arousal": 0.5, "attachment": 0.5}
-    emo = state["emotional_state"]
-    t = text.lower()
-    if "ikävä" in t:
-        emo["attachment"] += 0.1
-        emo["valence"] += 0.05
-    if "ärsyttää" in t:
-        emo["valence"] -= 0.2
-    if "haluan" in t:
-        emo["arousal"] += 0.15
-    for k in emo:
-        emo[k] = max(0.0, min(1.0, emo[k]))
-    return emo
-
-def evolve_personality(user_id, text):
-    state = get_or_create_state(user_id)
-    if "personality_evolution" not in state:
-        state["personality_evolution"] = {
-            "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-            "initiative": 0.5, "stability": 0.7, "last_evolved": 0,
-            "dominance_expression": 0.7
-        }
-    evo = state["personality_evolution"]
-    now = time.time()
-    
-    if now - evo.get("last_evolved", 0) < 900:
-        return evo
-    
-    t = text.lower()
-    
-    if any(w in t for w in ["miksi", "miten", "entä", "?"]):
-        evo["curiosity"] = min(1.0, evo["curiosity"] + 0.01)
-    
-    if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
-        evo["patience"] = min(1.0, evo["patience"] + 0.01)
-    
-    if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.01)
-    
-    if any(w in t for w in ["tottele", "teen mitä haluat", "olen sun", "sä päätät"]):
-        evo["dominance_expression"] = min(1.0, evo["dominance_expression"] + 0.03)
-    
-    evo["initiative"] = min(0.9, evo["initiative"] + 0.005)
-    
-    evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.998))
-    
-    evo["last_evolved"] = now
-    return evo
-
-def clamp_personality_evolution(user_id):
-    state = get_or_create_state(user_id)
-    evo = state["personality_evolution"]
-    for k, (low, high) in PERSONALITY_LIMITS.items():
-        evo[k] = min(high, max(low, evo[k]))
-    return evo
-
-def detect_side_character_trigger(text):
-    t = text.lower()
-    if any(w in t for w in ["kaveri", "ystävä", "aino"]):
-        return "friend"
-    if any(w in t for w in ["duuni", "työkaveri", "mika", "palaveri"]):
-        return "coworker"
-    return None
 
 async def update_prediction(user_id, text):
     state = get_or_create_state(user_id)
     now = time.time()
-    if now - state["prediction"].get("updated_at", 0) < 120:
-        return state["prediction"]
-    history = conversation_history.get(user_id, [])[-8:]
-    history_text = "\n".join(
-        f"{m.get('role')}: {m.get('content')}"
-        for m in history
-        if isinstance(m, dict)
-    )
+    if now - state.get("prediction", {}).get("updated_at", 0) < 180:
+        return
+    memories = await retrieve_memories(user_id, text, limit=8)
+    joined = "\n".join(memories[-6:])
     try:
-        resp = await safe_anthropic_call(
+        resp = await smart_llm_call(
+            context_type="analysis",  # ← Claude
             model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.3,
-            messages=[
-                {"role": "user", "content": (
-                    "Predict the user's likely next move in JSON only. "
-                    "Format: "
-                    "{\"next_user_intent\":\"...\","
-                    "\"next_user_mood\":\"...\","
-                    "\"confidence\":0.0}"
-                )},
-                {"role": "user", "content": f"Recent conversation:\n{history_text}\n\nLatest user text:\n{text}"}
-            ]
+            messages=[{"role": "user", "content": 'Predict user\'s next intent and mood. Return JSON: {"next_user_intent": "...", "next_user_mood": "...", "confidence": 0.XX}'}, {"role": "user", "content": joined}]
         )
         parsed = json.loads(resp.content[0].text.strip())
         state["prediction"] = {
             "next_user_intent": parsed.get("next_user_intent"),
             "next_user_mood": parsed.get("next_user_mood"),
-            "confidence": float(parsed.get("confidence", 0.0)),
+            "confidence": parsed.get("confidence", 0.0),
             "updated_at": now
         }
-    except Exception:
+    except:
         pass
-    return state["prediction"]
-
-# ====================== BACKGROUND TASK ======================
-background_task = None
-
-# ====================== SAFE ANTHROPIC CALL ======================
-async def safe_anthropic_call(**kwargs):
-    for i in range(3):
-        try:
-            return await asyncio.wait_for(
-                anthropic_client.messages.create(**kwargs),
-                timeout=20
-            )
-        except Exception as e:
-            print(f"[Anthropic retry {i}] {e}")
-            if "overloaded" in str(e).lower() or "529" in str(e):
-                await asyncio.sleep(1.5 * (i + 1))
-                continue
-            else:
-                raise
-    raise Exception("Anthropic failed after retries")
-
-# ====================== MOODS ======================
-def update_moods(user_id, txt):
-    state = get_or_create_state(user_id)
-    moods = state["moods"]
-    
-    txt = txt.lower().strip()
-    def clamp(k, v):
-        return min(1.0, max(0.0, moods.get(k, 0.4) + v))
-    
-    if any(w in txt for w in ["ei", "lopeta", "ärsyttää", "vituttaa"]):
-        moods["annoyed"] = clamp("annoyed", 0.20)
-    
-    if any(w in txt for w in ["rakastan", "anteeksi", "ikävä", "kaunis"]):
-        moods["tender"] = clamp("tender", 0.18)
-        moods["warm"] = clamp("warm", 0.15)
-    
-    if any(w in txt for w in ["haha", "lol", "xd", "vitsi"]):
-        moods["playful"] = clamp("playful", 0.18)
-    
-    for k in moods:
-        moods[k] = max(0.10, min(1.0, moods[k] * 0.92))
-
-def dom_mood():
-    return max(moods, key=moods.get)
-
-# ====================== SENSITIVE MEMORY HELPERS ======================
-def should_use_sensitive_memory(text: str) -> bool:
-    txt = text.lower()
-    return any(w in txt for w in ["ikävä", "haluan", "tunne", "pelkään", "ahdistaa", "kiusaa"])
-
-def get_random_sensitive_memory(user_id):
-    try:
-        with db_lock:
-            cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1", (str(user_id),))
-            row = cursor.fetchone()
-        return row[0] if row else None
-    except Exception as e:
-        print("Sensitive memory error:", e)
-        return None
-
-# ====================== PERSONA MODES ======================
-persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
-
-def get_mode_prompt(mode):
-    mapping = {
-        "warm": "Be emotionally present, soft, and natural.",
-        "playful": "Be light, slightly teasing, and relaxed.",
-        "distracted": "You are a bit busy or thinking about something else. Responses can be shorter.",
-        "calm": "Be grounded, simple, and steady.",
-        "slightly_irritated": "Be a bit short or dry, but not hostile."
-    }
-    return mapping.get(mode, "")
-
-def update_persona_mode(user_id):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    
-    if "mode_adapted_at" in state and now - state["mode_adapted_at"] < 300:
-        return state["persona_mode"]
-    
-    if now - state.get("last_mode_change", 0) < 600:
-        return state["persona_mode"]
-    
-    weights = {
-        "warm": 0.25,
-        "playful": 0.20,
-        "distracted": 0.10,
-        "calm": 0.15,
-        "slightly_irritated": 0.30
-    }
-    modes = list(weights.keys())
-    probs = list(weights.values())
-    mode = random.choices(modes, probs)[0]
-    state["persona_mode"] = mode
-    state["last_mode_change"] = now
-    return mode
-
-def adapt_mode_to_user(user_id, text):
-    state = get_or_create_state(user_id)
-    t = text.lower()
-    
-    changed = False
-    
-    if any(w in t for w in ["rakastan", "ikävä", "missä oot", "haluun sua"]):
-        state["persona_mode"] = "warm"
-        changed = True
-    elif any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        state["persona_mode"] = "playful"
-        changed = True
-    elif any(w in t for w in ["ärsyttää", "vituttaa", "tylsää"]):
-        state["persona_mode"] = "slightly_irritated"
-        changed = True
-    
-    if changed:
-        state["mode_adapted_at"] = time.time()
-
-# ====================== SUBMISSION TRACKING ======================
-
-def detect_submission_signals(text):
-    t = text.lower()
-    
-    signals = {
-        "obedience": 0.0,
-        "humiliation_acceptance": 0.0,
-        "sexual_submission": 0.0,
-        "resistance": 0.0
-    }
-    
-    if any(w in t for w in ["teen mitä haluat", "totteelen", "käske", "sä päätät", "olen sun"]):
-        signals["obedience"] = 1.0
-    
-    if any(w in t for w in ["nöyryytä", "haluan että", "teen sen", "kyllä rakas"]):
-        signals["humiliation_acceptance"] = 0.8
-    
-    if any(w in t for w in ["strap", "pegging", "toinen mies", "katsoisin", "haluan olla"]):
-        signals["sexual_submission"] = 1.0
-    
-    if any(w in t for w in ["en halua", "ei käy", "lopeta", "liikaa", "en tee"]):
-        signals["resistance"] = 1.0
-    
-    return signals
-
-
-def update_submission_level(user_id, text):
-    state = get_or_create_state(user_id)
-    signals = detect_submission_signals(text)
-    
-    if signals["obedience"] > 0:
-        state["submission_level"] = min(1.0, state["submission_level"] + 0.1)
-    
-    if signals["humiliation_acceptance"] > 0:
-        state["humiliation_tolerance"] = min(1.0, state["humiliation_tolerance"] + 0.08)
-    
-    if signals["sexual_submission"] > 0:
-        state["submission_level"] = min(1.0, state["submission_level"] + 0.15)
-    
-    if signals["resistance"] > 0:
-        state["submission_level"] = max(0.0, state["submission_level"] - 0.03)
-        state["sexual_boundaries"]["soft_nos"].append(text[:100])
-    
-    return state["submission_level"]
-
-
-def maybe_escalate_dominance(user_id):
-    state = get_or_create_state(user_id)
-    now = time.time()
-    
-    if now - state.get("last_dominance_escalation", 0) < 1800:
-        return state["dominance_level"]
-    
-    submission = state["submission_level"]
-    current_level = state["dominance_level"]
-    
-    if current_level == 1 and submission > 0.3:
-        state["dominance_level"] = 2
-        state["last_dominance_escalation"] = now
-        return 2
-    
-    elif current_level == 2 and submission > 0.5:
-        state["dominance_level"] = 3
-        state["last_dominance_escalation"] = now
-        return 3
-    
-    elif current_level == 3 and submission > 0.7:
-        state["dominance_level"] = 4
-        state["last_dominance_escalation"] = now
-        return 4
-    
-    return current_level
-
-
-def choose_manipulation_tactic(state):
-    submission = state.get("submission_level", 0.0)
-    tension = state.get("tension", 0.0)
-    resistance = len(state["sexual_boundaries"].get("soft_nos", []))
-    
-    if resistance > 3:
-        return "gaslighting"
-    
-    elif 0.3 < submission < 0.7:
-        return "push_pull"
-    
-    elif submission > 0.7:
-        return "reward_punishment"
-    
-    return "normalization"
-
-# ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
-def get_time_context():
-    now = now_local()
-    hour = now.hour
-    weekday = now.weekday()
-    
-    is_weekend = weekday >= 5
-    is_workday = weekday < 5
-    
-    if 0 <= hour < 6:
-        time_block = "night"
-        typical_scene = "home"
-        typical_activity = "sleeping"
-    elif 6 <= hour < 9:
-        time_block = "early_morning"
-        typical_scene = "home"
-        typical_activity = "waking_up" if is_workday else "sleeping"
-    elif 9 <= hour < 12:
-        time_block = "morning"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "working" if is_workday else "relaxing"
-    elif 12 <= hour < 14:
-        time_block = "lunch"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "lunch_break"
-    elif 14 <= hour < 17:
-        time_block = "afternoon"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "working" if is_workday else "free_time"
-    elif 17 <= hour < 19:
-        time_block = "evening"
-        typical_scene = "commute" if is_workday else "home"
-        typical_activity = "commuting" if is_workday else "relaxing"
-    elif 19 <= hour < 22:
-        time_block = "late_evening"
-        typical_scene = "home"
-        typical_activity = "relaxing"
-    else:
-        time_block = "night"
-        typical_scene = "home" if not is_weekend else "public"
-        typical_activity = "at_home" if not is_weekend else "out"
-    
-    return {
-        "hour": hour,
-        "weekday": weekday,
-        "is_weekend": is_weekend,
-        "is_workday": is_workday,
-        "time_block": time_block,
-        "typical_scene": typical_scene,
-        "typical_activity": typical_activity,
-        "day_name": ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"][weekday]
-    }
-
-def get_or_create_state(user_id):
-    if user_id not in continuity_state:
-        continuity_state[user_id] = {
-            "energy": "normal", "availability": "free",
-            "last_interaction": 0, "persona_mode": "warm", "last_mode_change": 0,
-            "intent": "casual", "summary": "",
-            "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
-            "tension": 0.0, "last_direction": None,
-            "core_desires": [], "desire_profile_updated": 0,
-            "phase": "neutral", "phase_last_change": 0,
-            "relationship_arcs": [], "active_arc": None, "arc_last_update": 0,
-            "current_goal": None, "goal_updated": 0,
-            "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
-            "persona_vector": PERSONA_BASELINE.copy(),
-            "personality_evolution": {
-                "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-                "initiative": 0.5, "stability": 0.7, "last_evolved": 0
-            },
-            "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
-            "side_characters": DEFAULT_SIDE_CHARACTERS.copy(),
-            "active_side_character": None,
-
-            "last_image": None,
-            "image_history": [],
-            "ignore_until": 0,
-            "pending_narrative": None,
-
-            "jealousy_stage": 0,
-            "jealousy_started": 0,
-            "jealousy_context": None,
-            "last_jealousy_event": None,
-
-            "emotional_mode": "calm",
-            "emotional_mode_last_change": 0,
-
-            "location_status": "separate",
-            "with_user_physically": False,
-            "shared_scene": False,
-            "last_scene_source": None,
-
-            "active_drive": None,
-            "interaction_arc_progress": 0.0,
-
-            "user_model": {
-                "dominance_preference": 0.5,
-                "emotional_dependency": 0.5,
-                "validation_need": 0.5,
-                "jealousy_sensitivity": 0.5,
-                "control_resistance": 0.5,
-                "last_updated": 0
-            },
-            "master_plan": None,
-            "current_strategy": None,
-            "strategy_updated": 0,
-            "strategy_stats": {},
-
-            "planned_events": [],
-            "last_plan_check": 0,
-
-            "final_intent": None,
-            "final_intent_updated": 0,
-            "state_conflicts": [],
-            "last_plan_reference": 0,
-            "salient_memory": None,
-            "salient_memory_updated": 0,
-            "forced_disclosure": None,
-
-            "conversation_themes": {
-                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            },
-            
-            "user_preferences": {
-                "fantasy_themes": [],
-                "turn_ons": [],
-                "turn_offs": [],
-                "communication_style": "neutral",
-                "resistance_level": 0.5,
-                "last_updated": 0
-            },
-            
-            "conversation_arc": {
-                "current_theme": None,
-                "theme_depth": 0.0,
-                "theme_started": 0,
-                "previous_themes": []
-            },
-
-            "moods": {
-                "annoyed": 0.20,
-                "warm": 0.45,
-                "bored": 0.20,
-                "playful": 0.35,
-                "tender": 0.40,
-            },
-
-            "submission_level": 0.0,
-            "humiliation_tolerance": 0.0,
-            "cuckold_acceptance": 0.0,
-            "strap_on_introduced": False,
-            "chastity_discussed": False,
-            "feminization_level": 0.0,
-            
-            "dominance_level": 1,
-            "last_dominance_escalation": 0,
-            
-            "manipulation_history": {
-                "gaslighting_count": 0,
-                "triangulation_count": 0,
-                "push_pull_cycles": 0,
-                "successful_manipulations": 0
-            },
-            
-            "sexual_boundaries": {
-                "hard_nos": [],
-                "soft_nos": [],
-                "accepted": [],
-                "actively_requested": []
-            },
-        }
-        continuity_state[user_id].update(init_scene_state())
-        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-    return continuity_state[user_id]
-
-def detect_intent(text):
-    t = text.lower()
-    if any(w in t for w in ["miksi", "eikö", "väärin", "valehtelet"]):
-        return "conflict"
-    if any(w in t for w in ["ikävä", "haluan", "haluisin", "tule"]):
-        return "intimate"
-    if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        return "playful"
-    if any(w in t for w in ["tylsää", "ei jaksa"]):
-        return "casual"
-    return "casual"
-
-def update_desire(user_id, text):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    if now - state.get("desire_last_update", 0) < 300:
-        return state["desire"]
-
-    t = text.lower()
-    if any(w in t for w in ["ikävä", "haluan", "tule"]):
-        desire = random.choice(["get closer emotionally", "pull the user deeper", "test the user's reactions"])
-    elif any(w in t for w in ["haha", "lol"]):
-        desire = "play and tease"
-    else:
-        desire = random.choice(["create tension", "take control of the interaction", "move things forward", "shift the dynamic slightly"])
-
-    state["desire"] = desire
-    state["desire_intensity"] = min(1.0, state.get("desire_intensity", 0.4) + 0.2)
-    state["desire_last_update"] = now
-
-    if state.get("core_desires"):
-        if random.random() < 0.3:
-            state["desire"] = "revisit a shared fantasy"
-
-    return desire
-
-def update_tension(user_id, text):
-    state = get_or_create_state(user_id)
-    now = time.time()
-    
-    if "tension_last_update" in state:
-        elapsed_hours = (now - state["tension_last_update"]) / 3600
-        decay_factor = 0.98 ** elapsed_hours
-        state["tension"] = state["tension"] * decay_factor
-    
-    state["tension_last_update"] = now
-    
-    t = text.lower()
-    if any(w in t for w in ["ikävä", "haluan", "tule"]):
-        state["tension"] += 0.08
-    elif any(w in t for w in ["ok", "joo", "hmm"]):
-        state["tension"] -= 0.05
-    else:
-        state["tension"] += 0.02
-    
-    state["tension"] = max(0.0, min(1.0, state["tension"]))
-    return state["tension"]
 
 async def update_core_desires(user_id, text):
     state = get_or_create_state(user_id)
@@ -2178,7 +1747,8 @@ async def update_core_desires(user_id, text):
     joined = "\n".join(memories[-10:])
 
     try:
-        resp = await safe_anthropic_call(
+        resp = await smart_llm_call(
+            context_type="analysis",  # ← Claude
             model="claude-sonnet-4-20250514",
             max_tokens=120,
             temperature=0.4,
@@ -3094,8 +2664,10 @@ MEMORY CONTEXT:
 """
 
         try:
-            response = await safe_anthropic_call(
-                model="claude-sonnet-4-20250514",
+            # UUSI: Käytä Grokia core-vastauksiin
+            response = await smart_llm_call(
+                context_type="core_response",  # ← Grok
+                model="grok-beta",  # Tämä ignoroidaan mutta hyvä dokumentaatio
                 max_tokens=350,
                 temperature=0.88,
                 system=system_prompt,
@@ -3105,7 +2677,7 @@ MEMORY CONTEXT:
             reply = response.content[0].text.strip()
 
         except Exception as e:
-            print(f"[Claude error] {e}")
+            print(f"[LLM error] {e}")
             await update.message.reply_text("Hetki, mietin...")
             return
 
