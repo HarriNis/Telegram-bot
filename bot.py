@@ -20,8 +20,6 @@ from telegram.ext import Application, MessageHandler, filters, CommandHandler, C
 from openai import AsyncOpenAI
 import sqlite3
 import numpy as np
-import cloudinary
-import cloudinary.uploader
 
 logging.basicConfig(level=logging.INFO)
 
@@ -71,23 +69,7 @@ venice_client = AsyncOpenAI(
     base_url="https://api.venice.ai/v1"
 )
 
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET")
-)
-
-# Tarkista Cloudinary-konfiguraatio
-if not os.getenv("CLOUDINARY_CLOUD_NAME"):
-    print("⚠️ WARNING: CLOUDINARY_CLOUD_NAME missing!")
-if not os.getenv("CLOUDINARY_API_KEY"):
-    print("⚠️ WARNING: CLOUDINARY_API_KEY missing!")
-if not os.getenv("CLOUDINARY_API_SECRET"):
-    print("⚠️ WARNING: CLOUDINARY_API_SECRET missing!")
-if not VENICE_API_KEY:
-    print("⚠️ WARNING: VENICE_API_KEY missing!")
-
-print("✅ Cloudinary configured")
+# Cloudinary on poistettu kokonaan – ei enää konfiguraatiota
 
 # ====================== API KEY VALIDATION ======================
 print("=" * 60)
@@ -2579,42 +2561,49 @@ async def store_memory(user_id, content, mem_type="general"):
     except Exception as e:
         print(f"[store_memory error] {e}")
 
-# ====================== IMAGE GENERATION (FIXED 2026) ======================
+# ====================== IMAGE GENERATION (CLOUDINARY POISTETTU – SUORA TELEGRAM-LÄHETYS) ======================
 async def generate_image_grok(prompt):
     print("[GROK] Skipping - no image generation support")
     return None
 
-async def generate_image_replicate(prompt: str):
-    """Päivitetty versio: käyttää modernia Flux-mallia + parempi error-logging"""
+# YKSINKERTAISTETTU VERSIO - pelkkä HTTP-kutsu ilman monimutkaisia riippuvuuksia.
+async def generate_image_replicate(prompt):
+    """
+    YKSINKERTAISTETTU VERSIO - pelkkä HTTP-kutsu ilman monimutkaisia riippuvuuksia.
+    """
     try:
-        print(f"[REPLICATE] Starting generation with Flux-schnell...")
+        print(f"[REPLICATE] Starting generation...")
         print(f"[REPLICATE] Prompt length: {len(prompt)}")
-
+        
         if len(prompt) > 1000:
-            prompt = prompt[:950] + "\n\n[TRUNCATED]"
-
+            print(f"[REPLICATE WARNING] Prompt too long ({len(prompt)} chars), truncating...")
+            prompt = prompt[:1000] + "\n\n[TRUNCATED]"
+        
         replicate_token = os.getenv("REPLICATE_API_TOKEN")
+        
         if not replicate_token:
             print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
             return None
-
+        
+        print(f"[REPLICATE] Token found: {replicate_token[:10]}...")
+        
+        # Luo prediction
         async with aiohttp.ClientSession() as session:
-            # ✅ UUSI MODERNI MALLI (Flux-schnell)
+            print("[REPLICATE] Creating prediction...")
+            
             payload = {
-                "version": "a6b5c5e4f0c5f7a2b8f3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",  # Flux-schnell (uusin toimiva 2026)
+                "version": "5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",
                 "input": {
                     "prompt": prompt,
-                    "width": 1024,
-                    "height": 1024,
-                    "num_inference_steps": 8,      # nopea mutta laadukas
+                    "aspect_ratio": "1:1",
                     "output_format": "jpg",
-                    "output_quality": 95,
-                    "safety_tolerance": 3          # maltillisempi
+                    "output_quality": 90,
+                    "safety_tolerance": 6
                 }
             }
-
-            print(f"[REPLICATE] Creating prediction with Flux...")
-
+            
+            print(f"[REPLICATE] Payload: {json.dumps(payload, indent=2)}")
+            
             async with session.post(
                 "https://api.replicate.com/v1/predictions",
                 headers={
@@ -2622,88 +2611,85 @@ async def generate_image_replicate(prompt: str):
                     "Content-Type": "application/json"
                 },
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 resp_text = await resp.text()
+                print(f"[REPLICATE] Create response status: {resp.status}")
+                print(f"[REPLICATE] Create response body: {resp_text[:500]}")
+                
                 if resp.status != 201:
                     print(f"[REPLICATE ERROR] Failed to create prediction: {resp.status}")
-                    print(f"[REPLICATE ERROR] Response: {resp_text[:800]}")
+                    print(f"[REPLICATE ERROR] Response: {resp_text}")
                     return None
-
+                
                 prediction = json.loads(resp_text)
                 prediction_id = prediction["id"]
                 print(f"[REPLICATE] Prediction ID: {prediction_id}")
-
-            # Polling (parempi timeout & logging)
-            for i in range(180):  # max ~3 minuuttia
+            
+            # Odota tulosta
+            print("[REPLICATE] Waiting for result...")
+            
+            for i in range(120):  # Max 2 min
                 await asyncio.sleep(1)
-
+                
                 async with session.get(
                     f"https://api.replicate.com/v1/predictions/{prediction_id}",
                     headers={"Authorization": f"Token {replicate_token}"},
-                    timeout=aiohttp.ClientTimeout(total=15)
+                    timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
                     if resp.status != 200:
-                        print(f"[REPLICATE] Poll status {resp.status} (attempt {i+1})")
-                        continue
-
+                        print(f"[REPLICATE ERROR] Failed to get prediction: {resp.status}")
+                        return None
+                    
                     result = await resp.json()
-                    status = result.get("status")
-
-                    if i % 10 == 0:
+                    status = result["status"]
+                    
+                    if i % 5 == 0:  # Loki joka 5s
                         print(f"[REPLICATE] Status: {status} ({i+1}s)")
-
+                    
                     if status == "succeeded":
                         output = result["output"]
                         image_url = output[0] if isinstance(output, list) else output
-                        print(f"[REPLICATE] ✅ Success! URL: {image_url}")
-
+                        
+                        print(f"[REPLICATE] ✅ Image URL: {image_url}")
+                        
                         # Lataa kuva
-                        async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30)) as img_resp:
+                        print("[REPLICATE] Downloading image...")
+                        async with session.get(
+                            image_url,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as img_resp:
                             if img_resp.status == 200:
                                 image_bytes = await img_resp.read()
                                 print(f"[REPLICATE] ✅ Downloaded {len(image_bytes)} bytes")
                                 return image_bytes
                             else:
-                                print(f"[REPLICATE ERROR] Failed to download image: {img_resp.status}")
+                                print(f"[REPLICATE ERROR] Failed to download: {img_resp.status}")
                                 return None
-
+                    
                     elif status == "failed":
                         error = result.get("error", "Unknown error")
                         print(f"[REPLICATE ERROR] Prediction failed: {error}")
                         return None
-
-            print("[REPLICATE ERROR] Timeout after 180s")
+                    
+                    elif status in ["starting", "processing"]:
+                        continue  # Odota lisää
+                    
+                    else:
+                        print(f"[REPLICATE WARNING] Unknown status: {status}")
+            
+            print("[REPLICATE ERROR] Timeout (120s)")
             return None
-
+        
+    except asyncio.TimeoutError:
+        print("[REPLICATE ERROR] Request timeout")
+        return None
     except Exception as e:
-        print(f"[REPLICATE CRITICAL ERROR] {type(e).__name__}: {e}")
+        print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return None
 
-
-async def upload_to_cloudinary(image_bytes):
-    try:
-        print(f"[CLOUDINARY] Uploading {len(image_bytes)} bytes...")
-        loop = asyncio.get_event_loop()
-        upload_result = await loop.run_in_executor(
-            None,
-            lambda: cloudinary.uploader.upload(
-                image_bytes,
-                folder="megan_images",
-                resource_type="image",
-                overwrite=True
-            )
-        )
-        url = upload_result.get("secure_url")
-        print(f"[CLOUDINARY] ✅ Uploaded: {url}")
-        return url
-    except Exception as e:
-        print(f"[CLOUDINARY ERROR] {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 async def handle_image_request(update: Update, user_id, text):
     state = get_or_create_state(user_id)
@@ -2738,7 +2724,7 @@ Professional photography, cinematic lighting, high detail, realistic skin textur
     print(f"[IMAGE] Starting generation for user {user_id}")
     
     try:
-        # ✅ VAIHDETTU: Venice → Replicate
+        # Replicate generoi kuvan
         image_bytes = await generate_image_replicate(base_prompt)
         
         if not image_bytes:
@@ -2752,28 +2738,14 @@ Professional photography, cinematic lighting, high detail, realistic skin textur
         await update.message.reply_text(f"Virhe: {str(e)}")
         return
     
-    # Lataa Cloudinaryyn
-    print(f"[IMAGE] Uploading to Cloudinary...")
+    # ✅ SUORA LÄHETYS TELEGRAMIIN – Cloudinary poistettu kokonaan!
+    print(f"[IMAGE] Sending directly to Telegram...")
     
     try:
-        image_url = await upload_to_cloudinary(image_bytes)
-        
-        if not image_url:
-            await update.message.reply_text("Kuvan lataus epäonnistui.")
-            return
-        
-        print(f"[IMAGE] Cloudinary URL: {image_url}")
-        
-    except Exception as e:
-        print(f"[IMAGE ERROR] Cloudinary upload failed: {e}")
-        await update.message.reply_text(f"Cloudinary-virhe: {str(e)}")
-        return
-    
-    # Lähetä Telegramiin
-    print(f"[IMAGE] Sending to Telegram...")
-    
-    try:
-        await update.message.reply_photo(photo=image_url)
+        await update.message.reply_photo(
+            photo=image_bytes,
+            caption="📸 Tässä kuva sinulle ✨"
+        )
         print(f"[IMAGE] ✅ Photo sent successfully!")
         
     except Exception as e:
@@ -2783,7 +2755,6 @@ Professional photography, cinematic lighting, high detail, realistic skin textur
     
     # Tallenna historiaan
     state["last_image"] = {
-        "url": image_url,
         "prompt": base_prompt,
         "user_request": text,
         "timestamp": time.time()
