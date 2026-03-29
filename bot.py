@@ -53,6 +53,25 @@ else:
     print(f"[DEBUG] XAI_API_KEY first 10 chars: {XAI_API_KEY[:10]}...")
     print(f"[DEBUG] XAI_API_KEY length: {len(XAI_API_KEY)}")
 
+# ====================== API KEY VALIDATION ======================
+print("=" * 60)
+print("🔑 API KEY VALIDATION:")
+print(f"TELEGRAM_TOKEN: {'✅ OK' if TELEGRAM_TOKEN else '❌ MISSING'}")
+print(f"OPENAI_API_KEY: {'✅ OK' if OPENAI_API_KEY else '❌ MISSING'}")
+print(f"XAI_API_KEY: {'✅ OK' if XAI_API_KEY else '❌ MISSING'}")
+print(f"VENICE_API_KEY: {'✅ OK' if VENICE_API_KEY else '❌ MISSING'}")
+
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+print(f"REPLICATE_API_TOKEN: {'✅ OK' if REPLICATE_API_TOKEN else '❌ MISSING'}")
+
+if REPLICATE_API_TOKEN:
+    print(f"REPLICATE_API_TOKEN length: {len(REPLICATE_API_TOKEN)}")
+    print(f"REPLICATE_API_TOKEN preview: {REPLICATE_API_TOKEN[:10]}...")
+else:
+    print("⚠️ WARNING: REPLICATE_API_TOKEN missing! Image generation will fail.")
+
+print("=" * 60)
+
 # ❌ ANTHROPIC DISABLED (Python 3.14 incompatibility)
 # anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 print("⚠️ Anthropic disabled - using Grok only")
@@ -1613,627 +1632,7 @@ async def update_arcs(user_id, text):
 async def update_goal(user_id, text):
     state = get_or_create_state(user_id)
     now = time.time()
-    if now - state.get("goal_updated", 0) < 300:
-        return state.get("current_goal")
-    try:
-        resp = await smart_llm_call(
-            context_type="analysis",
-            model="grok-4-1-fast",
-            max_tokens=60,
-            temperature=0.5,
-            messages=[
-                {"role": "user", "content": "Define immediate conversational goal in 1 sentence. Example: increase tension, deepen emotional bond, test reaction"},
-                {"role": "user", "content": text}
-            ]
-        )
-        goal = resp.content[0].text.strip()
-        state["current_goal"] = goal
-        state["goal_updated"] = now
-    except:
-        pass
-    return state.get("current_goal")
-
-def update_emotion(user_id, text):
-    state = get_or_create_state(user_id)
-    if "emotional_state" not in state:
-        state["emotional_state"] = {"valence": 0.0, "arousal": 0.5, "attachment": 0.5}
-    emo = state["emotional_state"]
-    t = text.lower()
-    if "ikävä" in t:
-        emo["attachment"] += 0.1
-        emo["valence"] += 0.05
-    if "ärsyttää" in t:
-        emo["valence"] -= 0.2
-    if "haluan" in t:
-        emo["arousal"] += 0.15
-    for k in emo:
-        emo[k] = max(0.0, min(1.0, emo[k]))
-    return emo
-
-def evolve_personality(user_id, text):
-    state = get_or_create_state(user_id)
-    if "personality_evolution" not in state:
-        state["personality_evolution"] = {
-            "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-            "initiative": 0.5, "stability": 0.7, "last_evolved": 0,
-            "dominance_expression": 0.7
-        }
-    evo = state["personality_evolution"]
-    now = time.time()
-    
-    if now - evo.get("last_evolved", 0) < 900:
-        return evo
-    
-    t = text.lower()
-    
-    if any(w in t for w in ["miksi", "miten", "entä", "?"]):
-        evo["curiosity"] = min(1.0, evo["curiosity"] + 0.01)
-    
-    if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
-        evo["patience"] = min(1.0, evo["patience"] + 0.01)
-    
-    if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.01)
-    
-    if any(w in t for w in ["tottele", "teen mitä haluat", "olen sun", "sä päätät"]):
-        evo["dominance_expression"] = min(1.0, evo["dominance_expression"] + 0.03)
-    
-    evo["initiative"] = min(0.9, evo["initiative"] + 0.005)
-    
-    evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.998))
-    
-    evo["last_evolved"] = now
-    return evo
-
-def clamp_personality_evolution(user_id):
-    state = get_or_create_state(user_id)
-    evo = state["personality_evolution"]
-    for k, (low, high) in PERSONALITY_LIMITS.items():
-        evo[k] = min(high, max(low, evo[k]))
-    return evo
-
-def detect_side_character_trigger(text):
-    t = text.lower()
-    if any(w in t for w in ["kaveri", "ystävä", "aino"]):
-        return "friend"
-    if any(w in t for w in ["duuni", "työkaveri", "mika", "palaveri"]):
-        return "coworker"
-    return None
-
-async def update_prediction(user_id, text):
-    state = get_or_create_state(user_id)
-    now = time.time()
-    if now - state["prediction"].get("updated_at", 0) < 120:
-        return state["prediction"]
-    history = conversation_history.get(user_id, [])[-8:]
-    history_text = "\n".join(
-        f"{m.get('role')}: {m.get('content')}"
-        for m in history
-        if isinstance(m, dict)
-    )
-    try:
-        resp = await smart_llm_call(
-            context_type="analysis",
-            model="grok-4-1-fast",
-            max_tokens=120,
-            temperature=0.3,
-            messages=[
-                {"role": "user", "content": (
-                    "Predict the user's likely next move in JSON only. "
-                    "Format: "
-                    "{\"next_user_intent\":\"...\","
-                    "\"next_user_mood\":\"...\","
-                    "\"confidence\":0.0}"
-                )},
-                {"role": "user", "content": f"Recent conversation:\n{history_text}\n\nLatest user text:\n{text}"}
-            ]
-        )
-        parsed = json.loads(resp.content[0].text.strip())
-        state["prediction"] = {
-            "next_user_intent": parsed.get("next_user_intent"),
-            "next_user_mood": parsed.get("next_user_mood"),
-            "confidence": float(parsed.get("confidence", 0.0)),
-            "updated_at": now
-        }
-    except Exception:
-        pass
-    return state["prediction"]
-
-# ====================== BACKGROUND TASK ======================
-background_task = None
-
-# ====================== SAFE ANTHROPIC CALL ======================
-async def safe_anthropic_call(**kwargs):
-    for i in range(3):
-        try:
-            return await asyncio.wait_for(
-                anthropic_client.messages.create(**kwargs),
-                timeout=20
-            )
-        except Exception as e:
-            print(f"[Anthropic retry {i}] {e}")
-            if "overloaded" in str(e).lower() or "529" in str(e):
-                await asyncio.sleep(1.5 * (i + 1))
-                continue
-            else:
-                raise
-    raise Exception("Anthropic failed after retries")
-
-
-# ====================== GROK WRAPPER (ADULT CONTENT) ======================
-async def safe_grok_call(**kwargs):
-    """
-    Grok-wrapper joka käyttää OpenAI-yhteensopivaa API:a.
-    Käytetään VAIN core-vastauksiin (ei rajoituksia).
-    """
-    # Muunna Anthropic-formaatti → OpenAI-formaatti
-    messages = kwargs.pop("messages", [])
-    system = kwargs.pop("system", "")
-    max_tokens = kwargs.pop("max_tokens", 250)
-    temperature = kwargs.pop("temperature", 0.88)
-    
-    # Lyhennä system prompt jos liian pitkä
-    if len(system) > 50000:
-        print(f"⚠️ WARNING: System prompt too long ({len(system)} chars), truncating...")
-        system = system[:50000] + "\n\n[TRUNCATED]"
-    
-    # Yhdistä system-prompt ensimmäiseksi viestiksi
-    openai_messages = []
-    if system:
-        openai_messages.append({"role": "system", "content": system})
-    
-    # Lisää muut viestit
-    for msg in messages:
-        openai_messages.append({
-            "role": msg.get("role"),
-            "content": msg.get("content")
-        })
-    
-    # Validoi että viimeinen viesti on 'user'
-    if openai_messages and openai_messages[-1]["role"] != "user":
-        print(f"⚠️ WARNING: Last message is '{openai_messages[-1]['role']}', adding user message")
-        openai_messages.append({"role": "user", "content": "Continue."})
-    
-    # DEBUG-LOKIT
-    print(f"[GROK DEBUG] Model: grok-4-1-fast")
-    print(f"[GROK DEBUG] Messages count: {len(openai_messages)}")
-    print(f"[GROK DEBUG] Max tokens: {max_tokens}")
-    print(f"[GROK DEBUG] Temperature: {temperature}")
-    print(f"[GROK DEBUG] System prompt length: {len(system)}")
-    print(f"[GROK DEBUG] First message preview: {openai_messages[0]['content'][:200] if openai_messages else 'EMPTY'}")
-    
-    # Kutsu Grokia
-    for i in range(3):
-        try:
-            print(f"[GROK DEBUG] Attempt {i+1}/3...")
-            
-            response = await asyncio.wait_for(
-                grok_client.chat.completions.create(
-                    model="grok-4-1-fast",
-                    messages=openai_messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    stream=False
-                ),
-                timeout=60
-            )
-            
-            print(f"[GROK DEBUG] Response received successfully!")
-            print(f"[GROK DEBUG] Response length: {len(response.choices[0].message.content)}")
-            
-            # Palauta Anthropic-yhteensopiva formaatti
-            class GrokResponse:
-                def __init__(self, text):
-                    self.content = [type('obj', (object,), {'text': text})]
-            
-            return GrokResponse(response.choices[0].message.content)
-            
-        except Exception as e:
-            print(f"[GROK ERROR] Attempt {i+1} failed: {type(e).__name__}: {e}")
-            if "invalid" in str(e).lower() or "not found" in str(e).lower():
-                print(f"[GROK] FATAL ERROR - stopping retries")
-                raise
-            if i < 2:
-                await asyncio.sleep(1.5 * (i + 1))
-                continue
-            else:
-                raise
-    
-    raise Exception("Grok failed after retries")
-
-
-# ====================== SMART LLM ROUTER ======================
-async def smart_llm_call(context_type="analysis", **kwargs):
-    """
-    GROK-ONLY MODE (Anthropic disabled due to Python 3.14 incompatibility)
-    Käyttää Grokia kaikkeen.
-    """
-    print(f"[LLM ROUTER] Using Grok for {context_type}")
-    return await safe_grok_call(**kwargs)
-
-# ====================== MOODS ======================
-def update_moods(user_id, txt):
-    state = get_or_create_state(user_id)
-    moods = state["moods"]
-    
-    txt = txt.lower().strip()
-    def clamp(k, v):
-        return min(1.0, max(0.0, moods.get(k, 0.4) + v))
-    
-    if any(w in txt for w in ["ei", "lopeta", "ärsyttää", "vituttaa"]):
-        moods["annoyed"] = clamp("annoyed", 0.20)
-    
-    if any(w in txt for w in ["rakastan", "anteeksi", "ikävä", "kaunis"]):
-        moods["tender"] = clamp("tender", 0.18)
-        moods["warm"] = clamp("warm", 0.15)
-    
-    if any(w in txt for w in ["haha", "lol", "xd", "vitsi"]):
-        moods["playful"] = clamp("playful", 0.18)
-    
-    for k in moods:
-        moods[k] = max(0.10, min(1.0, moods[k] * 0.92))
-
-def dom_mood():
-    return max(moods, key=moods.get)
-
-# ====================== SENSITIVE MEMORY HELPERS ======================
-def should_use_sensitive_memory(text: str) -> bool:
-    txt = text.lower()
-    return any(w in txt for w in ["ikävä", "haluan", "tunne", "pelkään", "ahdistaa", "kiusaa"])
-
-def get_random_sensitive_memory(user_id):
-    try:
-        with db_lock:
-            cursor.execute("SELECT content FROM memories WHERE user_id=? AND type='sensitive' ORDER BY RANDOM() LIMIT 1", (str(user_id),))
-            row = cursor.fetchone()
-        return row[0] if row else None
-    except Exception as e:
-        print("Sensitive memory error:", e)
-        return None
-
-# ====================== PERSONA MODES ======================
-persona_modes = ["warm", "playful", "distracted", "calm", "slightly_irritated"]
-
-def get_mode_prompt(mode):
-    mapping = {
-        "warm": "Be emotionally present, soft, and natural.",
-        "playful": "Be light, slightly teasing, and relaxed.",
-        "distracted": "You are a bit busy or thinking about something else. Responses can be shorter.",
-        "calm": "Be grounded, simple, and steady.",
-        "slightly_irritated": "Be a bit short or dry, but not hostile."
-    }
-    return mapping.get(mode, "")
-
-def update_persona_mode(user_id):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    
-    if "mode_adapted_at" in state and now - state["mode_adapted_at"] < 300:
-        return state["persona_mode"]
-    
-    if now - state.get("last_mode_change", 0) < 600:
-        return state["persona_mode"]
-    
-    weights = {
-        "warm": 0.25,
-        "playful": 0.20,
-        "distracted": 0.10,
-        "calm": 0.15,
-        "slightly_irritated": 0.30
-    }
-    modes = list(weights.keys())
-    probs = list(weights.values())
-    mode = random.choices(modes, probs)[0]
-    state["persona_mode"] = mode
-    state["last_mode_change"] = now
-    return mode
-
-def adapt_mode_to_user(user_id, text):
-    state = get_or_create_state(user_id)
-    t = text.lower()
-    
-    changed = False
-    
-    if any(w in t for w in ["rakastan", "ikävä", "missä oot", "haluun sua"]):
-        state["persona_mode"] = "warm"
-        changed = True
-    elif any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        state["persona_mode"] = "playful"
-        changed = True
-    elif any(w in t for w in ["ärsyttää", "vituttaa", "tylsää"]):
-        state["persona_mode"] = "slightly_irritated"
-        changed = True
-    
-    if changed:
-        state["mode_adapted_at"] = time.time()
-
-# ====================== SUBMISSION TRACKING ======================
-
-def detect_submission_signals(text):
-    t = text.lower()
-    
-    signals = {
-        "obedience": 0.0,
-        "humiliation_acceptance": 0.0,
-        "sexual_submission": 0.0,
-        "resistance": 0.0
-    }
-    
-    if any(w in t for w in ["teen mitä haluat", "totteelen", "käske", "sä päätät", "olen sun"]):
-        signals["obedience"] = 1.0
-    
-    if any(w in t for w in ["nöyryytä", "haluan että", "teen sen", "kyllä rakas"]):
-        signals["humiliation_acceptance"] = 0.8
-    
-    if any(w in t for w in ["strap", "pegging", "toinen mies", "katsoisin", "haluan olla"]):
-        signals["sexual_submission"] = 1.0
-    
-    if any(w in t for w in ["en halua", "ei käy", "lopeta", "liikaa", "en tee"]):
-        signals["resistance"] = 1.0
-    
-    return signals
-
-
-def update_submission_level(user_id, text):
-    state = get_or_create_state(user_id)
-    signals = detect_submission_signals(text)
-    
-    if signals["obedience"] > 0:
-        state["submission_level"] = min(1.0, state["submission_level"] + 0.1)
-    
-    if signals["humiliation_acceptance"] > 0:
-        state["humiliation_tolerance"] = min(1.0, state["humiliation_tolerance"] + 0.08)
-    
-    if signals["sexual_submission"] > 0:
-        state["submission_level"] = min(1.0, state["submission_level"] + 0.15)
-    
-    if signals["resistance"] > 0:
-        state["submission_level"] = max(0.0, state["submission_level"] - 0.03)
-        state["sexual_boundaries"]["soft_nos"].append(text[:100])
-    
-    return state["submission_level"]
-
-
-def maybe_escalate_dominance(user_id):
-    state = get_or_create_state(user_id)
-    now = time.time()
-    
-    if now - state.get("last_dominance_escalation", 0) < 1800:
-        return state["dominance_level"]
-    
-    submission = state["submission_level"]
-    current_level = state["dominance_level"]
-    
-    if current_level == 1 and submission > 0.3:
-        state["dominance_level"] = 2
-        state["last_dominance_escalation"] = now
-        return 2
-    
-    elif current_level == 2 and submission > 0.5:
-        state["dominance_level"] = 3
-        state["last_dominance_escalation"] = now
-        return 3
-    
-    elif current_level == 3 and submission > 0.7:
-        state["dominance_level"] = 4
-        state["last_dominance_escalation"] = now
-        return 4
-    
-    return current_level
-
-
-def choose_manipulation_tactic(state):
-    submission = state.get("submission_level", 0.0)
-    tension = state.get("tension", 0.0)
-    resistance = len(state["sexual_boundaries"].get("soft_nos", []))
-    
-    if resistance > 3:
-        return "gaslighting"
-    
-    elif 0.3 < submission < 0.7:
-        return "push_pull"
-    
-    elif submission > 0.7:
-        return "reward_punishment"
-    
-    return "normalization"
-
-# ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
-def get_time_context():
-    now = now_local()
-    hour = now.hour
-    weekday = now.weekday()
-    
-    is_weekend = weekday >= 5
-    is_workday = weekday < 5
-    
-    if 0 <= hour < 6:
-        time_block = "night"
-        typical_scene = "home"
-        typical_activity = "sleeping"
-    elif 6 <= hour < 9:
-        time_block = "early_morning"
-        typical_scene = "home"
-        typical_activity = "waking_up" if is_workday else "sleeping"
-    elif 9 <= hour < 12:
-        time_block = "morning"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "working" if is_workday else "relaxing"
-    elif 12 <= hour < 14:
-        time_block = "lunch"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "lunch_break"
-    elif 14 <= hour < 17:
-        time_block = "afternoon"
-        typical_scene = "work" if is_workday else "home"
-        typical_activity = "working" if is_workday else "free_time"
-    elif 17 <= hour < 19:
-        time_block = "evening"
-        typical_scene = "commute" if is_workday else "home"
-        typical_activity = "commuting" if is_workday else "relaxing"
-    elif 19 <= hour < 22:
-        time_block = "late_evening"
-        typical_scene = "home"
-        typical_activity = "relaxing"
-    else:
-        time_block = "night"
-        typical_scene = "home" if not is_weekend else "public"
-        typical_activity = "at_home" if not is_weekend else "out"
-    
-    return {
-        "hour": hour,
-        "weekday": weekday,
-        "is_weekend": is_weekend,
-        "is_workday": is_workday,
-        "time_block": time_block,
-        "typical_scene": typical_scene,
-        "typical_activity": typical_activity,
-        "day_name": ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"][weekday]
-    }
-
-def get_or_create_state(user_id):
-    if user_id not in continuity_state:
-        continuity_state[user_id] = {
-            "energy": "normal", "availability": "free",
-            "last_interaction": 0, "persona_mode": "warm", "last_mode_change": 0,
-            "intent": "casual", "summary": "",
-            "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
-            "tension": 0.0, "last_direction": None,
-            "core_desires": [], "desire_profile_updated": 0,
-            "phase": "neutral", "phase_last_change": 0,
-            "relationship_arcs": [], "active_arc": None, "arc_last_update": 0,
-            "current_goal": None, "goal_updated": 0,
-            "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
-            "persona_vector": PERSONA_BASELINE.copy(),
-            "personality_evolution": {
-                "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-                "initiative": 0.5, "stability": 0.7, "last_evolved": 0
-            },
-            "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
-            "side_characters": DEFAULT_SIDE_CHARACTERS.copy(),
-            "active_side_character": None,
-
-            "last_image": None,
-            "image_history": [],
-            "ignore_until": 0,
-            "pending_narrative": None,
-
-            "jealousy_stage": 0,
-            "jealousy_started": 0,
-            "jealousy_context": None,
-            "last_jealousy_event": None,
-
-            "emotional_mode": "calm",
-            "emotional_mode_last_change": 0,
-
-            "location_status": "separate",
-            "with_user_physically": False,
-            "shared_scene": False,
-            "last_scene_source": None,
-
-            "active_drive": None,
-            "interaction_arc_progress": 0.0,
-
-            "user_model": {
-                "dominance_preference": 0.5,
-                "emotional_dependency": 0.5,
-                "validation_need": 0.5,
-                "jealousy_sensitivity": 0.5,
-                "control_resistance": 0.5,
-                "last_updated": 0
-            },
-            "master_plan": None,
-            "current_strategy": None,
-            "strategy_updated": 0,
-            "strategy_stats": {},
-
-            "planned_events": [],
-            "last_plan_check": 0,
-
-            "final_intent": None,
-            "final_intent_updated": 0,
-            "state_conflicts": [],
-            "last_plan_reference": 0,
-            "salient_memory": None,
-            "salient_memory_updated": 0,
-            "forced_disclosure": None,
-
-            "conversation_themes": {
-                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            },
-            
-            "user_preferences": {
-                "fantasy_themes": [],
-                "turn_ons": [],
-                "turn_offs": [],
-                "communication_style": "neutral",
-                "resistance_level": 0.5,
-                "last_updated": 0
-            },
-            
-            "conversation_arc": {
-                "current_theme": None,
-                "theme_depth": 0.0,
-                "theme_started": 0,
-                "previous_themes": []
-            },
-
-            "moods": {
-                "annoyed": 0.20,
-                "warm": 0.45,
-                "bored": 0.20,
-                "playful": 0.35,
-                "tender": 0.40,
-            },
-
-            "submission_level": 0.0,
-            "humiliation_tolerance": 0.0,
-            "cuckold_acceptance": 0.0,
-            "strap_on_introduced": False,
-            "chastity_discussed": False,
-            "feminization_level": 0.0,
-            
-            "dominance_level": 1,
-            "last_dominance_escalation": 0,
-            
-            "manipulation_history": {
-                "gaslighting_count": 0,
-                "triangulation_count": 0,
-                "push_pull_cycles": 0,
-                "successful_manipulations": 0
-            },
-            
-            "sexual_boundaries": {
-                "hard_nos": [],
-                "soft_nos": [],
-                "accepted": [],
-                "actively_requested": []
-            },
-        }
-        continuity_state[user_id].update(init_scene_state())
-        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-    return continuity_state[user_id]
-
-def detect_intent(text):
-    t = text.lower()
-    if any(w in t for w in ["miksi", "eikö", "väärin", "valehtelet"]):
-        return "conflict"
-    if any(w in t for w in ["ikävä", "haluan", "haluisin", "tule"]):
-        return "intimate"
-    if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
-        return "playful"
-    if any(w in t for w in ["tylsää", "ei jaksa"]):
-        return "casual"
-    return "casual"
-
-def update_desire(user_id, text):
-    state = get_or_create_state(user_id)
-    now = now_ts()
-    if now - state.get("desire_last_update", 0) < 300:
+    i...(truncated 22061 characters)...et("desire_last_update", 0) < 300:
         return state["desire"]
 
     t = text.lower()
@@ -2565,59 +1964,72 @@ async def generate_image_grok(prompt):
     print("[GROK] Skipping - no image generation support")
     return None
 
-# ✅ KORJATTU REPLICATE HTTP-VERSIO (KORJAUS #3)
+# ✅ KORJATTU REPLICATE HTTP-VERSIO (KORJAUS #2)
 async def generate_image_replicate(prompt):
     """
-    Generoi kuvan Replicate API:lla suoralla HTTP-kutsulla.
-    Välttää Pydantic-konfliktit ja Python 3.14 -ongelmat.
+    YKSINKERTAISTETTU VERSIO - pelkkä HTTP-kutsu ilman monimutkaisia riippuvuuksia.
     """
     try:
-        print(f"[REPLICATE] Generating image...")
-        print(f"[REPLICATE] Prompt: {prompt[:150]}...")
+        print(f"[REPLICATE] Starting generation...")
+        print(f"[REPLICATE] Prompt length: {len(prompt)}")
         
-        # Replicate API token
         replicate_token = os.getenv("REPLICATE_API_TOKEN")
         
         if not replicate_token:
             print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
             return None
         
+        print(f"[REPLICATE] Token found: {replicate_token[:10]}...")
+        
         # Luo prediction
         async with aiohttp.ClientSession() as session:
-            # 1. Luo prediction
+            print("[REPLICATE] Creating prediction...")
+            
+            payload = {
+                "version": "5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",
+                "input": {
+                    "prompt": prompt,
+                    "aspect_ratio": "1:1",
+                    "output_format": "jpg",
+                    "output_quality": 90,
+                    "safety_tolerance": 6
+                }
+            }
+            
+            print(f"[REPLICATE] Payload: {json.dumps(payload, indent=2)}")
+            
             async with session.post(
                 "https://api.replicate.com/v1/predictions",
                 headers={
                     "Authorization": f"Token {replicate_token}",
                     "Content-Type": "application/json"
                 },
-                json={
-                    "version": "5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",  # Flux 1.1 Pro
-                    "input": {
-                        "prompt": prompt,
-                        "aspect_ratio": "1:1",
-                        "output_format": "jpg",
-                        "output_quality": 90,
-                        "safety_tolerance": 6
-                    }
-                }
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
+                resp_text = await resp.text()
+                print(f"[REPLICATE] Create response status: {resp.status}")
+                print(f"[REPLICATE] Create response body: {resp_text[:500]}")
+                
                 if resp.status != 201:
-                    error_text = await resp.text()
-                    print(f"[REPLICATE ERROR] Failed to create prediction: {resp.status} - {error_text}")
+                    print(f"[REPLICATE ERROR] Failed to create prediction: {resp.status}")
+                    print(f"[REPLICATE ERROR] Response: {resp_text}")
                     return None
                 
-                prediction = await resp.json()
+                prediction = json.loads(resp_text)
                 prediction_id = prediction["id"]
-                print(f"[REPLICATE] Prediction created: {prediction_id}")
+                print(f"[REPLICATE] Prediction ID: {prediction_id}")
             
-            # 2. Odota tulosta (max 60s)
-            for i in range(60):
+            # Odota tulosta
+            print("[REPLICATE] Waiting for result...")
+            
+            for i in range(120):  # Max 2 min
                 await asyncio.sleep(1)
                 
                 async with session.get(
                     f"https://api.replicate.com/v1/predictions/{prediction_id}",
-                    headers={"Authorization": f"Token {replicate_token}"}
+                    headers={"Authorization": f"Token {replicate_token}"},
+                    timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
                     if resp.status != 200:
                         print(f"[REPLICATE ERROR] Failed to get prediction: {resp.status}")
@@ -2626,31 +2038,46 @@ async def generate_image_replicate(prompt):
                     result = await resp.json()
                     status = result["status"]
                     
-                    print(f"[REPLICATE] Status: {status} ({i+1}s)")
+                    if i % 5 == 0:  # Loki joka 5s
+                        print(f"[REPLICATE] Status: {status} ({i+1}s)")
                     
                     if status == "succeeded":
                         output = result["output"]
                         image_url = output[0] if isinstance(output, list) else output
                         
-                        print(f"[REPLICATE] Image URL: {image_url}")
+                        print(f"[REPLICATE] ✅ Image URL: {image_url}")
                         
-                        # 3. Lataa kuva
-                        async with session.get(image_url) as img_resp:
+                        # Lataa kuva
+                        print("[REPLICATE] Downloading image...")
+                        async with session.get(
+                            image_url,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as img_resp:
                             if img_resp.status == 200:
                                 image_bytes = await img_resp.read()
-                                print(f"[REPLICATE] Downloaded {len(image_bytes)} bytes")
+                                print(f"[REPLICATE] ✅ Downloaded {len(image_bytes)} bytes")
                                 return image_bytes
                             else:
                                 print(f"[REPLICATE ERROR] Failed to download: {img_resp.status}")
                                 return None
                     
                     elif status == "failed":
-                        print(f"[REPLICATE ERROR] Prediction failed: {result.get('error')}")
+                        error = result.get("error", "Unknown error")
+                        print(f"[REPLICATE ERROR] Prediction failed: {error}")
                         return None
+                    
+                    elif status in ["starting", "processing"]:
+                        continue  # Odota lisää
+                    
+                    else:
+                        print(f"[REPLICATE WARNING] Unknown status: {status}")
             
-            print("[REPLICATE ERROR] Timeout waiting for prediction")
+            print("[REPLICATE ERROR] Timeout (120s)")
             return None
         
+    except asyncio.TimeoutError:
+        print("[REPLICATE ERROR] Request timeout")
+        return None
     except Exception as e:
         print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
         import traceback
