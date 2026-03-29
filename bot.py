@@ -1,201 +1,102 @@
 import os
+import json
+import base64
 import asyncio
-import threading
 import logging
 import traceback
 import aiohttp
 
-from flask import Flask
-from telegram import Update, InputFile
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    CommandHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Bot, InputFile
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-PORT = int(os.getenv("PORT", "10000"))
+VENICE_API_KEY = os.getenv("VENICE_API_KEY", "").strip().strip('"').strip("'")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip().strip('"').strip("'")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip().strip('"').strip("'")
+
+if not VENICE_API_KEY:
+    raise ValueError("VENICE_API_KEY puuttuu")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu")
 
-if not REPLICATE_API_TOKEN:
-    raise ValueError("REPLICATE_API_TOKEN puuttuu")
+if not TELEGRAM_CHAT_ID:
+    raise ValueError("TELEGRAM_CHAT_ID puuttuu")
 
-app = Flask(__name__)
+VENICE_URL = "https://api.venice.ai/api/v1/images/generations"
 
-@app.route("/")
-def health_check():
-    return "Bot is alive", 200
-
-def run_flask():
-    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
-
-def build_photo_prompt(user_text: str) -> str:
-    return f"""
-Create a photorealistic, high-quality image.
-
-User request:
-{user_text}
-
-Requirements:
-- photorealistic
-- realistic lighting
-- realistic skin texture
-- detailed face
-- cinematic but natural look
-- no watermark
-- no text
-""".strip()
-
-async def generate_image_replicate(prompt: str) -> bytes:
-    prediction_url = "https://api.replicate.com/v1/predictions"
+async def generate_image_venice(prompt: str) -> bytes:
+    payload = {
+        "prompt": prompt,
+        "model": "z-image-turbo",
+        "n": 1,
+        "output_format": "png",
+        "output_compression": 100,
+        "response_format": "b64_json",
+        "quality": "auto",
+        "background": "auto",
+        "moderation": "auto",
+    }
 
     headers = {
-        "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
+        "Authorization": f"Bearer {VENICE_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    payload = {
-        "version": "a6b5c5e4f0c5f7a2b8f3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
-        "input": {
-            "prompt": prompt,
-            "width": 1024,
-            "height": 1024,
-            "num_inference_steps": 8,
-            "output_format": "jpg",
-            "output_quality": 95,
-            "safety_tolerance": 3,
-        },
-    }
-
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-        async with session.post(prediction_url, headers=headers, json=payload) as resp:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        async with session.post(VENICE_URL, headers=headers, json=payload) as resp:
             body = await resp.text()
-            if resp.status != 201:
-                raise RuntimeError(f"Prediction creation failed: {resp.status} | {body}")
+            logger.info("Venice status: %s", resp.status)
+            logger.info("Venice body preview: %s", body[:500])
 
-            prediction = await resp.json()
-            prediction_id = prediction["id"]
-            logger.info("Prediction created: %s", prediction_id)
+            if resp.status != 200:
+                raise RuntimeError(f"Venice image request failed: {resp.status} | {body}")
 
-        poll_headers = {
-            "Authorization": f"Bearer {REPLICATE_API_TOKEN}",
-        }
+            data = json.loads(body)
 
-        poll_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+    items = data.get("data", [])
+    if not items:
+        raise RuntimeError("Venice response missing data[]")
 
-        for _ in range(180):
-            await asyncio.sleep(1)
+    b64_json = items[0].get("b64_json")
+    if not b64_json:
+        raise RuntimeError("Venice response missing data[0].b64_json")
 
-            async with session.get(poll_url, headers=poll_headers) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    raise RuntimeError(f"Prediction polling failed: {resp.status} | {body}")
+    try:
+        return base64.b64decode(b64_json)
+    except Exception as e:
+        raise RuntimeError(f"Base64 decode failed: {e}") from e
 
-                result = await resp.json()
-                status = result.get("status")
-                logger.info("Prediction status: %s", status)
+async def send_to_telegram(image_bytes: bytes, caption: str):
+    bot = Bot(token=TELEGRAM_TOKEN)
+    photo = InputFile(image_bytes, filename="venice_test.png")
 
-                if status == "succeeded":
-                    output = result.get("output")
-                    if not output:
-                        raise RuntimeError("Prediction succeeded but output missing")
-
-                    image_url = output[0] if isinstance(output, list) else output
-
-                    async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=60)) as img_resp:
-                        if img_resp.status != 200:
-                            raise RuntimeError(f"Image download failed: {img_resp.status}")
-                        return await img_resp.read()
-
-                if status == "failed":
-                    raise RuntimeError(f"Prediction failed: {result.get('error', 'unknown error')}")
-
-                if status in ("canceled", "cancelled"):
-                    raise RuntimeError("Prediction cancelled")
-
-        raise TimeoutError("Image generation timed out")
-
-def is_image_request(text: str) -> bool:
-    t = text.lower()
-    triggers = [
-        "tee kuva",
-        "lähetä kuva",
-        "haluan kuvan",
-        "näytä kuva",
-        "luo kuva",
-        "generate image",
-        "create image",
-        "make image",
-        "photo of",
-        "portrait of",
-    ]
-    return any(x in t for x in triggers)
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Lähetä viesti kuten:\n"
-        "tee kuva realistisesta muotokuvasta"
+    await bot.send_photo(
+        chat_id=TELEGRAM_CHAT_ID,
+        photo=photo,
+        caption=caption,
     )
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Pyydä kuvaa tavallisella viestillä.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not update.message or not update.message.text:
-            return
-
-        text = update.message.text.strip()
-
-        if not is_image_request(text):
-            await update.message.reply_text(
-                "Pyydä kuvaa esim:\ntee kuva naisesta metsässä"
-            )
-            return
-
-        await update.message.reply_text("Generoin kuvaa...")
-
-        prompt = build_photo_prompt(text)
-        image_bytes = await generate_image_replicate(prompt)
-
-        await update.message.reply_photo(
-            photo=InputFile(image_bytes, filename="generated.jpg"),
-            caption="Tässä kuvasi."
-        )
-
-    except Exception as e:
-        logger.error("Image generation failed: %s", e)
-        traceback.print_exc()
-        await update.message.reply_text(f"Kuvan generointi epäonnistui: {e}")
-
 async def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    prompt = (
+        "A photorealistic portrait of a blonde Finnish woman in soft natural light, "
+        "blue-green eyes, realistic skin texture, modern indoor setting, high detail"
+    )
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    logger.info("Starting Venice image test...")
+    image_bytes = await generate_image_venice(prompt)
+    logger.info("Generated image bytes: %s", len(image_bytes))
 
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+    await send_to_telegram(
+        image_bytes,
+        "Venice testikuva onnistui."
+    )
+    logger.info("Image sent to Telegram successfully.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error("Test failed: %s", e)
+        traceback.print_exc()
