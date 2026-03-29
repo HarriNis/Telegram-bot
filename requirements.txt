@@ -1,8 +1,8 @@
-# Megan 6.1 - requirements.txt
-flask
 python-telegram-bot
 anthropic
 openai
 numpy
+Flask
 cloudinary
 aiohttp
+replicate
