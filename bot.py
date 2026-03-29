@@ -9,7 +9,6 @@ import base64
 import logging
 import traceback
 import aiohttp  # ← LISÄTTY VENICE-KORJAUKSEN TAKIA
-import replicate  # ← LISÄTTY REPLICATE-KORJAUKSEN TAKIA
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -2568,54 +2567,91 @@ async def generate_image_grok(prompt):
     print("[GROK] Skipping - no image generation support")
     return None
 
-# ✅ KORJATTU REPLICATE (KORJAUS #1)
+# ✅ KORJATTU REPLICATE HTTP-VERSIO (KORJAUS #3)
 async def generate_image_replicate(prompt):
     """
-    Generoi kuvan Replicate API:lla (Flux 1.1 Pro).
-    Tukee NSFW-sisältöä.
+    Generoi kuvan Replicate API:lla suoralla HTTP-kutsulla.
+    Välttää Pydantic-konfliktit ja Python 3.14 -ongelmat.
     """
     try:
         print(f"[REPLICATE] Generating image...")
         print(f"[REPLICATE] Prompt: {prompt[:150]}...")
         
-        # Replicate API ei ole async, joten käytä executoria
-        loop = asyncio.get_event_loop()
+        # Replicate API token
+        replicate_token = os.getenv("REPLICATE_API_TOKEN")
         
-        output = await loop.run_in_executor(
-            None,
-            lambda: replicate.run(
-                "black-forest-labs/flux-1.1-pro",
-                input={
-                    "prompt": prompt,
-                    "aspect_ratio": "1:1",
-                    "output_format": "jpg",
-                    "output_quality": 90,
-                    "safety_tolerance": 6  # ✅ Sallii adult-sisältö (1-6, 6 = ei rajoituksia)
-                }
-            )
-        )
-        
-        print(f"[REPLICATE] Output received: {type(output)}")
-        
-        if not output:
-            print("[REPLICATE ERROR] No output")
+        if not replicate_token:
+            print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
             return None
         
-        # Output voi olla URL tai lista URL:ja
-        image_url = output[0] if isinstance(output, list) else output
-        
-        print(f"[REPLICATE] Image URL: {image_url}")
-        
-        # Lataa kuva URL:sta
+        # Luo prediction
         async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as resp:
-                if resp.status == 200:
-                    image_bytes = await resp.read()
-                    print(f"[REPLICATE] Downloaded {len(image_bytes)} bytes")
-                    return image_bytes
-                else:
-                    print(f"[REPLICATE ERROR] Failed to download image: HTTP {resp.status}")
+            # 1. Luo prediction
+            async with session.post(
+                "https://api.replicate.com/v1/predictions",
+                headers={
+                    "Authorization": f"Token {replicate_token}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "version": "5599ed30703defd1d160a25a63321b4dec97101d98b4674bcc56e41f62f35637",  # Flux 1.1 Pro
+                    "input": {
+                        "prompt": prompt,
+                        "aspect_ratio": "1:1",
+                        "output_format": "jpg",
+                        "output_quality": 90,
+                        "safety_tolerance": 6
+                    }
+                }
+            ) as resp:
+                if resp.status != 201:
+                    error_text = await resp.text()
+                    print(f"[REPLICATE ERROR] Failed to create prediction: {resp.status} - {error_text}")
                     return None
+                
+                prediction = await resp.json()
+                prediction_id = prediction["id"]
+                print(f"[REPLICATE] Prediction created: {prediction_id}")
+            
+            # 2. Odota tulosta (max 60s)
+            for i in range(60):
+                await asyncio.sleep(1)
+                
+                async with session.get(
+                    f"https://api.replicate.com/v1/predictions/{prediction_id}",
+                    headers={"Authorization": f"Token {replicate_token}"}
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"[REPLICATE ERROR] Failed to get prediction: {resp.status}")
+                        return None
+                    
+                    result = await resp.json()
+                    status = result["status"]
+                    
+                    print(f"[REPLICATE] Status: {status} ({i+1}s)")
+                    
+                    if status == "succeeded":
+                        output = result["output"]
+                        image_url = output[0] if isinstance(output, list) else output
+                        
+                        print(f"[REPLICATE] Image URL: {image_url}")
+                        
+                        # 3. Lataa kuva
+                        async with session.get(image_url) as img_resp:
+                            if img_resp.status == 200:
+                                image_bytes = await img_resp.read()
+                                print(f"[REPLICATE] Downloaded {len(image_bytes)} bytes")
+                                return image_bytes
+                            else:
+                                print(f"[REPLICATE ERROR] Failed to download: {img_resp.status}")
+                                return None
+                    
+                    elif status == "failed":
+                        print(f"[REPLICATE ERROR] Prediction failed: {result.get('error')}")
+                        return None
+            
+            print("[REPLICATE ERROR] Timeout waiting for prediction")
+            return None
         
     except Exception as e:
         print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
@@ -2651,7 +2687,6 @@ async def upload_to_cloudinary(image_bytes):
         traceback.print_exc()
         return None
 
-# ✅ KORJATTU handle_image_request (KORJAUS #4)
 async def handle_image_request(update: Update, user_id, text):
     state = get_or_create_state(user_id)
     
