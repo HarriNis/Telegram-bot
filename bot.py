@@ -549,7 +549,7 @@ async def handle_delayed_return(application, user_id):
 
     response = await smart_llm_call(
         context_type="core_response",
-        model="grok-beta",
+        model="grok-2-latest",
         max_tokens=220,
         temperature=0.85,
         system=get_system_prompt(user_id),
@@ -1733,6 +1733,9 @@ async def update_prediction(user_id, text):
         pass
     return state["prediction"]
 
+# ====================== BACKGROUND TASK ======================
+background_task = None
+
 # ====================== SAFE ANTHROPIC CALL ======================
 async def safe_anthropic_call(**kwargs):
     for i in range(3):
@@ -1780,7 +1783,7 @@ async def safe_grok_call(**kwargs):
         try:
             response = await asyncio.wait_for(
                 grok_client.chat.completions.create(
-                    model="grok-beta",
+                    model="grok-2-latest",
                     messages=openai_messages,
                     max_tokens=max_tokens,
                     temperature=temperature
@@ -2865,6 +2868,61 @@ def learn_user_preferences(user_id, text):
             prefs["turn_offs"].extend(keywords)
             prefs["turn_offs"] = list(set(prefs["turn_offs"]))[-30:]
 
+# ====================== MESSAGE LENGTH LIMITER ======================
+def truncate_message(text, max_length=4000):
+    """
+    Katkaisee viestin Telegram-rajoitukseen (4096 merkkiä).
+    Jättää 96 merkkiä varalle mahdollisille lisäyksille.
+    """
+    if len(text) <= max_length:
+        return text
+    
+    # Yritä katkaista lauseen lopusta
+    truncated = text[:max_length]
+    
+    # Etsi viimeinen piste, huutomerkki tai kysymysmerkki
+    last_sentence_end = max(
+        truncated.rfind('.'),
+        truncated.rfind('!'),
+        truncated.rfind('?')
+    )
+    
+    if last_sentence_end > max_length * 0.7:  # Jos löytyy yli 70% kohdalta
+        return truncated[:last_sentence_end + 1]
+    
+    # Muuten katkaisu sanan rajalta
+    last_space = truncated.rfind(' ')
+    if last_space > 0:
+        return truncated[:last_space] + "..."
+    
+    return truncated + "..."
+
+
+def split_long_message(text, max_length=4000):
+    """
+    Jakaa pitkän viestin useampaan osaan.
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current = ""
+    
+    sentences = text.replace('!', '.').replace('?', '.').split('.')
+    
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 < max_length:
+            current += sentence + "."
+        else:
+            if current:
+                parts.append(current.strip())
+            current = sentence + "."
+    
+    if current:
+        parts.append(current.strip())
+    
+    return parts
+
 # ====================== SYSTEM PROMPT BUILDER ======================
 def get_system_prompt(user_id):
     state = get_or_create_state(user_id)
@@ -3172,20 +3230,29 @@ MEMORY CONTEXT:
 """
 
         try:
+            print(f"[DEBUG] System prompt length: {len(system_prompt)}")
+            print(f"[DEBUG] Using LLM for core response...")
+            
             response = await smart_llm_call(
                 context_type="core_response",
-                model="grok-beta",
-                max_tokens=350,
+                model="grok-2-latest",
+                max_tokens=250,
                 temperature=0.88,
                 system=system_prompt,
                 messages=messages
             )
 
             reply = response.content[0].text.strip()
+            
+            print(f"[DEBUG] Reply length: {len(reply)}")
+            print(f"[DEBUG] Reply preview: {reply[:100]}...")
 
         except Exception as e:
-            print(f"[LLM error] {e}")
-            await update.message.reply_text("Hetki, mietin...")
+            print(f"[LLM CRITICAL ERROR] {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            await update.message.reply_text("Hetki, mietin... (tekninen ongelma)")
             return
 
         if breaks_scene_logic(reply, state):
@@ -3213,6 +3280,8 @@ MEMORY CONTEXT:
 
         update_conversation_themes(user_id, text, reply)
         learn_user_preferences(user_id, text)
+
+        reply = truncate_message(reply, max_length=4000)
 
         await update.message.reply_text(reply)
 
