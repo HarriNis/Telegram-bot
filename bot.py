@@ -21,7 +21,8 @@ if not TELEGRAM_TOKEN:
 if not VENICE_API_KEY:
     raise ValueError("VENICE_API_KEY puuttuu")
 
-VENICE_URL = "https://api.venice.ai/api/v1/image/generations"
+# TÄMÄ OLI VÄÄRIN AIEMMIN: /image/generations
+VENICE_URL = "https://api.venice.ai/api/v1/images/generations"
 
 
 def is_image_request(text: str) -> bool:
@@ -58,10 +59,15 @@ Requirements:
 
 async def generate_image_venice(prompt: str) -> bytes:
     payload = {
-        "model": "fluently-xl",
         "prompt": prompt,
-        "size": "1024x1024",
-        "response_format": "b64_json"
+        "model": "z-image-turbo",
+        "n": 1,
+        "output_format": "png",
+        "output_compression": 100,
+        "response_format": "b64_json",
+        "quality": "auto",
+        "background": "auto",
+        "moderation": "auto",
     }
 
     headers = {
@@ -88,10 +94,7 @@ async def generate_image_venice(prompt: str) -> bytes:
     if not b64_json:
         raise RuntimeError("Venice response missing data[0].b64_json")
 
-    try:
-        return base64.b64decode(b64_json)
-    except Exception as e:
-        raise RuntimeError(f"Base64 decode failed: {e}") from e
+    return base64.b64decode(b64_json)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,16 +112,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = update.message.text.strip()
         chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
 
         print("CHAT ID:", chat_id)
-        print("USER ID:", user_id)
 
         if not is_image_request(text):
             await update.message.reply_text(
                 f"Chat ID on: {chat_id}\n\n"
                 f"Lähetä kuvapyyntö esimerkiksi:\n"
-                f"tee kuva naisesta iltavalossa"
+                f"tee kuva realistisesta muotokuvasta"
             )
             return
 
