@@ -6,37 +6,62 @@ import logging
 import traceback
 import aiohttp
 
-from telegram import Bot, InputFile
+from telegram import Update, InputFile
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-VENICE_API_KEY = os.getenv("VENICE_API_KEY", "").strip().strip('"').strip("'")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip().strip('"').strip("'")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip().strip('"').strip("'")
-
-if not VENICE_API_KEY:
-    raise ValueError("VENICE_API_KEY puuttuu")
+VENICE_API_KEY = os.getenv("VENICE_API_KEY", "").strip().strip('"').strip("'")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu")
 
-if not TELEGRAM_CHAT_ID:
-    raise ValueError("TELEGRAM_CHAT_ID puuttuu")
+if not VENICE_API_KEY:
+    raise ValueError("VENICE_API_KEY puuttuu")
 
-VENICE_URL = "https://api.venice.ai/api/v1/images/generations"
+VENICE_URL = "https://api.venice.ai/api/v1/image/generations"
+
+
+def is_image_request(text: str) -> bool:
+    t = text.lower()
+    triggers = [
+        "tee kuva",
+        "lähetä kuva",
+        "haluan kuvan",
+        "näytä kuva",
+        "luo kuva",
+        "ota kuva",
+        "create image",
+        "generate image",
+    ]
+    return any(x in t for x in triggers)
+
+
+def build_prompt(user_text: str) -> str:
+    return f"""
+Create a photorealistic image based on this request:
+
+{user_text}
+
+Requirements:
+- photorealistic
+- realistic skin texture
+- realistic lighting
+- natural composition
+- detailed face
+- no text
+- no watermark
+""".strip()
+
 
 async def generate_image_venice(prompt: str) -> bytes:
     payload = {
+        "model": "fluently-xl",
         "prompt": prompt,
-        "model": "z-image-turbo",
-        "n": 1,
-        "output_format": "png",
-        "output_compression": 100,
-        "response_format": "b64_json",
-        "quality": "auto",
-        "background": "auto",
-        "moderation": "auto",
+        "size": "1024x1024",
+        "response_format": "b64_json"
     }
 
     headers = {
@@ -47,11 +72,11 @@ async def generate_image_venice(prompt: str) -> bytes:
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
         async with session.post(VENICE_URL, headers=headers, json=payload) as resp:
             body = await resp.text()
-            logger.info("Venice status: %s", resp.status)
-            logger.info("Venice body preview: %s", body[:500])
+            logger.info("VENICE STATUS: %s", resp.status)
+            logger.info("VENICE BODY PREVIEW: %s", body[:500])
 
             if resp.status != 200:
-                raise RuntimeError(f"Venice image request failed: {resp.status} | {body}")
+                raise RuntimeError(f"Venice request failed: {resp.status} | {body}")
 
             data = json.loads(body)
 
@@ -68,35 +93,72 @@ async def generate_image_venice(prompt: str) -> bytes:
     except Exception as e:
         raise RuntimeError(f"Base64 decode failed: {e}") from e
 
-async def send_to_telegram(image_bytes: bytes, caption: str):
-    bot = Bot(token=TELEGRAM_TOKEN)
-    photo = InputFile(image_bytes, filename="venice_test.png")
 
-    await bot.send_photo(
-        chat_id=TELEGRAM_CHAT_ID,
-        photo=photo,
-        caption=caption,
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Hei. Lähetä mikä tahansa viesti niin näytän chat ID:n.\n\n"
+        "Pyydä kuvaa esimerkiksi:\n"
+        "tee kuva realistisesta muotokuvasta"
     )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not update.message or not update.message.text:
+            return
+
+        text = update.message.text.strip()
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+
+        print("CHAT ID:", chat_id)
+        print("USER ID:", user_id)
+
+        if not is_image_request(text):
+            await update.message.reply_text(
+                f"Chat ID on: {chat_id}\n\n"
+                f"Lähetä kuvapyyntö esimerkiksi:\n"
+                f"tee kuva naisesta iltavalossa"
+            )
+            return
+
+        await update.message.reply_text(
+            f"Chat ID on: {chat_id}\n\nGeneroin Venice-testikuvaa..."
+        )
+
+        prompt = build_prompt(text)
+        image_bytes = await generate_image_venice(prompt)
+
+        await update.message.reply_photo(
+            photo=InputFile(image_bytes, filename="venice_test.png"),
+            caption=f"Venice-testikuva onnistui.\nChat ID: {chat_id}"
+        )
+
+    except Exception as e:
+        logger.error("HANDLE ERROR: %s", e)
+        traceback.print_exc()
+        await update.message.reply_text(f"Virhe: {e}")
+
 
 async def main():
-    prompt = (
-        "A photorealistic portrait of a blonde Finnish woman in soft natural light, "
-        "blue-green eyes, realistic skin texture, modern indoor setting, high detail"
-    )
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    logger.info("Starting Venice image test...")
-    image_bytes = await generate_image_venice(prompt)
-    logger.info("Generated image bytes: %s", len(image_bytes))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await send_to_telegram(
-        image_bytes,
-        "Venice testikuva onnistui."
-    )
-    logger.info("Image sent to Telegram successfully.")
+    logger.info("Bot starting...")
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error("Test failed: %s", e)
-        traceback.print_exc()
+    asyncio.run(main())
