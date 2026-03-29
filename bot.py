@@ -881,19 +881,29 @@ def save_plan_to_db(user_id, event):
     with db_lock:
         cursor.execute("""
             INSERT OR REPLACE INTO planned_events
-            (id, user_id, description, created_at, target_time, status, commitment_level, must_fulfill, last_updated, evolution_log)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, user_id, description, created_at, target_time, status, 
+             commitment_level, must_fulfill, last_updated, evolution_log,
+             needs_check, urgency, user_referenced, reference_time,
+             proactive, plan_type, plan_intent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event["id"],
             str(user_id),
             event["description"],
             event["created_at"],
-            event["target_time"],
+            event.get("target_time"),
             event["status"],
             event.get("commitment_level", "medium"),
             1 if event.get("must_fulfill", False) else 0,
             event["last_updated"],
-            json.dumps(event["evolution_log"], ensure_ascii=False)
+            json.dumps(event.get("evolution_log", []), ensure_ascii=False),
+            1 if event.get("needs_check", False) else 0,
+            event.get("urgency", "normal"),
+            1 if event.get("user_referenced", False) else 0,
+            event.get("reference_time", 0),
+            1 if event.get("proactive", False) else 0,
+            event.get("plan_type"),
+            event.get("plan_intent")
         ))
         conn.commit()
 
@@ -901,7 +911,10 @@ def save_plan_to_db(user_id, event):
 def load_plans_from_db(user_id):
     with db_lock:
         cursor.execute("""
-            SELECT id, description, created_at, target_time, status, commitment_level, must_fulfill, last_updated, evolution_log
+            SELECT id, description, created_at, target_time, status, 
+                   commitment_level, must_fulfill, last_updated, evolution_log,
+                   needs_check, urgency, user_referenced, reference_time,
+                   proactive, plan_type, plan_intent
             FROM planned_events
             WHERE user_id=?
             ORDER BY created_at DESC
@@ -917,13 +930,17 @@ def load_plans_from_db(user_id):
             "created_at": row[2],
             "target_time": row[3],
             "status": row[4],
-            "commitment_level": row[5] if len(row) > 5 else "medium",
-            "must_fulfill": bool(row[6]) if len(row) > 6 else False,
-            "last_updated": row[7] if len(row) > 7 else row[2],
-            "evolution_log": json.loads(row[8]) if len(row) > 8 and row[8] else [],
-            "needs_check": False,
-            "urgency": "normal",
-            "user_referenced": False
+            "commitment_level": row[5] if row[5] else "medium",
+            "must_fulfill": bool(row[6]) if row[6] is not None else False,
+            "last_updated": row[7] if row[7] else row[2],
+            "evolution_log": json.loads(row[8]) if row[8] else [],
+            "needs_check": bool(row[9]) if len(row) > 9 and row[9] is not None else False,
+            "urgency": row[10] if len(row) > 10 and row[10] else "normal",
+            "user_referenced": bool(row[11]) if len(row) > 11 and row[11] is not None else False,
+            "reference_time": row[12] if len(row) > 12 and row[12] else 0,
+            "proactive": bool(row[13]) if len(row) > 13 and row[13] is not None else False,
+            "plan_type": row[14] if len(row) > 14 else None,
+            "plan_intent": row[15] if len(row) > 15 else None
         })
     return plans
 
@@ -1048,30 +1065,33 @@ def build_world_state(state):
 
 
 def resolve_state_conflicts(state):
+    """Tarkistaa konfliktit KAIKISTA planeista"""
     conflicts = []
-
+    
     emotional_mode = state.get("emotional_mode")
     strategy = state.get("current_strategy")
     plan_events = state.get("planned_events", [])
-
+    
     if emotional_mode in ["jealous", "intense", "provocative"] and strategy == "reward selectively":
         conflicts.append("emotion_overrides_reward")
-
-    if plan_events:
-        latest = plan_events[-1]
-        if latest.get("status") == "changed":
+    
+    # KORJATTU: Tarkista KAIKKI planit, ei vain viimeinen
+    for plan in plan_events:
+        if plan.get("status") == "changed":
             conflicts.append("changed_plan_requires_acknowledgement")
-        
-        # UUSI: Käyttäjä viittasi suunnitelmaan
-        if latest.get("user_referenced"):
+            break  # Yksi riittää
+    
+    for plan in plan_events:
+        if plan.get("user_referenced"):
             conflicts.append("user_referenced_plan")
-
+            break
+    
     if state.get("pending_narrative"):
         conflicts.append("pending_narrative_priority")
-
+    
     if state.get("location_status") == "together" and state.get("scene") in ["work", "commute", "public"]:
         conflicts.append("shared_scene_physical_lock")
-
+    
     state["state_conflicts"] = conflicts
     return conflicts
 
@@ -1131,44 +1151,50 @@ def apply_memory_to_state(state):
 
 
 def get_plan_pressure(state):
+    """Hakee RELEVANTIN planin, ei vain viimeistä"""
     plans = state.get("planned_events", [])
     if not plans:
         return None
-
-    latest = plans[-1]
-    status = latest.get("status")
-
-    if status == "changed":
-        return {
-            "priority": "high",
-            "reason": "changed_plan",
-            "event": latest
-        }
     
-    # UUSI: Käyttäjä viittasi suunnitelmaan
-    if latest.get("user_referenced"):
-        return {
-            "priority": "critical",
-            "reason": "user_asked_about_plan",
-            "event": latest
-        }
-
-    if status == "in_progress":
-        return {
-            "priority": "medium",
-            "reason": "progressed_plan",
-            "event": latest
-        }
-
-    if status == "planned":
-        age = time.time() - latest.get("created_at", time.time())
-        if age < 3600:
+    # PRIORITEETTIJÄRJESTYS:
+    # 1. Käyttäjän viittaama plan (KORKEIN)
+    for plan in reversed(plans):  # Uusimmasta vanhimpaan
+        if plan.get("user_referenced"):
             return {
-                "priority": "low",
-                "reason": "recent_plan",
-                "event": latest
+                "priority": "critical",
+                "reason": "user_asked_about_plan",
+                "event": plan
             }
-
+    
+    # 2. Muuttunut plan
+    for plan in reversed(plans):
+        if plan.get("status") == "changed":
+            return {
+                "priority": "high",
+                "reason": "changed_plan",
+                "event": plan
+            }
+    
+    # 3. In progress plan
+    for plan in reversed(plans):
+        if plan.get("status") == "in_progress":
+            return {
+                "priority": "medium",
+                "reason": "progressed_plan",
+                "event": plan
+            }
+    
+    # 4. Tuore planned plan (viimeinen 1h sisällä)
+    for plan in reversed(plans):
+        if plan.get("status") == "planned":
+            age = time.time() - plan.get("created_at", time.time())
+            if age < 3600:
+                return {
+                    "priority": "low",
+                    "reason": "recent_plan",
+                    "event": plan
+                }
+    
     return None
 
 
@@ -1665,15 +1691,12 @@ async def safe_anthropic_call(**kwargs):
     raise Exception("Anthropic failed after retries")
 
 # ====================== MOODS ======================
-moods = {
-    "annoyed": 0.20,
-    "warm": 0.45,
-    "bored": 0.20,
-    "playful": 0.35,
-    "tender": 0.40,
-}
+# moods on nyt user-kohtainen (get_or_create_state)
 
-def update_moods(txt):
+def update_moods(user_id, txt):
+    state = get_or_create_state(user_id)
+    moods = state["moods"]  # ← Käytä user-kohtaista
+    
     txt = txt.lower().strip()
     def clamp(k, v):
         return min(1.0, max(0.0, moods.get(k, 0.4) + v))
@@ -1770,40 +1793,47 @@ def adapt_mode_to_user(user_id, text):
 
 # ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
 def get_time_context():
-    """UUSI: Palauttaa realistisen aikakontekstin"""
+    """Palauttaa realistisen aikakontekstin"""
     now = now_local()
     hour = now.hour
-    weekday = now.weekday()  # 0=maanantai, 6=sunnuntai
+    weekday = now.weekday()
     
-    # Viikonpäivä
     is_weekend = weekday >= 5
     is_workday = weekday < 5
     
-    # Kellonajan lohko
+    # KORJATTU: Palauta VAIN scene-yhteensopivia arvoja
     if 0 <= hour < 6:
         time_block = "night"
-        typical_activity = "sleeping" if not is_weekend else "awake_late"
+        typical_scene = "home"  # ← MUUTOS: scene, ei activity
+        typical_activity = "sleeping"  # ← UUSI: erillinen kenttä
     elif 6 <= hour < 9:
         time_block = "early_morning"
+        typical_scene = "home"
         typical_activity = "waking_up" if is_workday else "sleeping"
     elif 9 <= hour < 12:
         time_block = "morning"
-        typical_activity = "work" if is_workday else "home"
+        typical_scene = "work" if is_workday else "home"
+        typical_activity = "working" if is_workday else "relaxing"
     elif 12 <= hour < 14:
         time_block = "lunch"
-        typical_activity = "lunch_break" if is_workday else "home"
+        typical_scene = "work" if is_workday else "home"
+        typical_activity = "lunch_break"
     elif 14 <= hour < 17:
         time_block = "afternoon"
-        typical_activity = "work" if is_workday else "free"
+        typical_scene = "work" if is_workday else "home"
+        typical_activity = "working" if is_workday else "free_time"
     elif 17 <= hour < 19:
         time_block = "evening"
-        typical_activity = "commute" if is_workday else "home"
+        typical_scene = "commute" if is_workday else "home"
+        typical_activity = "commuting" if is_workday else "relaxing"
     elif 19 <= hour < 22:
         time_block = "late_evening"
-        typical_activity = "home"
+        typical_scene = "home"
+        typical_activity = "relaxing"
     else:
         time_block = "night"
-        typical_activity = "home" if not is_weekend else "out"
+        typical_scene = "home" if not is_weekend else "public"
+        typical_activity = "at_home" if not is_weekend else "out"
     
     return {
         "hour": hour,
@@ -1811,7 +1841,8 @@ def get_time_context():
         "is_weekend": is_weekend,
         "is_workday": is_workday,
         "time_block": time_block,
-        "typical_activity": typical_activity,
+        "typical_scene": typical_scene,  # ← SCENE (rajoitettu domain)
+        "typical_activity": typical_activity,  # ← ACTIVITY (vapaa kuvaus)
         "day_name": ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"][weekday]
     }
 
@@ -1907,7 +1938,16 @@ def get_or_create_state(user_id):
                 "theme_depth": 0.0,  # 0.0-1.0, kuinka syvälle teemaan on menty
                 "theme_started": 0,
                 "previous_themes": []  # Historia
-            }
+            },
+
+            # UUSI: User-kohtaiset moodit
+            "moods": {
+                "annoyed": 0.20,
+                "warm": 0.45,
+                "bored": 0.20,
+                "playful": 0.35,
+                "tender": 0.40,
+            },
         }
         continuity_state[user_id].update(init_scene_state())
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
@@ -2067,41 +2107,47 @@ def update_continuity_state(user_id, text):
     state = get_or_create_state(user_id)
     now = now_ts()
     
-    # UUSI: Hae realistinen aikakonteksti
     time_ctx = get_time_context()
     state["time_context"] = time_ctx
     
-    block = get_time_block()
     state["intent"] = detect_intent(text)
     
-    # PARANNETTU: Availability perustuu REALISTISEEN aikaan
+    # AVAILABILITY perustuu activity:yn
     if time_ctx["typical_activity"] == "sleeping":
         state["availability"] = "sleeping"
         state["energy"] = "very_low"
-    elif time_ctx["typical_activity"] == "work":
+    elif time_ctx["typical_activity"] in ["working", "lunch_break"]:
         state["availability"] = "busy" if random.random() < 0.7 else "free"
         state["energy"] = "normal"
-    elif time_ctx["typical_activity"] == "commute":
-        state["availability"] = "limited"  # Bussissa, voi vastata mutta lyhyesti
+    elif time_ctx["typical_activity"] == "commuting":
+        state["availability"] = "limited"
         state["energy"] = "normal"
-    elif time_ctx["typical_activity"] == "lunch_break":
-        state["availability"] = "free"
-        state["energy"] = "normal"
-    elif time_ctx["typical_activity"] in ["home", "free"]:
-        state["availability"] = "free"
-        state["energy"] = "high" if time_ctx["time_block"] == "late_evening" else "normal"
     else:
         state["availability"] = "free"
-        state["energy"] = "normal"
+        state["energy"] = "high" if time_ctx["time_block"] == "late_evening" else "normal"
     
-    # PARANNETTU: Scene perustuu aikaan
-    if not force_scene_from_text(state, text, now):
-        # Jos käyttäjä ei pakota skeneä, käytä realistista
-        if state["scene"] == "neutral" or now - state["last_scene_change"] > MIN_SCENE_DURATION:
-            state["scene"] = time_ctx["typical_activity"]
-            state["micro_context"] = random.choice(SCENE_MICRO.get(state["scene"], [""]))
-            state["last_scene_change"] = now
-            state["last_scene_source"] = "realistic_time"
+    # KORJATTU: Scene-päivitys PRIORITEETTIJÄRJESTYKSESSÄ
+    # 1. Käyttäjän pakottama scene (korkein prioriteetti)
+    if force_scene_from_text(state, text, now):
+        state["last_scene_source"] = "user_forced"
+    
+    # 2. Lukittu scene (ei muutoksia vielä)
+    elif now < state.get("scene_locked_until", 0):
+        pass  # Älä muuta
+    
+    # 3. Narratiivinen transitio (jos sallittu)
+    elif state["scene"] != "neutral" and now - state["last_scene_change"] > MIN_SCENE_DURATION:
+        maybe_transition_scene(state, now)
+    
+    # 4. Aikaperusteinen default (vain jos neutral tai hyvin vanha)
+    elif state["scene"] == "neutral" or now - state["last_scene_change"] > MIN_SCENE_DURATION * 2:
+        state["scene"] = time_ctx["typical_scene"]  # ← KÄYTÄ typical_scene
+        state["micro_context"] = random.choice(SCENE_MICRO.get(state["scene"], [""]))
+        state["last_scene_change"] = now
+        state["last_scene_source"] = "time_default"
+    
+    # Tallenna ACTIVITY erikseen (ei scene:en)
+    state["current_activity_type"] = time_ctx["typical_activity"]
     
     maybe_interrupt_action(state, text)
     check_plan_references(user_id, text)
@@ -2109,6 +2155,7 @@ def update_continuity_state(user_id, text):
     
     recent_context.append({
         "scene": state["scene"],
+        "activity": state.get("current_activity_type"),
         "intent": state["intent"],
         "energy": state["energy"],
         "text": text[:80],
@@ -2755,7 +2802,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Päivitä tila
     update_continuity_state(user_id, text)
-    update_moods(text)
+    update_moods(user_id, text)  # ← KORJATTU: user_id
     adapt_mode_to_user(user_id, text)
     update_persona_mode(user_id)
     update_working_memory(user_id, text)
