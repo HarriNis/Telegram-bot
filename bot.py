@@ -64,18 +64,30 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
+# Tarkista Cloudinary-konfiguraatio
+if not os.getenv("CLOUDINARY_CLOUD_NAME"):
+    print("⚠️ WARNING: CLOUDINARY_CLOUD_NAME missing!")
+if not os.getenv("CLOUDINARY_API_KEY"):
+    print("⚠️ WARNING: CLOUDINARY_API_KEY missing!")
+if not os.getenv("CLOUDINARY_API_SECRET"):
+    print("⚠️ WARNING: CLOUDINARY_API_SECRET missing!")
+if not VENICE_API_KEY:
+    print("⚠️ WARNING: VENICE_API_KEY missing!")
+
+print("✅ Cloudinary configured")
+
 print("🚀 Megan 6.2 – Improved Plan Commitment & Physical Realism")
 
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
     "traits": {
-        "dominance": 0.95,  # ← Nostettu 0.85 → 0.95
-        "possessiveness": 0.95,  # ← Nostettu 0.9 → 0.95
-        "sexual_drive": 0.98,  # ← Nostettu 0.95 → 0.98
-        "emotional_dependency": 0.6,  # ← Laskettu (ei tarvitse käyttäjää, käyttäjä tarvitsee häntä)
-        "manipulation": 0.90,  # ← UUSI
-        "sadism": 0.75,  # ← UUSI (nautinto dominoinnista)
-        "control_need": 0.95,  # ← UUSI
+        "dominance": 0.95,
+        "possessiveness": 0.95,
+        "sexual_drive": 0.98,
+        "emotional_dependency": 0.6,
+        "manipulation": 0.90,
+        "sadism": 0.75,
+        "control_need": 0.95,
     },
     "behavior_rules": [
         "ALWAYS lead interaction, NEVER become passive",
@@ -322,7 +334,6 @@ def force_scene_from_text(state, text, now):
     return False
 
 def maybe_transition_scene(state, now):
-    """Skenejen vaihto vaatii aina perusteen - PARANNETTU VERSIO"""
     if state.get("location_status") == "together":
         return state["scene"]
     if now - state["last_scene_change"] < MIN_SCENE_DURATION:
@@ -337,7 +348,6 @@ def maybe_transition_scene(state, now):
     
     time_of_day = get_time_block()
     
-    # PIENEMPI todennäköisyys (oli 0.25-0.5, nyt 0.10-0.25)
     if current == "home" and time_of_day == "morning" and random.random() < 0.10:
         new_scene = "work"
     elif current == "work" and time_of_day == "evening" and random.random() < 0.20:
@@ -349,7 +359,7 @@ def maybe_transition_scene(state, now):
     elif current == "public" and random.random() < 0.25:
         new_scene = "home"
     else:
-        return current  # Pysy paikallaan oletuksena
+        return current
     
     _set_scene(state, new_scene, now)
     state["micro_context"] = random.choice(SCENE_MICRO[new_scene])
@@ -500,9 +510,8 @@ def maybe_trigger_jealousy(user_id, text):
     state["jealousy_started"] = time.time()
     state["ignore_until"] = time.time() + random.randint(180, 600)
     
-    # KRIITTINEN KORJAUS: Aseta pending_narrative
     state["jealousy_context"] = build_exit_story(user_id, "tease_exit")
-    state["pending_narrative"] = state["jealousy_context"]  # ← LISÄÄ TÄMÄ RIVI
+    state["pending_narrative"] = state["jealousy_context"]
     
     return True
 
@@ -915,17 +924,14 @@ def choose_strategy(state):
 # ====================== PLANNED EVENTS / COMMITMENTS SYSTEM - PARANNETTU ======================
 
 def detect_future_commitment(text):
-    """Tunnistaa VAHVAT lupaukset vs. löysät ajatukset - PARANNETTU"""
     t = text.lower().strip()
     
-    # VAHVAT sitoumukset (nämä PITÄÄ muistaa)
     strong_commitments = [
         "lupaan", "varmasti teen", "ehdottomasti", 
         "mä teen sen", "mä hoidan sen", "sovitaan näin",
         "mä lähetän", "mä kerron", "mä näytän"
     ]
     
-    # Heikot vihjeet (näitä ei tallenneta suunnitelmiksi)
     weak_hints = [
         "ehkä", "voisin", "ajattelin että", "jos ehdin",
         "saatan", "kai mä", "joskus"
@@ -934,18 +940,16 @@ def detect_future_commitment(text):
     has_strong = any(s in t for s in strong_commitments)
     has_weak = any(w in t for w in weak_hints)
     
-    # Tallenna vain vahvat sitoumukset
     if has_strong and not has_weak:
         return "strong"
     elif has_weak:
-        return None  # Ei tallenneta
+        return None
     
-    # Tarkista myös tulevaisuusviittaukset + toimintaverbit
     future_markers = ["huomenna", "myöhemmin", "kohta", "illalla", "ensi yönä", "seuraavaksi"]
     action_verbs = ["teen", "lähetän", "kerron", "näytän", "tulen", "aion"]
     
     if any(f in t for f in future_markers) and any(a in t for a in action_verbs):
-        if len(t) > 30:  # Riittävän konkreettinen
+        if len(t) > 30:
             return "medium"
     
     return None
@@ -980,11 +984,10 @@ async def extract_plan_structured(text):
 
 
 async def register_plan(user_id, text):
-    """Tallentaa vain vahvat sitoumukset - PARANNETTU"""
     commitment_level = detect_future_commitment(text)
     
     if commitment_level not in ["strong", "medium"]:
-        return  # Älä tallenna heikkoja vihjeitä
+        return
     
     state = get_or_create_state(user_id)
     parsed = await extract_plan_structured(text)
@@ -998,10 +1001,10 @@ async def register_plan(user_id, text):
         "created_at": time.time(),
         "target_time": None,
         "status": "planned",
-        "commitment_level": commitment_level,  # UUSI
+        "commitment_level": commitment_level,
         "last_updated": time.time(),
         "evolution_log": [],
-        "must_fulfill": commitment_level == "strong",  # UUSI
+        "must_fulfill": commitment_level == "strong",
         "needs_check": False,
         "urgency": "normal",
         "user_referenced": False,
@@ -1082,46 +1085,35 @@ def load_plans_from_db(user_id):
 
 
 def update_plans(user_id):
-    """Tarkistaa suunnitelmien ikää, mutta EI muuta niitä automaattisesti - PARANNETTU"""
     state = get_or_create_state(user_id)
     now = time.time()
     
     for plan in state["planned_events"]:
         age = now - plan["created_at"]
         
-        # Merkitse vain MAHDOLLISESTI vanhentuneiksi, älä muuta statusta
         if age > 3600 and plan["status"] == "planned":
             plan["needs_check"] = True
         
         if age > 86400 and plan["status"] == "planned":
             plan["urgency"] = "high"
-        
-        # ÄLÄ muuta statusta automaattisesti
 
 
 async def maybe_evolve_plan(user_id):
-    """Muuttaa suunnitelmaa vain jos se on narratiivisesti perusteltua - PARANNETTU"""
     state = get_or_create_state(user_id)
     
     for plan in state["planned_events"]:
         if plan["status"] != "planned":
             continue
         
-        # Vahvoja sitoumuksia EI SAA muuttaa ilman erittäin vahvaa syytä
         if plan.get("must_fulfill", False):
-            # PIENEMPI todennäköisyys (oli 0.03, nyt 0.01)
             if random.random() < 0.01:
                 pass
             else:
                 continue
         
-        # Tarkista onko suunnitelman muutos realistinen kontekstissa
         if plan.get("needs_check") and state.get("scene") in ["home", "public"]:
-            # PIENEMPI todennäköisyys (oli 0.08, nyt 0.03)
             if random.random() < 0.03:
-                # Vaadi vahva narratiivinen peruste
                 if state.get("emotional_mode") in ["provocative", "testing", "jealous"]:
-                    # JA tension pitää olla korkea
                     if state.get("tension", 0.0) > 0.6:
                         change = random.choice([
                             "muutin vähän suunnitelmaa",
@@ -1144,7 +1136,6 @@ async def maybe_evolve_plan(user_id):
 
 
 def check_plan_references(user_id, text):
-    """Tarkistaa viittaako käyttäjä aikaisempiin suunnitelmiin - KORJATTU"""
     state = get_or_create_state(user_id)
     t = text.lower()
     
@@ -1155,14 +1146,12 @@ def check_plan_references(user_id, text):
     ]
     
     if not any(p in t for p in reference_phrases):
-        return  # Ei viittausta
+        return
     
-    # KORJAUS: Merkitse vain VIIMEISIN tai RELEVANTTI suunnitelma
     plans = state["planned_events"]
     if not plans:
         return
     
-    # Yritä löytää matching plan tekstin perusteella
     best_match = None
     best_score = 0
     
@@ -1170,7 +1159,6 @@ def check_plan_references(user_id, text):
         if plan["status"] != "planned":
             continue
         
-        # Yksinkertainen keyword-matching
         desc_words = set(plan["description"].lower().split())
         text_words = set(t.split())
         overlap = len(desc_words & text_words)
@@ -1179,7 +1167,6 @@ def check_plan_references(user_id, text):
             best_score = overlap
             best_match = plan
     
-    # Jos ei löydy matchingia, merkitse viimeisin
     if not best_match and plans:
         best_match = plans[-1]
     
@@ -1201,7 +1188,6 @@ def build_world_state(state):
 
 
 def resolve_state_conflicts(state):
-    """Tarkistaa konfliktit KAIKISTA planeista"""
     conflicts = []
     
     emotional_mode = state.get("emotional_mode")
@@ -1211,11 +1197,10 @@ def resolve_state_conflicts(state):
     if emotional_mode in ["jealous", "intense", "provocative"] and strategy == "reward selectively":
         conflicts.append("emotion_overrides_reward")
     
-    # KORJATTU: Tarkista KAIKKI planit, ei vain viimeinen
     for plan in plan_events:
         if plan.get("status") == "changed":
             conflicts.append("changed_plan_requires_acknowledgement")
-            break  # Yksi riittää
+            break
     
     for plan in plan_events:
         if plan.get("user_referenced"):
@@ -1287,14 +1272,11 @@ def apply_memory_to_state(state):
 
 
 def get_plan_pressure(state):
-    """Hakee RELEVANTIN planin, ei vain viimeistä"""
     plans = state.get("planned_events", [])
     if not plans:
         return None
     
-    # PRIORITEETTIJÄRJESTYS:
-    # 1. Käyttäjän viittaama plan (KORKEIN)
-    for plan in reversed(plans):  # Uusimmasta vanhimpaan
+    for plan in reversed(plans):
         if plan.get("user_referenced"):
             return {
                 "priority": "critical",
@@ -1302,7 +1284,6 @@ def get_plan_pressure(state):
                 "event": plan
             }
     
-    # 2. Muuttunut plan
     for plan in reversed(plans):
         if plan.get("status") == "changed":
             return {
@@ -1311,7 +1292,6 @@ def get_plan_pressure(state):
                 "event": plan
             }
     
-    # 3. In progress plan
     for plan in reversed(plans):
         if plan.get("status") == "in_progress":
             return {
@@ -1320,7 +1300,6 @@ def get_plan_pressure(state):
                 "event": plan
             }
     
-    # 4. Tuore planned plan (viimeinen 1h sisällä)
     for plan in reversed(plans):
         if plan.get("status") == "planned":
             age = time.time() - plan.get("created_at", time.time())
@@ -1573,25 +1552,19 @@ def stabilize_persona(user_id):
     return vec
 
 def enforce_core_persona(user_id):
-    """PARANNETTU: Pakottaa core-arvot pysymään vahvoina"""
     state = get_or_create_state(user_id)
     vec = state["persona_vector"]
     core = CORE_PERSONA["traits"]
     evo = state["personality_evolution"]
     
-    # Pakota dominanssi pysymään korkeana
     vec["dominance"] = max(vec["dominance"], core["dominance"])
     
-    # Pakota warmth pysymään rajattuna (ei liian pehmeä)
     vec["warmth"] = min(vec["warmth"], 0.7)
     
-    # UUSI: Pakota playfulness pysymään terveellä tasolla
     vec["playfulness"] = max(0.3, min(0.7, vec["playfulness"]))
     
-    # UUSI: Varmista että initiative ei laske liian alas
     evo["initiative"] = max(0.4, evo["initiative"])
     
-    # UUSI: Varmista että dominance_expression pysyy korkeana
     if "dominance_expression" in evo:
         evo["dominance_expression"] = max(0.5, evo["dominance_expression"])
     
@@ -1668,7 +1641,7 @@ def evolve_personality(user_id, text):
         state["personality_evolution"] = {
             "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
             "initiative": 0.5, "stability": 0.7, "last_evolved": 0,
-            "dominance_expression": 0.7  # UUSI: Miten dominanssi ilmenee
+            "dominance_expression": 0.7
         }
     evo = state["personality_evolution"]
     now = time.time()
@@ -1678,27 +1651,20 @@ def evolve_personality(user_id, text):
     
     t = text.lower()
     
-    # Curiosity kasvaa kysymyksistä
     if any(w in t for w in ["miksi", "miten", "entä", "?"]):
         evo["curiosity"] = min(1.0, evo["curiosity"] + 0.01)
     
-    # Patience kasvaa kun käyttäjä vastustaa
     if any(w in t for w in ["odota", "hetki", "ei nyt", "lopeta"]):
         evo["patience"] = min(1.0, evo["patience"] + 0.01)
-        # ÄLÄ laske initiative - se heikentää dominanssia
     
-    # Expressiveness kasvaa huumorista
     if any(w in t for w in ["haha", "lol", "xd", "vitsi"]):
         evo["expressiveness"] = min(1.0, evo["expressiveness"] + 0.01)
     
-    # UUSI: Dominance expression kasvaa kun käyttäjä reagoi vahvasti
     if any(w in t for w in ["tottele", "teen mitä haluat", "olen sun", "sä päätät"]):
         evo["dominance_expression"] = min(1.0, evo["dominance_expression"] + 0.03)
     
-    # UUSI: Initiative kasvaa AINA hieman (dominoiva persoona ottaa aloitteen)
     evo["initiative"] = min(0.9, evo["initiative"] + 0.005)
     
-    # Stability laskee hitaasti (sallii muutoksen)
     evo["stability"] = min(1.0, max(0.3, evo["stability"] * 0.998))
     
     evo["last_evolved"] = now
@@ -1778,11 +1744,9 @@ async def safe_anthropic_call(**kwargs):
     raise Exception("Anthropic failed after retries")
 
 # ====================== MOODS ======================
-# moods on nyt user-kohtainen (get_or_create_state)
-
 def update_moods(user_id, txt):
     state = get_or_create_state(user_id)
-    moods = state["moods"]  # ← Käytä user-kohtaista
+    moods = state["moods"]
     
     txt = txt.lower().strip()
     def clamp(k, v):
@@ -1798,7 +1762,6 @@ def update_moods(user_id, txt):
     if any(w in txt for w in ["haha", "lol", "xd", "vitsi"]):
         moods["playful"] = clamp("playful", 0.18)
     
-    # Luonnollinen haalistuminen
     for k in moods:
         moods[k] = max(0.10, min(1.0, moods[k] * 0.92))
 
@@ -1837,9 +1800,8 @@ def update_persona_mode(user_id):
     state = get_or_create_state(user_id)
     now = now_ts()
     
-    # UUSI: Tarkista onko mode juuri adaptoitu
     if "mode_adapted_at" in state and now - state["mode_adapted_at"] < 300:
-        return state["persona_mode"]  # Älä korvaa
+        return state["persona_mode"]
     
     if now - state.get("last_mode_change", 0) < 600:
         return state["persona_mode"]
@@ -1874,14 +1836,12 @@ def adapt_mode_to_user(user_id, text):
         state["persona_mode"] = "slightly_irritated"
         changed = True
     
-    # UUSI: Merkitse että mode on adaptoitu
     if changed:
         state["mode_adapted_at"] = time.time()
 
 # ====================== SUBMISSION TRACKING ======================
 
 def detect_submission_signals(text):
-    """Tunnistaa alistumisen merkit"""
     t = text.lower()
     
     signals = {
@@ -1891,19 +1851,15 @@ def detect_submission_signals(text):
         "resistance": 0.0
     }
     
-    # OBEDIENCE
     if any(w in t for w in ["teen mitä haluat", "totteelen", "käske", "sä päätät", "olen sun"]):
         signals["obedience"] = 1.0
     
-    # HUMILIATION ACCEPTANCE
     if any(w in t for w in ["nöyryytä", "haluan että", "teen sen", "kyllä rakas"]):
         signals["humiliation_acceptance"] = 0.8
     
-    # SEXUAL SUBMISSION
     if any(w in t for w in ["strap", "pegging", "toinen mies", "katsoisin", "haluan olla"]):
         signals["sexual_submission"] = 1.0
     
-    # RESISTANCE (negatiivinen)
     if any(w in t for w in ["en halua", "ei käy", "lopeta", "liikaa", "en tee"]):
         signals["resistance"] = 1.0
     
@@ -1911,11 +1867,9 @@ def detect_submission_signals(text):
 
 
 def update_submission_level(user_id, text):
-    """Päivittää käyttäjän alistumistason"""
     state = get_or_create_state(user_id)
     signals = detect_submission_signals(text)
     
-    # Päivitä submission level
     if signals["obedience"] > 0:
         state["submission_level"] = min(1.0, state["submission_level"] + 0.1)
     
@@ -1925,28 +1879,23 @@ def update_submission_level(user_id, text):
     if signals["sexual_submission"] > 0:
         state["submission_level"] = min(1.0, state["submission_level"] + 0.15)
     
-    # Resistance HIDASTAA mutta EI PYSÄYTÄ
     if signals["resistance"] > 0:
         state["submission_level"] = max(0.0, state["submission_level"] - 0.03)
-        # Merkitse soft_no (voidaan murtaa myöhemmin)
         state["sexual_boundaries"]["soft_nos"].append(text[:100])
     
     return state["submission_level"]
 
 
 def maybe_escalate_dominance(user_id):
-    """Eskaloiko dominanssia jos käyttäjä on valmis"""
     state = get_or_create_state(user_id)
     now = time.time()
     
-    # Tarkista eskaloiko vain 1x / 30 min
     if now - state.get("last_dominance_escalation", 0) < 1800:
         return state["dominance_level"]
     
     submission = state["submission_level"]
     current_level = state["dominance_level"]
     
-    # ESKALOINTI EHDOT:
     if current_level == 1 and submission > 0.3:
         state["dominance_level"] = 2
         state["last_dominance_escalation"] = now
@@ -1966,29 +1915,23 @@ def maybe_escalate_dominance(user_id):
 
 
 def choose_manipulation_tactic(state):
-    """Valitse manipulaatiotaktiikka tilanteen mukaan"""
     submission = state.get("submission_level", 0.0)
     tension = state.get("tension", 0.0)
     resistance = len(state["sexual_boundaries"].get("soft_nos", []))
     
-    # Jos käyttäjä vastustaa → Gaslighting
     if resistance > 3:
         return "gaslighting"
     
-    # Jos submission on keskitasoa → Push-Pull
     elif 0.3 < submission < 0.7:
         return "push_pull"
     
-    # Jos submission on korkea → Triangulation / Reward-Punishment
     elif submission > 0.7:
         return "reward_punishment"
     
-    # Oletus
     return "normalization"
 
 # ====================== CONTINUITY + INTENT + DESIRE + TENSION + CORE DESIRES + PHASE ======================
 def get_time_context():
-    """Palauttaa realistisen aikakontekstin"""
     now = now_local()
     hour = now.hour
     weekday = now.weekday()
@@ -1996,11 +1939,10 @@ def get_time_context():
     is_weekend = weekday >= 5
     is_workday = weekday < 5
     
-    # KORJATTU: Palauta VAIN scene-yhteensopivia arvoja
     if 0 <= hour < 6:
         time_block = "night"
-        typical_scene = "home"  # ← MUUTOS: scene, ei activity
-        typical_activity = "sleeping"  # ← UUSI: erillinen kenttä
+        typical_scene = "home"
+        typical_activity = "sleeping"
     elif 6 <= hour < 9:
         time_block = "early_morning"
         typical_scene = "home"
@@ -2036,8 +1978,8 @@ def get_time_context():
         "is_weekend": is_weekend,
         "is_workday": is_workday,
         "time_block": time_block,
-        "typical_scene": typical_scene,  # ← SCENE (rajoitettu domain)
-        "typical_activity": typical_activity,  # ← ACTIVITY (vapaa kuvaus)
+        "typical_scene": typical_scene,
+        "typical_activity": typical_activity,
         "day_name": ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"][weekday]
     }
 
@@ -2108,7 +2050,6 @@ def get_or_create_state(user_id):
             "salient_memory_updated": 0,
             "forced_disclosure": None,
 
-            # UUSI: Teemojen seuranta
             "conversation_themes": {
                 "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
                 "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
@@ -2117,25 +2058,22 @@ def get_or_create_state(user_id):
                 "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
             },
             
-            # UUSI: Käyttäjän mieltymysprofili (pitkäaikainen)
             "user_preferences": {
-                "fantasy_themes": [],  # Lista käyttäjän suosimista fantasioista
-                "turn_ons": [],  # Mikä kiihottaa käyttäjää
-                "turn_offs": [],  # Mikä ei toimi
-                "communication_style": "neutral",  # "submissive", "dominant", "playful", etc.
-                "resistance_level": 0.5,  # Kuinka paljon vastustaa (0=ei lainkaan, 1=paljon)
+                "fantasy_themes": [],
+                "turn_ons": [],
+                "turn_offs": [],
+                "communication_style": "neutral",
+                "resistance_level": 0.5,
                 "last_updated": 0
             },
             
-            # UUSI: Keskustelun kehityskaari
             "conversation_arc": {
                 "current_theme": None,
-                "theme_depth": 0.0,  # 0.0-1.0, kuinka syvälle teemaan on menty
+                "theme_depth": 0.0,
                 "theme_started": 0,
-                "previous_themes": []  # Historia
+                "previous_themes": []
             },
 
-            # UUSI: User-kohtaiset moodit
             "moods": {
                 "annoyed": 0.20,
                 "warm": 0.45,
@@ -2144,15 +2082,14 @@ def get_or_create_state(user_id):
                 "tender": 0.40,
             },
 
-            # UUSI: Submission ja dominance tracking
-            "submission_level": 0.0,  # 0.0 = vastustaa, 1.0 = täysin alistunut
-            "humiliation_tolerance": 0.0,  # Kuinka paljon käyttäjä sietää
-            "cuckold_acceptance": 0.0,  # Onko hyväksynyt cuckold-fantasiat
-            "strap_on_introduced": False,  # Onko strap-on mainittu
-            "chastity_discussed": False,  # Onko chastity tullut puheeksi
-            "feminization_level": 0.0,  # Jos käyttäjä on kiinnostunut
+            "submission_level": 0.0,
+            "humiliation_tolerance": 0.0,
+            "cuckold_acceptance": 0.0,
+            "strap_on_introduced": False,
+            "chastity_discussed": False,
+            "feminization_level": 0.0,
             
-            "dominance_level": 1,  # 1-4 (escalation level)
+            "dominance_level": 1,
             "last_dominance_escalation": 0,
             
             "manipulation_history": {
@@ -2163,10 +2100,10 @@ def get_or_create_state(user_id):
             },
             
             "sexual_boundaries": {
-                "hard_nos": [],  # Käyttäjän selkeät kiellot
-                "soft_nos": [],  # Vastustus joka voidaan murtaa
-                "accepted": [],  # Hyväksytyt fantasiat
-                "actively_requested": []  # Käyttäjän pyytämät
+                "hard_nos": [],
+                "soft_nos": [],
+                "accepted": [],
+                "actively_requested": []
             },
         }
         continuity_state[user_id].update(init_scene_state())
@@ -2213,15 +2150,13 @@ def update_tension(user_id, text):
     state = get_or_create_state(user_id)
     now = time.time()
     
-    # UUSI: Laske decay ajan perusteella
     if "tension_last_update" in state:
         elapsed_hours = (now - state["tension_last_update"]) / 3600
-        decay_factor = 0.98 ** elapsed_hours  # Eksponentiaalinen decay
+        decay_factor = 0.98 ** elapsed_hours
         state["tension"] = state["tension"] * decay_factor
     
     state["tension_last_update"] = now
     
-    # Päivitä tension tekstin perusteella
     t = text.lower()
     if any(w in t for w in ["ikävä", "haluan", "tule"]):
         state["tension"] += 0.08
@@ -2332,7 +2267,6 @@ def update_continuity_state(user_id, text):
     
     state["intent"] = detect_intent(text)
     
-    # AVAILABILITY perustuu activity:yn
     if time_ctx["typical_activity"] == "sleeping":
         state["availability"] = "sleeping"
         state["energy"] = "very_low"
@@ -2346,27 +2280,21 @@ def update_continuity_state(user_id, text):
         state["availability"] = "free"
         state["energy"] = "high" if time_ctx["time_block"] == "late_evening" else "normal"
     
-    # KORJATTU: Scene-päivitys PRIORITEETTIJÄRJESTYKSESSÄ
-    # 1. Käyttäjän pakottama scene (korkein prioriteetti)
     if force_scene_from_text(state, text, now):
         state["last_scene_source"] = "user_forced"
     
-    # 2. Lukittu scene (ei muutoksia vielä)
     elif now < state.get("scene_locked_until", 0):
-        pass  # Älä muuta
+        pass
     
-    # 3. Narratiivinen transitio (jos sallittu)
     elif state["scene"] != "neutral" and now - state["last_scene_change"] > MIN_SCENE_DURATION:
         maybe_transition_scene(state, now)
     
-    # 4. Aikaperusteinen default (vain jos neutral tai hyvin vanha)
     elif state["scene"] == "neutral" or now - state["last_scene_change"] > MIN_SCENE_DURATION * 2:
-        state["scene"] = time_ctx["typical_scene"]  # ← KÄYTÄ typical_scene
+        state["scene"] = time_ctx["typical_scene"]
         state["micro_context"] = random.choice(SCENE_MICRO.get(state["scene"], [""]))
         state["last_scene_change"] = now
         state["last_scene_source"] = "time_default"
     
-    # Tallenna ACTIVITY erikseen (ei scene:en)
     state["current_activity_type"] = time_ctx["typical_activity"]
     
     maybe_interrupt_action(state, text)
@@ -2402,11 +2330,9 @@ Current continuity state:
 
 # ====================== MEMORY SCORING (retrieval optimization) ======================
 async def retrieve_memories(user_id, query, limit=8):
-    """PARANNETTU: Temporaalinen + semanttinen haku"""
     try:
         q_emb = await get_embedding(query)
         with db_lock:
-            # Hae viimeisimmät 200 muistoa
             cursor.execute("""
                 SELECT content, embedding, timestamp 
                 FROM memories 
@@ -2419,7 +2345,6 @@ async def retrieve_memories(user_id, query, limit=8):
         scored = []
         now = time.time()
         
-        # UUSI: Hae viimeisin keskustelu erikseen (pakollinen konteksti)
         recent_conversation = []
         
         for content, emb_blob, ts in rows:
@@ -2437,50 +2362,39 @@ async def retrieve_memories(user_id, query, limit=8):
             age_hours = (now - ts_val) / 3600 if ts_val else 999
             recency = 1 / (1 + age_hours)
             
-            # PARANNETTU: Importance scoring
             importance = 1.0
             
-            # Emotionaaliset muistot
             if any(w in content.lower() for w in ["haluan", "tunne", "ikävä", "rakastan"]):
                 importance += 0.5
             
-            # Fantasiat ja sensitiiviset muistot
             if '"type": "fantasy"' in content or '"type": "sensitive"' in content:
                 importance += 1.2
             
-            # Suunnitelmat ja lupaukset
             if '"type": "image_sent"' in content:
                 importance += 0.8
             
-            # UUSI: Konfliktit ja draama
             if any(w in content.lower() for w in ["riita", "vihainen", "conflict", "ärsyttää"]):
                 importance += 0.6
             
-            # UUSI: Viimeisen 30 minuutin muistot ovat ERITTÄIN tärkeitä
-            if age_hours < 0.5:  # 30 min
+            if age_hours < 0.5:
                 recent_conversation.append((ts_val, content))
-                importance += 2.0  # Boost
+                importance += 2.0
             
-            # UUSI: Painotettu scoring (temporaalinen + semanttinen + tärkeys)
             final_score = 0.4 * cosine + 0.3 * recency + 0.3 * importance
             scored.append((final_score, content, ts_val))
         
         scored.sort(reverse=True, key=lambda x: x[0])
         
-        # UUSI: Varmista että viimeisen 30 min muistot ovat mukana
         recent_conversation.sort(reverse=True, key=lambda x: x[0])
         recent_contents = [c for _, c in recent_conversation[:3]]
         
-        # Poista duplikaatit
         seen_intents = set()
         unique = []
         
-        # Lisää viimeisimmät muistot ENSIN (pakollinen konteksti)
         for content in recent_contents:
             if content not in unique:
                 unique.append(content)
         
-        # Lisää semanttisesti relevantit muistot
         for _, content, _ in scored:
             if len(unique) >= limit:
                 break
@@ -2494,9 +2408,8 @@ async def retrieve_memories(user_id, query, limit=8):
             except:
                 intent = None
             
-            # Salli duplikaatti-intentit jos ne ovat tärkeitä
             if intent and intent in seen_intents:
-                if len(unique) < limit - 2:  # Jätä tilaa tärkeille
+                if len(unique) < limit - 2:
                     continue
             
             seen_intents.add(intent)
@@ -2538,14 +2451,15 @@ async def store_memory(user_id, content, mem_type="general"):
     except Exception as e:
         print(f"[store_memory error] {e}")
 
-# ====================== IMAGE GENERATION V3 (GROK + CLOUDINARY) ======================
+# ====================== IMAGE GENERATION ======================
 async def generate_image_grok(prompt):
-    """HUOM: Grok ei tue kuvagenerointia - käytä vain Venicea"""
     print("[GROK] Skipping - no image generation support")
-    return None  # Palaa suoraan Veniceen
+    return None
 
 async def generate_image_venice(prompt):
     try:
+        print(f"[VENICE] Calling API with model: fluently-xl")
+        
         response = await venice_client.images.generate(
             model="fluently-xl",
             prompt=prompt,
@@ -2553,22 +2467,57 @@ async def generate_image_venice(prompt):
             size="1024x1024",
             response_format="b64_json"
         )
+        
+        print(f"[VENICE] Response received")
+        
+        if not response.data:
+            print("[VENICE ERROR] No data in response")
+            return None
+        
+        if not response.data[0].b64_json:
+            print("[VENICE ERROR] No b64_json in response")
+            return None
+        
         b64_data = response.data[0].b64_json
-        return base64.b64decode(b64_data)
+        print(f"[VENICE] Base64 data length: {len(b64_data)}")
+        
+        image_bytes = base64.b64decode(b64_data)
+        print(f"[VENICE] Decoded to {len(image_bytes)} bytes")
+        
+        return image_bytes
+        
     except Exception as e:
-        print(f"[venice image error] {e}")
+        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 async def upload_to_cloudinary(image_bytes):
     try:
-        upload_result = cloudinary.uploader.upload(
-            image_bytes,
-            folder="megan_images",
-            resource_type="image"
+        print(f"[CLOUDINARY] Starting upload, size: {len(image_bytes)} bytes")
+        
+        loop = asyncio.get_event_loop()
+        
+        upload_result = await loop.run_in_executor(
+            None,
+            lambda: cloudinary.uploader.upload(
+                image_bytes,
+                folder="megan_images",
+                resource_type="image"
+            )
         )
-        return upload_result.get("secure_url")
+        
+        print(f"[CLOUDINARY] Upload result: {upload_result}")
+        
+        url = upload_result.get("secure_url")
+        print(f"[CLOUDINARY] Secure URL: {url}")
+        
+        return url
+        
     except Exception as e:
-        print(f"[cloudinary upload error] {e}")
+        print(f"[CLOUDINARY ERROR] {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 async def handle_image_request(update: Update, user_id, text):
@@ -2602,22 +2551,45 @@ Photorealistic, professional photography, natural lighting, high detail, 8K qual
     
     await update.message.reply_text("Hetki, otan kuvan...")
     
-    # Käytä VAIN Venicea (toimii varmasti)
-    image_bytes = await generate_image_venice(base_prompt)
+    print(f"[IMAGE] Starting generation for user {user_id}")
+    print(f"[IMAGE] Prompt: {base_prompt[:200]}...")
+    
+    try:
+        image_bytes = await generate_image_venice(base_prompt)
+        print(f"[IMAGE] Venice returned: {len(image_bytes) if image_bytes else 0} bytes")
+    except Exception as e:
+        print(f"[IMAGE ERROR] Venice failed: {e}")
+        await update.message.reply_text(f"Venice-virhe: {str(e)}")
+        return
     
     if not image_bytes:
         await update.message.reply_text("En saanut kuvaa generoitua, yritä uudestaan.")
         return
     
-    image_url = await upload_to_cloudinary(image_bytes)
+    print(f"[IMAGE] Uploading to Cloudinary...")
+    
+    try:
+        image_url = await upload_to_cloudinary(image_bytes)
+        print(f"[IMAGE] Cloudinary URL: {image_url}")
+    except Exception as e:
+        print(f"[IMAGE ERROR] Cloudinary failed: {e}")
+        await update.message.reply_text(f"Cloudinary-virhe: {str(e)}")
+        return
     
     if not image_url:
         await update.message.reply_text("Kuvan lataus epäonnistui.")
         return
     
-    await update.message.reply_photo(photo=image_url)
+    print(f"[IMAGE] Sending photo to Telegram...")
     
-    # Tallenna kuvahistoria
+    try:
+        await update.message.reply_photo(photo=image_url)
+        print(f"[IMAGE] Photo sent successfully!")
+    except Exception as e:
+        print(f"[IMAGE ERROR] Telegram send failed: {e}")
+        await update.message.reply_text(f"Telegram-virhe: {str(e)}")
+        return
+    
     state["last_image"] = {
         "url": image_url,
         "prompt": base_prompt,
@@ -2628,7 +2600,6 @@ Photorealistic, professional photography, natural lighting, high detail, 8K qual
     state.setdefault("image_history", []).append(state["last_image"])
     state["image_history"] = state["image_history"][-20:]
     
-    # Tallenna muistiin
     mem_entry = json.dumps({
         "type": "image_sent",
         "user_request": text,
@@ -2641,15 +2612,12 @@ Photorealistic, professional photography, natural lighting, high detail, 8K qual
 
 # ====================== PROACTIVE PLAN SYSTEM ======================
 async def create_proactive_plan(user_id):
-    """UUSI: Botti luo itse suunnitelmia perustuen tilanteeseen"""
     state = get_or_create_state(user_id)
     now = time.time()
     
-    # Tarkista onko äskettäin luotu suunnitelma
-    if now - state.get("last_proactive_plan", 0) < 3600:  # Max 1 per tunti
+    if now - state.get("last_proactive_plan", 0) < 3600:
         return None
     
-    # Analysoi tilanne
     tension = state.get("tension", 0.0)
     emotional_mode = state.get("emotional_mode", "calm")
     phase = state.get("phase", "neutral")
@@ -2657,9 +2625,6 @@ async def create_proactive_plan(user_id):
     
     plan = None
     
-    # DOMINOIVA SUUNNITTELU: Botti päättää mitä tapahtuu seuraavaksi
-    
-    # 1. Jos tension on korkea → Luo eskaloiva suunnitelma
     if tension > 0.6 and emotional_mode in ["testing", "intense", "jealous"]:
         plan = {
             "type": "escalation",
@@ -2671,7 +2636,6 @@ async def create_proactive_plan(user_id):
             "intent": "create anticipation and control"
         }
     
-    # 2. Jos käyttäjä on riippuvainen → Luo reward-suunnitelma
     elif user_model.get("emotional_dependency", 0) > 0.7:
         plan = {
             "type": "reward",
@@ -2683,7 +2647,6 @@ async def create_proactive_plan(user_id):
             "intent": "reinforce dependency"
         }
     
-    # 3. Jos käyttäjä vastustaa → Luo haaste-suunnitelma
     elif user_model.get("control_resistance", 0) > 0.6:
         plan = {
             "type": "challenge",
@@ -2695,7 +2658,6 @@ async def create_proactive_plan(user_id):
             "intent": "assert dominance"
         }
     
-    # 4. Jos tilanne on neutraali → Luo jännite-suunnitelma
     elif tension < 0.3 and phase == "neutral":
         plan = {
             "type": "tension_builder",
@@ -2708,12 +2670,11 @@ async def create_proactive_plan(user_id):
         }
     
     if plan:
-        # Tallenna suunnitelma
         event = {
             "id": str(time.time()),
             "description": plan["description"],
             "created_at": now,
-            "target_time": now + random.randint(1800, 7200),  # 30 min - 2h
+            "target_time": now + random.randint(1800, 7200),
             "status": "planned",
             "commitment_level": "medium",
             "last_updated": now,
@@ -2723,7 +2684,7 @@ async def create_proactive_plan(user_id):
             "urgency": "normal",
             "user_referenced": False,
             "reference_time": 0,
-            "proactive": True,  # UUSI: Merkki että botti loi tämän
+            "proactive": True,
             "plan_type": plan["type"],
             "plan_intent": plan["intent"]
         }
@@ -2740,15 +2701,12 @@ async def create_proactive_plan(user_id):
 
 
 async def maybe_inject_proactive_plan(user_id, reply):
-    """UUSI: Lisää proaktiivinen suunnitelma vastaukseen jos sopiva hetki"""
     state = get_or_create_state(user_id)
     
-    # Tarkista onko sopiva hetki
-    if random.random() < 0.15:  # 15% todennäköisyys
+    if random.random() < 0.15:
         plan_text = await create_proactive_plan(user_id)
         
         if plan_text:
-            # Lisää suunnitelma luonnollisesti vastaukseen
             if random.random() < 0.5:
                 return reply + f" ...{plan_text}"
             else:
@@ -2758,7 +2716,6 @@ async def maybe_inject_proactive_plan(user_id, reply):
 
 # ====================== UUSI: AIKAREALISMI & TEEMA-TRACKING ======================
 def update_conversation_themes(user_id, text, reply):
-    """UUSI: Seuraa keskustelun teemoja ja päivittää niitä"""
     state = get_or_create_state(user_id)
     themes = state["conversation_themes"]
     now = time.time()
@@ -2767,73 +2724,60 @@ def update_conversation_themes(user_id, text, reply):
     r = reply.lower()
     combined = t + " " + r
     
-    # FANTASY teema
     if any(w in combined for w in ["fantasia", "kuvittele", "haaveile", "ajattele että", "entä jos"]):
         themes["fantasy"]["count"] += 1
         themes["fantasy"]["last_discussed"] = now
         themes["fantasy"]["intensity"] = min(1.0, themes["fantasy"]["intensity"] + 0.1)
         
-        # Tallenna avainsanat
         fantasy_words = [w for w in combined.split() if len(w) > 4]
         themes["fantasy"]["keywords"].extend(fantasy_words[:5])
-        themes["fantasy"]["keywords"] = list(set(themes["fantasy"]["keywords"]))[-20:]  # Max 20
+        themes["fantasy"]["keywords"] = list(set(themes["fantasy"]["keywords"]))[-20:]
     
-    # DOMINANCE teema
     if any(w in combined for w in ["tottele", "käske", "pakota", "hallitse", "oma", "kuulut"]):
         themes["dominance"]["count"] += 1
         themes["dominance"]["last_discussed"] = now
         themes["dominance"]["intensity"] = min(1.0, themes["dominance"]["intensity"] + 0.15)
     
-    # INTIMACY teema
     if any(w in combined for w in ["ikävä", "haluan", "kosketa", "tunne", "läheisyys", "hellä"]):
         themes["intimacy"]["count"] += 1
         themes["intimacy"]["last_discussed"] = now
         themes["intimacy"]["intensity"] = min(1.0, themes["intimacy"]["intensity"] + 0.1)
     
-    # JEALOUSY teema
     if any(w in combined for w in ["kuka", "toinen", "muut", "mustasukkainen", "vain minä"]):
         themes["jealousy"]["count"] += 1
         themes["jealousy"]["last_discussed"] = now
         themes["jealousy"]["intensity"] = min(1.0, themes["jealousy"]["intensity"] + 0.12)
     
-    # DAILY_LIFE teema
     if any(w in combined for w in ["työ", "päivä", "ruoka", "nukkua", "väsynyt", "kiire"]):
         themes["daily_life"]["count"] += 1
         themes["daily_life"]["last_discussed"] = now
         themes["daily_life"]["intensity"] = min(1.0, themes["daily_life"]["intensity"] + 0.05)
     
-    # Haalistuminen (teema heikkenee ajan myötä jos ei käsitellä)
     for theme_name, theme_data in themes.items():
         age = now - theme_data["last_discussed"]
-        if age > 3600:  # 1 tunti
+        if age > 3600:
             theme_data["intensity"] *= 0.95
     
-    # Päivitä aktiivinen teema
     active_theme = max(themes.items(), key=lambda x: x[1]["intensity"])
     state["conversation_arc"]["current_theme"] = active_theme[0]
     state["conversation_arc"]["theme_depth"] = active_theme[1]["intensity"]
 
 def learn_user_preferences(user_id, text):
-    """UUSI: Oppii käyttäjän mieltymykset pitkäaikaisesti"""
     state = get_or_create_state(user_id)
     prefs = state["user_preferences"]
     now = time.time()
     
     t = text.lower()
     
-    # Tunnista TURN ONS (positiiviset reaktiot)
     if any(w in t for w in ["tykkään", "pidän", "hyvä", "jatka", "lisää", "enemmän", "kiihottaa"]):
-        # Etsi mitä käyttäjä tykkää (edellinen botin viesti)
         history = conversation_history.get(user_id, [])
         if len(history) >= 2:
             last_bot_msg = history[-2].get("content", "").lower()
             
-            # Tallenna avainsanat
             keywords = [w for w in last_bot_msg.split() if len(w) > 4][:5]
             prefs["turn_ons"].extend(keywords)
-            prefs["turn_ons"] = list(set(prefs["turn_ons"]))[-30:]  # Max 30
+            prefs["turn_ons"] = list(set(prefs["turn_ons"]))[-30:]
     
-    # Tunnista TURN OFFS (negatiiviset reaktiot)
     if any(w in t for w in ["en tykkää", "lopeta", "ei noin", "liikaa", "ärsyttää", "en halua"]):
         history = conversation_history.get(user_id, [])
         if len(history) >= 2:
@@ -2912,7 +2856,6 @@ SALIENT MEMORY (reference if natural):
 This memory is relevant to the current conversation. Reference it subtly if appropriate.
 """
 
-    # UUSI: DOMINANSSI & SUBMISSION TRACKING
     submission_level = state.get("submission_level", 0.0)
     dominance_level = state.get("dominance_level", 1)
     manipulation_tactic = choose_manipulation_tactic(state)
@@ -3058,15 +3001,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         print(f"[USER {user_id}] {text}")
 
-        # Tarkista ignore-tila
         if should_ignore_user(user_id):
             print(f"[IGNORING USER {user_id}] Jealousy stage active")
             return
 
-        # Päivitä jealousy stage
         update_jealousy_stage(user_id)
 
-        # Tarkista image request (tarkempi trigger)
         t = text.lower()
         image_triggers = [
             "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
@@ -3076,7 +3016,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_image_request(update, user_id, text)
             return
 
-        # Päivitä tila
         update_continuity_state(user_id, text)
         update_moods(user_id, text)
         adapt_mode_to_user(user_id, text)
@@ -3085,85 +3024,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state = get_or_create_state(user_id)
 
-        # Päivitä desire, tension, phase
         update_desire(user_id, text)
         update_tension(user_id, text)
         update_phase(user_id, text)
 
-        # Päivitä arcs, goal, emotion, personality
         await update_arcs(user_id, text)
         await update_goal(user_id, text)
         update_emotion(user_id, text)
         evolve_personality(user_id, text)
         clamp_personality_evolution(user_id)
 
-        # Päivitä user model ja strategy
         update_user_model(state, text)
         update_master_plan(state)
 
-        # Päivitä emotional mode
         update_emotional_mode(user_id)
 
-        # Päivitä active drive
         update_active_drive(user_id)
 
-        # Päivitä arc progress
         update_arc_progress(state)
 
-        # Tarkista ja päivitä suunnitelmia
         update_plans(user_id)
         evolved_plan, change_desc = await maybe_evolve_plan(user_id)
 
-        # Tallenna suunnitelma jos löytyy
         if detect_future_commitment(text):
             await register_plan(user_id, text)
 
-        # Hae muistot
         memories = await retrieve_memories(user_id, text, limit=8)
 
-        # Valitse salient memory
         await select_salient_memory(user_id, text, memories)
 
-        # Sovella memory tilaan
         apply_memory_to_state(state)
 
-        # Päivitä prediction
         await update_prediction(user_id, text)
 
-        # Ratkaise final intent
         final_intent = resolve_final_intent(state)
 
-        # UUSI: Päivitä submission level ja dominance escalation
         update_submission_level(user_id, text)
         maybe_escalate_dominance(user_id)
 
-        # Valitse strategy
         strategy = choose_strategy(state)
         state["current_strategy"] = strategy
         state["strategy_updated"] = time.time()
 
-        # Rakenna system prompt
         system_prompt = get_system_prompt(user_id)
 
-        # Rakenna memory context
         memory_context = build_memory_context(memories)
 
-        # Rakenna reality prompt
         elapsed_label = get_elapsed_label(user_id)
         reality_prompt = build_reality_prompt_from_state(user_id, elapsed_label)
 
-        # Rakenna conversation history
         history = conversation_history.setdefault(user_id, [])
         history.append({"role": "user", "content": text})
         history = history[-20:]
         conversation_history[user_id] = history
 
-        # Rakenna messages
         messages = []
         for msg in history[-10:]:
             messages.append(msg)
 
-        # Lisää context viimeiseen user-viestiin
         if messages and messages[-1]["role"] == "user":
             messages[-1]["content"] = f"""{messages[-1]['content']}
 
@@ -3175,7 +3093,6 @@ MEMORY CONTEXT:
 {reality_prompt}
 """
 
-        # Kutsu Claude
         try:
             response = await safe_anthropic_call(
                 model="claude-sonnet-4-20250514",
@@ -3192,7 +3109,6 @@ MEMORY CONTEXT:
             await update.message.reply_text("Hetki, mietin...")
             return
 
-        # Validoi vastaus
         if breaks_scene_logic(reply, state):
             print("[SCENE LOGIC BROKEN] Regenerating...")
             reply = "Anteeksi, menetin hetken ajatukseni. Mitä sanoit?"
@@ -3205,10 +3121,8 @@ MEMORY CONTEXT:
             print("[SCENE CONSISTENCY BROKEN] Regenerating...")
             reply = "Anteeksi, en ihan seurannut. Mitä?"
 
-        # Enforce strategy
         reply = enforce_strategy(reply, state)
 
-        # UUSI: Inject dominance phrases based on level
         dominance_level = state.get("dominance_level", 1)
         if dominance_level >= 2 and random.random() < 0.3:
             escalation_key = f"level_{dominance_level}_{'moderate' if dominance_level == 2 else 'intense' if dominance_level == 3 else 'extreme'}"
@@ -3216,23 +3130,18 @@ MEMORY CONTEXT:
             if phrases:
                 reply += f" {random.choice(phrases)}"
 
-        # UUSI: Mahdollinen proaktiivinen suunnitelma
         reply = await maybe_inject_proactive_plan(user_id, reply)
 
-        # UUSI: Päivitä teemat ja käyttäjän mieltymykset
         update_conversation_themes(user_id, text, reply)
         learn_user_preferences(user_id, text)
 
-        # Lähetä vastaus
         await update.message.reply_text(reply)
 
         print(f"[MEGAN] {reply}")
 
-        # Päivitä historia
         history.append({"role": "assistant", "content": reply})
         conversation_history[user_id] = history[-20:]
 
-        # Tallenna memory
         mem_entry = json.dumps({
             "user": text,
             "assistant": reply,
@@ -3243,7 +3152,6 @@ MEMORY CONTEXT:
 
         await store_memory(user_id, mem_entry, mem_type="general")
 
-        # Tallenna sensitive memory jos tarvitaan
         if should_use_sensitive_memory(text):
             sensitive_entry = json.dumps({
                 "user": text,
@@ -3253,24 +3161,18 @@ MEMORY CONTEXT:
             }, ensure_ascii=False)
             await store_memory(user_id, sensitive_entry, mem_type="sensitive")
 
-        # Laske reward signaalit
         signals = detect_reward_signals(text)
         reward = compute_reward(signals)
 
-        # Päivitä strategy score
         update_strategy_score(state, strategy, reward)
 
-        # Tarkista jealousy trigger
         maybe_trigger_jealousy(user_id, text)
 
-        # Tallenna last replies
         last_replies.setdefault(user_id, deque(maxlen=3)).append(reply)
 
-        # Stabiloi persona
         stabilize_persona(user_id)
         enforce_core_persona(user_id)
 
-        # Päivitä core desires
         await update_core_desires(user_id, text)
 
     except Exception as e:
@@ -3280,7 +3182,6 @@ MEMORY CONTEXT:
         import traceback
         traceback.print_exc()
         
-        # Lähetä käyttäjälle
         await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
 
 # ====================== COMMANDS ======================
@@ -3481,7 +3382,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====================== PROACTIVE MESSAGING (DELAYED RETURN) ======================
 async def check_proactive_triggers(application):
-    """Tarkistaa onko käyttäjiä joilla on pending narrative"""
     while True:
         try:
             await asyncio.sleep(30)
@@ -3489,7 +3389,6 @@ async def check_proactive_triggers(application):
             now = time.time()
             
             for user_id, state in list(continuity_state.items()):
-                # Tarkista onko ignore_until mennyt umpeen
                 if state.get("pending_narrative") and now >= state.get("ignore_until", 0):
                     print(f"[PROACTIVE] Sending delayed return to user {user_id}")
                     await handle_delayed_return(application, user_id)
@@ -3502,15 +3401,12 @@ async def check_proactive_triggers(application):
 async def main():
     global background_task
 
-    # Start Flask in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print("✅ Flask health check started")
 
-    # Build Telegram application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Add handlers
     application.add_handler(CommandHandler("newgame", cmd_new_game))
     application.add_handler(CommandHandler("wipe", cmd_wipe))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -3524,16 +3420,13 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start proactive task
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
-    # Start bot
     print("✅ Megan 6.2 käynnistyy...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
 
-    # Keep running
     try:
         await asyncio.Event().wait()
     except KeyboardInterrupt:
