@@ -2617,7 +2617,7 @@ async def upload_to_cloudinary(image_bytes):
         )
         return upload_result.get("secure_url")
     except Exception as e:
-        print(f("[cloudinary upload error] {e}")
+        print(f"[cloudinary upload error] {e}")
         return None
 
 async def handle_image_request(update: Update, user_id, text):
@@ -3043,118 +3043,122 @@ You are Megan. Respond naturally in Finnish.
 
 # ====================== MAIN CHAT HANDLER ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
+    try:
+        user_id = update.effective_user.id
+        text = update.message.text.strip()
 
-    if not text:
-        return
+        if not text:
+            return
 
-    print(f"[USER {user_id}] {text}")
+        print(f"[USER {user_id}] {text}")
 
-    # Tarkista ignore-tila
-    if should_ignore_user(user_id):
-        print(f"[IGNORING USER {user_id}] Jealousy stage active")
-        return
+        # Tarkista ignore-tila
+        if should_ignore_user(user_id):
+            print(f"[IGNORING USER {user_id}] Jealousy stage active")
+            return
 
-    # Päivitä jealousy stage
-    update_jealousy_stage(user_id)
+        # Päivitä jealousy stage
+        update_jealousy_stage(user_id)
 
-    # Tarkista image request (tarkempi trigger)
-    t = text.lower()
-    image_triggers = [
-        "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
-        "ota kuva", "lähetä pic", "send pic", "lähetä picture"
-    ]
-    if any(trigger in t for trigger in image_triggers):
-        await handle_image_request(update, user_id, text)
-        return
+        # Tarkista image request (tarkempi trigger)
+        t = text.lower()
+        image_triggers = [
+            "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
+            "ota kuva", "lähetä pic", "send pic", "lähetä picture"
+        ]
+        if any(trigger in t for trigger in image_triggers):
+            await handle_image_request(update, user_id, text)
+            return
 
-    # Päivitä tila
-    update_continuity_state(user_id, text)
-    update_moods(user_id, text)  # ← KORJATTU: user_id
-    adapt_mode_to_user(user_id, text)
-    update_persona_mode(user_id)
-    update_working_memory(user_id, text)
+        # Päivitä tila
+        update_continuity_state(user_id, text)
+        
+        # KORJATTU: Lisää user_id parametri
+        update_moods(user_id, text)  # ← UUSI (user-kohtainen moods)
+        
+        adapt_mode_to_user(user_id, text)
+        update_persona_mode(user_id)
+        update_working_memory(user_id, text)
 
-    state = get_or_create_state(user_id)
+        state = get_or_create_state(user_id)
 
-    # Päivitä desire, tension, phase
-    update_desire(user_id, text)
-    update_tension(user_id, text)
-    update_phase(user_id, text)
+        # Päivitä desire, tension, phase
+        update_desire(user_id, text)
+        update_tension(user_id, text)
+        update_phase(user_id, text)
 
-    # Päivitä arcs, goal, emotion, personality
-    await update_arcs(user_id, text)
-    await update_goal(user_id, text)
-    update_emotion(user_id, text)
-    evolve_personality(user_id, text)
-    clamp_personality_evolution(user_id)
+        # Päivitä arcs, goal, emotion, personality
+        await update_arcs(user_id, text)
+        await update_goal(user_id, text)
+        update_emotion(user_id, text)
+        evolve_personality(user_id, text)
+        clamp_personality_evolution(user_id)
 
-    # Päivitä user model ja strategy
-    update_user_model(state, text)
-    update_master_plan(state)
+        # Päivitä user model ja strategy
+        update_user_model(state, text)
+        update_master_plan(state)
 
-    # Päivitä emotional mode
-    update_emotional_mode(user_id)
+        # Päivitä emotional mode
+        update_emotional_mode(user_id)
 
-    # Päivitä active drive
-    update_active_drive(user_id)
+        # Päivitä active drive
+        update_active_drive(user_id)
 
-    # Päivitä arc progress
-    update_arc_progress(state)
+        # Päivitä arc progress
+        update_arc_progress(state)
 
-    # Tarkista ja päivitä suunnitelmia
-    update_plans(user_id)
-    evolved_plan, change_desc = await maybe_evolve_plan(user_id)
+        # Tarkista ja päivitä suunnitelmia
+        update_plans(user_id)
+        evolved_plan, change_desc = await maybe_evolve_plan(user_id)
 
-    # Tallenna suunnitelma jos löytyy
-    if detect_future_commitment(text):
-        await register_plan(user_id, text)
+        # Tallenna suunnitelma jos löytyy
+        if detect_future_commitment(text):
+            await register_plan(user_id, text)
 
-    # Hae muistot
-    memories = await retrieve_memories(user_id, text, limit=8)
+        # Hae muistot
+        memories = await retrieve_memories(user_id, text, limit=8)
 
-    # Valitse salient memory
-    await select_salient_memory(user_id, text, memories)
+        # Valitse salient memory
+        await select_salient_memory(user_id, text, memories)
 
-    # Sovella memory tilaan
-    apply_memory_to_state(state)
+        # Sovella memory tilaan
+        apply_memory_to_state(state)
 
-    # Päivitä prediction
-    await update_prediction(user_id, text)
+        # Päivitä prediction
+        await update_prediction(user_id, text)
 
-    # Ratkaise final intent
-    final_intent = resolve_final_intent(state)
+        # Ratkaise final intent
+        final_intent = resolve_final_intent(state)
 
-    # Valitse strategy
-    strategy = choose_strategy(state)
-    state["current_strategy"] = strategy
-    state["strategy_updated"] = time.time()
+        # Valitse strategy
+        strategy = choose_strategy(state)
+        state["current_strategy"] = strategy
+        state["strategy_updated"] = time.time()
 
-    # Rakenna system prompt
-    system_prompt = get_system_prompt(user_id)
+        # Rakenna system prompt
+        system_prompt = get_system_prompt(user_id)
 
-    # Rakenna memory context
-    memory_context = build_memory_context(memories)
+        # Rakenna memory context
+        memory_context = build_memory_context(memories)
 
-    # Rakenna reality prompt
-    elapsed_label = get_elapsed_label(user_id)
-    reality_prompt = build_reality_prompt_from_state(user_id, elapsed_label)
+        # Rakenna reality prompt
+        elapsed_label = get_elapsed_label(user_id)
+        reality_prompt = build_reality_prompt_from_state(user_id, elapsed_label)
 
-    # Rakenna conversation history
-    history = conversation_history.setdefault(user_id, [])
-    history.append({"role": "user", "content": text})
-    history = history[-20:]
-    conversation_history[user_id] = history
+        # Rakenna conversation history
+        history = conversation_history.setdefault(user_id, [])
+        history.append({"role": "user", "content": text})
+        history = history[-20:]
+        conversation_history[user_id] = history
 
-    # Rakenna messages
-    messages = []
-    for msg in history[-10:]:
-        messages.append(msg)
+        # Rakenna messages
+        messages = []
+        for msg in history[-10:]:
+            messages.append(msg)
 
-    # Lisää context viimeiseen user-viestiin
-    if messages and messages[-1]["role"] == "user":
-        messages[-1]["content"] = f"""{messages[-1]['content']}
+        # Lisää context viimeiseen user-viestiin
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] = f"""{messages[-1]['content']}
 
 ---
 MEMORY CONTEXT:
@@ -3164,95 +3168,105 @@ MEMORY CONTEXT:
 {reality_prompt}
 """
 
-    # Kutsu Claude
-    try:
-        response = await safe_anthropic_call(
-            model="claude-sonnet-4-20250514",
-            max_tokens=350,
-            temperature=0.88,
-            system=system_prompt,
-            messages=messages
-        )
+        # Kutsu Claude
+        try:
+            response = await safe_anthropic_call(
+                model="claude-sonnet-4-20250514",
+                max_tokens=350,
+                temperature=0.88,
+                system=system_prompt,
+                messages=messages
+            )
 
-        reply = response.content[0].text.strip()
+            reply = response.content[0].text.strip()
 
-    except Exception as e:
-        print(f"[Claude error] {e}")
-        await update.message.reply_text("Hetki, mietin...")
-        return
+        except Exception as e:
+            print(f"[Claude error] {e}")
+            await update.message.reply_text("Hetki, mietin...")
+            return
 
-    # Validoi vastaus
-    if breaks_scene_logic(reply, state):
-        print("[SCENE LOGIC BROKEN] Regenerating...")
-        reply = "Anteeksi, menetin hetken ajatukseni. Mitä sanoit?"
+        # Validoi vastaus
+        if breaks_scene_logic(reply, state):
+            print("[SCENE LOGIC BROKEN] Regenerating...")
+            reply = "Anteeksi, menetin hetken ajatukseni. Mitä sanoit?"
 
-    if breaks_temporal_logic(reply, state):
-        print("[TEMPORAL LOGIC BROKEN] Regenerating...")
-        reply = "Hetki, olin vähän muualla. Mitä?"
+        if breaks_temporal_logic(reply, state):
+            print("[TEMPORAL LOGIC BROKEN] Regenerating...")
+            reply = "Hetki, olin vähän muualla. Mitä?"
 
-    if not validate_scene_consistency(state, reply):
-        print("[SCENE CONSISTENCY BROKEN] Regenerating...")
-        reply = "Anteeksi, en ihan seurannut. Mitä?"
+        if not validate_scene_consistency(state, reply):
+            print("[SCENE CONSISTENCY BROKEN] Regenerating...")
+            reply = "Anteeksi, en ihan seurannut. Mitä?"
 
-    # Enforce strategy
-    reply = enforce_strategy(reply, state)
+        # Enforce strategy
+        reply = enforce_strategy(reply, state)
 
-    # UUSI: Mahdollinen proaktiivinen suunnitelma
-    reply = await maybe_inject_proactive_plan(user_id, reply)
+        # UUSI: Mahdollinen proaktiivinen suunnitelma
+        reply = await maybe_inject_proactive_plan(user_id, reply)
 
-    # UUSI: Päivitä teemat ja käyttäjän mieltymykset
-    update_conversation_themes(user_id, text, reply)
-    learn_user_preferences(user_id, text)
+        # UUSI: Päivitä teemat ja käyttäjän mieltymykset
+        update_conversation_themes(user_id, text, reply)
+        learn_user_preferences(user_id, text)
 
-    # Lähetä vastaus
-    await update.message.reply_text(reply)
+        # Lähetä vastaus
+        await update.message.reply_text(reply)
 
-    print(f"[MEGAN] {reply}")
+        print(f"[MEGAN] {reply}")
 
-    # Päivitä historia
-    history.append({"role": "assistant", "content": reply})
-    conversation_history[user_id] = history[-20:]
+        # Päivitä historia
+        history.append({"role": "assistant", "content": reply})
+        conversation_history[user_id] = history[-20:]
 
-    # Tallenna memory
-    mem_entry = json.dumps({
-        "user": text,
-        "assistant": reply,
-        "intent": state["intent"],
-        "state": build_state_snapshot(user_id),
-        "timestamp": time.time()
-    }, ensure_ascii=False)
-
-    await store_memory(user_id, mem_entry, mem_type="general")
-
-    # Tallenna sensitive memory jos tarvitaan
-    if should_use_sensitive_memory(text):
-        sensitive_entry = json.dumps({
+        # Tallenna memory
+        mem_entry = json.dumps({
             "user": text,
             "assistant": reply,
-            "type": "sensitive",
+            "intent": state["intent"],
+            "state": build_state_snapshot(user_id),
             "timestamp": time.time()
         }, ensure_ascii=False)
-        await store_memory(user_id, sensitive_entry, mem_type="sensitive")
 
-    # Laske reward signaalit
-    signals = detect_reward_signals(text)
-    reward = compute_reward(signals)
+        await store_memory(user_id, mem_entry, mem_type="general")
 
-    # Päivitä strategy score
-    update_strategy_score(state, strategy, reward)
+        # Tallenna sensitive memory jos tarvitaan
+        if should_use_sensitive_memory(text):
+            sensitive_entry = json.dumps({
+                "user": text,
+                "assistant": reply,
+                "type": "sensitive",
+                "timestamp": time.time()
+            }, ensure_ascii=False)
+            await store_memory(user_id, sensitive_entry, mem_type="sensitive")
 
-    # Tarkista jealousy trigger
-    maybe_trigger_jealousy(user_id, text)
+        # Laske reward signaalit
+        signals = detect_reward_signals(text)
+        reward = compute_reward(signals)
 
-    # Tallenna last replies
-    last_replies.setdefault(user_id, deque(maxlen=3)).append(reply)
+        # Päivitä strategy score
+        update_strategy_score(state, strategy, reward)
 
-    # Stabiloi persona
-    stabilize_persona(user_id)
-    enforce_core_persona(user_id)
+        # Tarkista jealousy trigger
+        maybe_trigger_jealousy(user_id, text)
 
-    # Päivitä core desires
-    await update_core_desires(user_id, text)
+        # Tallenna last replies
+        last_replies.setdefault(user_id, deque(maxlen=3)).append(reply)
+
+        # Stabiloi persona
+        stabilize_persona(user_id)
+        enforce_core_persona(user_id)
+
+        # Päivitä core desires
+        await update_core_desires(user_id, text)
+
+    except Exception as e:
+        print(f"[CRITICAL ERROR in handle_message]")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Lähetä käyttäjälle
+        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
 
 # ====================== COMMANDS ======================
 async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
