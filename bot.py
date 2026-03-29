@@ -9,6 +9,7 @@ import base64
 import logging
 import traceback
 import aiohttp  # ← LISÄTTY VENICE-KORJAUKSEN TAKIA
+import replicate  # ← LISÄTTY REPLICATE-KORJAUKSEN TAKIA
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -2567,48 +2568,57 @@ async def generate_image_grok(prompt):
     print("[GROK] Skipping - no image generation support")
     return None
 
-# ✅ KORJATTU VENICE (KORJAUS #1)
-async def generate_image_venice(prompt):
+# ✅ KORJATTU REPLICATE (KORJAUS #1)
+async def generate_image_replicate(prompt):
+    """
+    Generoi kuvan Replicate API:lla (Flux 1.1 Pro).
+    Tukee NSFW-sisältöä.
+    """
     try:
-        print(f"[VENICE] Calling API with prompt length: {len(prompt)}")
+        print(f"[REPLICATE] Generating image...")
+        print(f"[REPLICATE] Prompt: {prompt[:150]}...")
         
-        # ✅ KORJATTU: Käytä oikeaa endpointia
-        response = await venice_client.images.generate(
-            model="fluently-xl",
-            prompt=prompt,
-            n=1,
-            size="1024x1024",
-            response_format="url"
+        # Replicate API ei ole async, joten käytä executoria
+        loop = asyncio.get_event_loop()
+        
+        output = await loop.run_in_executor(
+            None,
+            lambda: replicate.run(
+                "black-forest-labs/flux-1.1-pro",
+                input={
+                    "prompt": prompt,
+                    "aspect_ratio": "1:1",
+                    "output_format": "jpg",
+                    "output_quality": 90,
+                    "safety_tolerance": 6  # ✅ Sallii adult-sisältö (1-6, 6 = ei rajoituksia)
+                }
+            )
         )
         
-        print(f"[VENICE] Response received")
+        print(f"[REPLICATE] Output received: {type(output)}")
         
-        if not response.data:
-            print("[VENICE ERROR] No data in response")
+        if not output:
+            print("[REPLICATE ERROR] No output")
             return None
         
-        # ✅ KORJATTU: Hae URL suoraan
-        image_url = response.data[0].url
+        # Output voi olla URL tai lista URL:ja
+        image_url = output[0] if isinstance(output, list) else output
         
-        if not image_url:
-            print("[VENICE ERROR] No URL in response")
-            return None
+        print(f"[REPLICATE] Image URL: {image_url}")
         
-        print(f"[VENICE] Image URL: {image_url}")
-        
-        # ✅ Lataa kuva URL:sta
+        # Lataa kuva URL:sta
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url) as resp:
                 if resp.status == 200:
                     image_bytes = await resp.read()
-                    print(f"[VENICE] Downloaded {len(image_bytes)} bytes")
+                    print(f"[REPLICATE] Downloaded {len(image_bytes)} bytes")
                     return image_bytes
                 else:
-                    print(f"[VENICE ERROR] Failed to download image: {resp.status}")
+                    print(f"[REPLICATE ERROR] Failed to download image: HTTP {resp.status}")
                     return None
         
     except Exception as e:
-        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
+        print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -2641,76 +2651,84 @@ async def upload_to_cloudinary(image_bytes):
         traceback.print_exc()
         return None
 
+# ✅ KORJATTU handle_image_request (KORJAUS #4)
 async def handle_image_request(update: Update, user_id, text):
     state = get_or_create_state(user_id)
     
     outfit = random.choice(CORE_PERSONA["wardrobe"])
     scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
     
+    # ✅ PARANNETTU PROMPT (realistisempi):
     base_prompt = f"""
-A highly realistic photograph of a beautiful Finnish woman in her mid-20s.
+A photorealistic portrait of a beautiful Finnish woman in her mid-20s.
 
-Physical description:
+Physical features:
 - Natural blonde hair, shoulder-length, slightly wavy
 - Blue-green eyes, expressive and confident
-- Athletic yet feminine build
-- Fair Nordic skin tone
+- Athletic yet feminine build, fit body
+- Fair Nordic skin tone with natural freckles
 - Natural makeup, subtle and elegant
+- Confident, slightly playful expression
 
-Outfit:
+Clothing:
 {outfit}
 
 Setting:
-{scene_desc}
-
-Mood:
-Confident, slightly playful, natural expression
+{scene_desc}, natural lighting, intimate atmosphere
 
 Style:
-Photorealistic, professional photography, natural lighting, high detail, 8K quality
+Professional photography, cinematic lighting, high detail, 8K quality, realistic skin texture
 """
     
     await update.message.reply_text("Hetki, otan kuvan...")
     
     print(f"[IMAGE] Starting generation for user {user_id}")
-    print(f"[IMAGE] Prompt: {base_prompt[:200]}...")
     
     try:
-        image_bytes = await generate_image_venice(base_prompt)
-        print(f"[IMAGE] Venice returned: {len(image_bytes) if image_bytes else 0} bytes")
+        # ✅ VAIHDETTU: Venice → Replicate
+        image_bytes = await generate_image_replicate(base_prompt)
+        
+        if not image_bytes:
+            await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
+            return
+        
+        print(f"[IMAGE] Generated {len(image_bytes)} bytes")
+        
     except Exception as e:
-        print(f"[IMAGE ERROR] Venice failed: {e}")
-        await update.message.reply_text(f"Venice-virhe: {str(e)}")
+        print(f"[IMAGE ERROR] Generation failed: {e}")
+        await update.message.reply_text(f"Virhe: {str(e)}")
         return
     
-    if not image_bytes:
-        await update.message.reply_text("En saanut kuvaa generoitua, yritä uudestaan.")
-        return
-    
+    # Lataa Cloudinaryyn
     print(f"[IMAGE] Uploading to Cloudinary...")
     
     try:
         image_url = await upload_to_cloudinary(image_bytes)
+        
+        if not image_url:
+            await update.message.reply_text("Kuvan lataus epäonnistui.")
+            return
+        
         print(f"[IMAGE] Cloudinary URL: {image_url}")
+        
     except Exception as e:
-        print(f"[IMAGE ERROR] Cloudinary failed: {e}")
+        print(f"[IMAGE ERROR] Cloudinary upload failed: {e}")
         await update.message.reply_text(f"Cloudinary-virhe: {str(e)}")
         return
     
-    if not image_url:
-        await update.message.reply_text("Kuvan lataus epäonnistui.")
-        return
-    
-    print(f"[IMAGE] Sending photo to Telegram...")
+    # Lähetä Telegramiin
+    print(f"[IMAGE] Sending to Telegram...")
     
     try:
         await update.message.reply_photo(photo=image_url)
-        print(f"[IMAGE] Photo sent successfully!")
+        print(f"[IMAGE] ✅ Photo sent successfully!")
+        
     except Exception as e:
         print(f"[IMAGE ERROR] Telegram send failed: {e}")
         await update.message.reply_text(f"Telegram-virhe: {str(e)}")
         return
     
+    # Tallenna historiaan
     state["last_image"] = {
         "url": image_url,
         "prompt": base_prompt,
@@ -2721,6 +2739,7 @@ Photorealistic, professional photography, natural lighting, high detail, 8K qual
     state.setdefault("image_history", []).append(state["last_image"])
     state["image_history"] = state["image_history"][-20:]
     
+    # Tallenna muistiin
     mem_entry = json.dumps({
         "type": "image_sent",
         "user_request": text,
