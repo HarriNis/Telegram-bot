@@ -906,6 +906,56 @@ CREATE TABLE IF NOT EXISTS summaries (
 conn.commit()
 print("✅ Database initialized with FULL schema + topic/turns tables")
 
+# ====================== DATABASE MIGRATION ======================
+def migrate_database():
+    """
+    Päivitä tietokanta uusimpaan skeemaan ilman datan menetystä.
+    """
+    print("[MIGRATION] Starting database migration...")
+    
+    try:
+        with db_lock:
+            # Tarkista planned_events -taulun sarakkeet
+            cursor.execute("PRAGMA table_info(planned_events)")
+            columns = {row[1]: row for row in cursor.fetchall()}
+            
+            # Lisää puuttuvat sarakkeet
+            migrations = [
+                ("last_reminded_at", "ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0"),
+                ("status_changed_at", "ALTER TABLE planned_events ADD COLUMN status_changed_at REAL"),
+            ]
+            
+            for column_name, sql in migrations:
+                if column_name not in columns:
+                    print(f"[MIGRATION] Adding column: {column_name}")
+                    cursor.execute(sql)
+                    conn.commit()
+                    print(f"[MIGRATION] ✅ Added {column_name}")
+                else:
+                    print(f"[MIGRATION] ✓ Column {column_name} exists")
+            
+            # Päivitä NULL-arvot
+            cursor.execute("""
+                UPDATE planned_events
+                SET last_reminded_at = 0
+                WHERE last_reminded_at IS NULL
+            """)
+            
+            cursor.execute("""
+                UPDATE planned_events
+                SET status_changed_at = created_at
+                WHERE status_changed_at IS NULL
+            """)
+            
+            conn.commit()
+            print("[MIGRATION] ✅ Database migration completed successfully")
+            
+    except Exception as e:
+        print(f"[MIGRATION ERROR] {e}")
+        traceback.print_exc()
+        print("[MIGRATION] ⚠️ Migration failed, but continuing...")
+
+
 # ====================== GLOBAL STATE CONTAINERS ======================
 continuity_state = {}
 last_proactive_sent = {}
@@ -3318,6 +3368,9 @@ async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
+
+    # MIGRAATIO ENNEN KAIKKEA MUUTA
+    migrate_database()
 
     load_states_from_db()
     print("✅ Loaded persistent states from database")
