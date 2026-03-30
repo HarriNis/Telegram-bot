@@ -412,7 +412,39 @@ def maybe_interrupt_action(state, text):
             state["action_duration"] = 0
             state["action_started"] = 0
 
-def breaks_scene_logic(reply, state):
+def breaks_scene_logic(reply: str, state: dict) -> bool:
+    """
+    Tarkista rikkooko vastaus scene-logiikkaa.
+    """
+    r = reply.lower()
+    scene = state.get("scene", "neutral")
+    location_status = state.get("location_status", "separate")
+    
+    # Jos fyysisesti yhdessä, ei voi olla bussissa/töissä/kaupassa
+    if location_status == "together":
+        forbidden = [
+            "bussissa", "junassa", "toimistolla", "kaupassa", 
+            "ulkona yksin", "matkalla töihin", "palaverissa"
+        ]
+        if any(w in r for w in forbidden):
+            print(f"[SCENE BREAK] Together but mentions: {[w for w in forbidden if w in r]}")
+            return True
+    
+    # Scene-spesifit ristiriidat
+    conflicts = {
+        "home": ["toimistolla", "bussissa", "junassa", "kaupassa"],
+        "work": ["sängyssä", "sohvalla kotona", "suihkussa kotona"],
+        "bed": ["toimistolla", "kaupassa", "bussissa", "kävelee ulkona"],
+        "commute": ["sängyssä", "sohvalla", "työpöydällä"],
+        "shower": ["bussissa", "toimistolla", "kaupassa"],
+        "public": ["sängyssä", "suihkussa"]
+    }
+    
+    forbidden_for_scene = conflicts.get(scene, [])
+    if any(w in r for w in forbidden_for_scene):
+        print(f"[SCENE BREAK] Scene={scene} but mentions: {[w for w in forbidden_for_scene if w in r]}")
+        return True
+    
     return False
 
 def breaks_temporal_logic(reply, state):
@@ -723,7 +755,7 @@ async def store_episodic_memory(user_id: int, content: str, memory_type: str = "
     if not content or len(content.strip()) < 12:
         return
 
-    # UUSI: Tarkista duplikaatti (lisätty ohjeen mukaan)
+    # Tarkista duplikaatti
     is_dup = await is_duplicate_memory(user_id, content, memory_type, hours=24)
     if is_dup:
         print(f"[MEMORY SKIP] Duplicate detected: {content[:60]}...")
@@ -770,7 +802,7 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
             recency = 1.0 / (1.0 + age_hours)
             score = 0.8 * sim + 0.2 * recency
 
-            # Priorisoi seksuaalisia/fantasiamuistoja (lisätty ohjeen mukaan)
+            # Priorisoi seksuaalisia/fantasiamuistoja
             if any(kw in content.lower() for kw in [
                 "fantasy", "strap", "pegging", "nöyryytä", "hallitse", 
                 "alistaa", "chastity", "cuckold", "humiliation"
@@ -941,6 +973,8 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
                 existing["id"]
             ))
             conn.commit()
+        
+        sync_plans_to_state(user_id)
         return existing["id"]
 
     plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
@@ -972,6 +1006,8 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
             "follow_up"
         ))
         conn.commit()
+    
+    sync_plans_to_state(user_id)
     return plan_id
 
 
@@ -1098,6 +1134,220 @@ Conversation:
         print(f"[SUMMARY ERROR] {e}")
 
 
+# ====================== PLAN LIFECYCLE MANAGEMENT ======================
+
+def mark_plan_completed(user_id: int, plan_id: str):
+    """Merkitse suunnitelma suoritetuksi"""
+    with db_lock:
+        cursor.execute("""
+            UPDATE planned_events
+            SET status='completed', last_updated=?
+            WHERE id=? AND user_id=?
+        """, (time.time(), plan_id, str(user_id)))
+        conn.commit()
+    
+    sync_plans_to_state(user_id)
+
+
+def mark_plan_cancelled(user_id: int, plan_id: str):
+    """Peruuta suunnitelma"""
+    with db_lock:
+        cursor.execute("""
+            UPDATE planned_events
+            SET status='cancelled', last_updated=?
+            WHERE id=? AND user_id=?
+        """, (time.time(), plan_id, str(user_id)))
+        conn.commit()
+    
+    sync_plans_to_state(user_id)
+
+
+def mark_plan_in_progress(user_id: int, plan_id: str):
+    """Merkitse suunnitelma käynnissä olevaksi"""
+    with db_lock:
+        cursor.execute("""
+            UPDATE planned_events
+            SET status='in_progress', last_updated=?
+            WHERE id=? AND user_id=?
+        """, (time.time(), plan_id, str(user_id)))
+        conn.commit()
+    
+    sync_plans_to_state(user_id)
+
+
+def resolve_plan_reference(user_id: int, user_text: str):
+    """
+    Tarkista viittaako käyttäjä johonkin suunnitelmaan ja päivitä sen status.
+    """
+    t = user_text.lower()
+    
+    completion_keywords = [
+        "tein sen", "tein jo", "tehty", "valmis", "hoidettu",
+        "done", "finished", "completed", "se on tehty"
+    ]
+    
+    cancel_keywords = [
+        "en tee", "peruutetaan", "ei käy", "unohda se",
+        "cancel", "forget it", "ei enää"
+    ]
+    
+    progress_keywords = [
+        "aloitin", "teen parhaillaan", "olen tekemässä",
+        "started", "working on it"
+    ]
+    
+    plans = get_active_plans(user_id, limit=5)
+    if not plans:
+        return None
+    
+    for plan in plans:
+        plan_words = set(plan["description"].lower().split())
+        text_words = set(t.split())
+        overlap = len(plan_words & text_words)
+        
+        if overlap >= 2:
+            if any(kw in t for kw in completion_keywords):
+                mark_plan_completed(user_id, plan["id"])
+                return {"action": "completed", "plan": plan}
+            
+            elif any(kw in t for kw in cancel_keywords):
+                mark_plan_cancelled(user_id, plan["id"])
+                return {"action": "cancelled", "plan": plan}
+            
+            elif any(kw in t for kw in progress_keywords):
+                mark_plan_in_progress(user_id, plan["id"])
+                return {"action": "in_progress", "plan": plan}
+    
+    return None
+
+
+def sync_plans_to_state(user_id: int):
+    """
+    Synkronoi planned_events DB:stä state:en.
+    """
+    state = get_or_create_state(user_id)
+    state["planned_events"] = load_plans_from_db(user_id)
+
+
+# ====================== OPEN LOOP RESOLUTION ======================
+
+def resolve_open_loops(user_id: int, user_text: str, frame: dict):
+    """
+    Sulje open loopeja jos käyttäjän viesti vastaa niihin.
+    """
+    state = get_or_create_state(user_id)
+    topic_state = state.get("topic_state", {})
+    open_loops = topic_state.get("open_loops", [])
+    
+    if not open_loops:
+        return
+    
+    t = user_text.lower()
+    resolved = []
+    
+    for loop in open_loops:
+        loop_words = set(loop.lower().split())
+        text_words = set(t.split())
+        overlap = len(loop_words & text_words)
+        
+        if overlap >= 3 or any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"]):
+            resolved.append(loop)
+    
+    if resolved:
+        remaining = [l for l in open_loops if l not in resolved]
+        topic_state["open_loops"] = remaining
+        
+        for loop in resolved:
+            print(f"[LOOP RESOLVED] {loop[:60]}")
+
+
+# ====================== MEMORY DEDUPLICATION ======================
+
+async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hours: int = 24):
+    """
+    Tarkista onko lähes sama muisto jo tallennettu viimeisen N tunnin aikana.
+    """
+    if not content or len(content.strip()) < 12:
+        return True
+    
+    cutoff_time = time.time() - (hours * 3600)
+    
+    with db_lock:
+        cursor.execute("""
+            SELECT content, created_at
+            FROM episodic_memories
+            WHERE user_id=? AND memory_type=? AND created_at > ?
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (str(user_id), memory_type, cutoff_time))
+        rows = cursor.fetchall()
+    
+    if not rows:
+        return False
+    
+    new_words = set(content.lower().split())
+    
+    for existing_content, _ in rows:
+        existing_words = set(existing_content.lower().split())
+        overlap = len(new_words & existing_words)
+        total = len(new_words | existing_words)
+        
+        if total > 0:
+            similarity = overlap / total
+            if similarity > 0.75:
+                return True
+    
+    return False
+
+
+# ====================== SUBMISSION LEVEL TRACKING ======================
+
+def update_submission_level(user_id: int, user_text: str):
+    """
+    Päivitä submission_level käyttäjän viestien perusteella.
+    """
+    state = get_or_create_state(user_id)
+    t = user_text.lower()
+    
+    submission_keywords = [
+        "teen mitä haluat", "totteelen", "käske", "sä päätät", 
+        "olen sun", "haluan olla", "nöyryytä", "hallitse",
+        "strap", "pegging", "chastity", "cuckold"
+    ]
+    
+    resistance_keywords = [
+        "en halua", "ei käy", "lopeta", "liikaa", "en tee",
+        "ei noin", "en tykkää"
+    ]
+    
+    curious_keywords = [
+        "mitä jos", "entä jos", "miltä tuntuisi", "kertoisitko",
+        "haluaisin tietää", "kiinnostaa"
+    ]
+    
+    current_level = state.get("submission_level", 0.0)
+    
+    if any(kw in t for kw in submission_keywords):
+        state["submission_level"] = min(1.0, current_level + 0.15)
+        print(f"[SUBMISSION] Increased to {state['submission_level']:.2f}")
+    
+    elif any(kw in t for kw in resistance_keywords):
+        state["submission_level"] = max(0.0, current_level - 0.08)
+        print(f"[SUBMISSION] Decreased to {state['submission_level']:.2f}")
+    
+    elif any(kw in t for kw in curious_keywords):
+        state["submission_level"] = min(1.0, current_level + 0.05)
+        print(f"[SUBMISSION] Slight increase to {state['submission_level']:.2f}")
+    
+    last_interaction = state.get("last_interaction", time.time())
+    hours_since = (time.time() - last_interaction) / 3600
+    if hours_since > 24:
+        decay = 0.98 ** (hours_since / 24)
+        state["submission_level"] = current_level * decay
+    
+    return state["submission_level"]
+
+
 # ====================== EXTRACTOR ======================
 async def extract_turn_frame(user_id: int, user_text: str):
     recent_turns = get_recent_turns(user_id, limit=8)
@@ -1115,7 +1365,8 @@ async def extract_turn_frame(user_id: int, user_text: str):
         "plans": [],
         "facts": [],
         "memory_candidates": [],
-        "scene_hint": None
+        "scene_hint": None,
+        "fantasies": []  # LISÄTTY
     }
 
     prompt = f"""
@@ -1143,7 +1394,13 @@ Schema:
     }}
   ],
   "memory_candidates": ["..."],
-  "scene_hint": "home|work|commute|public|bed|shower|null"
+  "scene_hint": "home|work|commute|public|bed|shower|null",
+  "fantasies": [
+    {{
+      "description": "...",
+      "category": "dominance|humiliation|pegging|chastity|cuckold|other"
+    }}
+  ]
 }}
 
 Rules:
@@ -1152,6 +1409,8 @@ Rules:
 - plans should only include future commitments or likely follow-ups
 - open_loops are unresolved promises/questions
 - scene_hint only if user clearly indicates location/activity
+- fantasies: extract ANY sexual desires, kinks, or fantasies mentioned
+- categorize fantasies for later retrieval and dominance play
 
 Active plans:
 {plans_text}
@@ -1168,24 +1427,25 @@ Latest user turn:
             resp = await grok_client.chat.completions.create(
                 model="grok-4-1-fast",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=350,
+                max_tokens=400,
                 temperature=0.2
             )
             raw = resp.choices[0].message.content.strip()
         else:
             resp = await openai_client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=350,
+                max_tokens=400,
                 temperature=0.2
             )
             raw = resp.choices[0].message.content.strip()
 
         frame = parse_json_object(raw, default)
-        frame["user_text"] = user_text   # Lisätty resolve_open_loops varten
+        frame["user_text"] = user_text
         return frame
     except Exception as e:
         print(f"[FRAME ERROR] {e}")
+        default["user_text"] = user_text
         return default
 
 
@@ -1203,7 +1463,6 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
 
     update_topic_state(user_id, frame)
     
-    # UUSI: Sulje open loopeja (lisätty ohjeen mukaan)
     resolve_open_loops(user_id, frame.get("user_text", ""), frame)
     
     save_topic_state_to_db(user_id)
@@ -1231,7 +1490,6 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
             source_turn_id=source_turn_id
         )
 
-    # Lisätty ohjeen mukaan: tallenna fantasiat erikseen
     fantasies = frame.get("fantasies", []) or []
     for fantasy in fantasies[:3]:
         await store_episodic_memory(
@@ -1346,7 +1604,6 @@ async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
     
-    # UUSI: Hae ja priorisoi fantasiat (lisätty ohjeen mukaan)
     fantasies = [m for m in context_pack["relevant_memories"] 
                  if "fantasy" in m.get("memory_type", "") or 
                     any(kw in m["content"].lower() for kw in 
@@ -1410,168 +1667,6 @@ Rules:
     return response.choices[0].message.content.strip()
 
 
-# ====================== PLAN LIFECYCLE MANAGEMENT ======================
-
-def mark_plan_completed(user_id: int, plan_id: str):
-    """Merkitse suunnitelma suoritetuksi"""
-    with db_lock:
-        cursor.execute("""
-            UPDATE planned_events
-            SET status='completed', last_updated=?
-            WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
-        conn.commit()
-
-
-def mark_plan_cancelled(user_id: int, plan_id: str):
-    """Peruuta suunnitelma"""
-    with db_lock:
-        cursor.execute("""
-            UPDATE planned_events
-            SET status='cancelled', last_updated=?
-            WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
-        conn.commit()
-
-
-def mark_plan_in_progress(user_id: int, plan_id: str):
-    """Merkitse suunnitelma käynnissä olevaksi"""
-    with db_lock:
-        cursor.execute("""
-            UPDATE planned_events
-            SET status='in_progress', last_updated=?
-            WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
-        conn.commit()
-
-
-def resolve_plan_reference(user_id: int, user_text: str):
-    """
-    Tarkista viittaako käyttäjä johonkin suunnitelmaan ja päivitä sen status.
-    Esim: "tein sen jo" → merkitse vastaava plan completediksi
-    """
-    t = user_text.lower()
-    
-    # Completion signals
-    completion_keywords = [
-        "tein sen", "tein jo", "tehty", "valmis", "hoidettu",
-        "done", "finished", "completed", "se on tehty"
-    ]
-    
-    # Cancellation signals
-    cancel_keywords = [
-        "en tee", "peruutetaan", "ei käy", "unohda se",
-        "cancel", "forget it", "ei enää"
-    ]
-    
-    # In-progress signals
-    progress_keywords = [
-        "aloitin", "teen parhaillaan", "olen tekemässä",
-        "started", "working on it"
-    ]
-    
-    # Hae viimeisin aktiivinen plan
-    plans = get_active_plans(user_id, limit=5)
-    if not plans:
-        return None
-    
-    # Etsi viittaus suunnitelmaan
-    for plan in plans:
-        plan_words = set(plan["description"].lower().split())
-        text_words = set(t.split())
-        overlap = len(plan_words & text_words)
-        
-        if overlap >= 2:  # Vähintään 2 yhteistä sanaa
-            if any(kw in t for kw in completion_keywords):
-                mark_plan_completed(user_id, plan["id"])
-                return {"action": "completed", "plan": plan}
-            
-            elif any(kw in t for kw in cancel_keywords):
-                mark_plan_cancelled(user_id, plan["id"])
-                return {"action": "cancelled", "plan": plan}
-            
-            elif any(kw in t for kw in progress_keywords):
-                mark_plan_in_progress(user_id, plan["id"])
-                return {"action": "in_progress", "plan": plan}
-    
-    return None
-
-
-# ====================== OPEN LOOP RESOLUTION ======================
-
-def resolve_open_loops(user_id: int, user_text: str, frame: dict):
-    """
-    Sulje open loopeja jos käyttäjän viesti vastaa niihin.
-    """
-    state = get_or_create_state(user_id)
-    topic_state = state.get("topic_state", {})
-    open_loops = topic_state.get("open_loops", [])
-    
-    if not open_loops:
-        return
-    
-    t = user_text.lower()
-    resolved = []
-    
-    for loop in open_loops:
-        loop_words = set(loop.lower().split())
-        text_words = set(t.split())
-        overlap = len(loop_words & text_words)
-        
-        # Jos vähintään 3 yhteistä sanaa TAI suora vastaus
-        if overlap >= 3 or any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"]):
-            resolved.append(loop)
-    
-    # Poista ratkaistut loopit
-    if resolved:
-        remaining = [l for l in open_loops if l not in resolved]
-        topic_state["open_loops"] = remaining
-        
-        # Tallenna muistiin
-        for loop in resolved:
-            print(f"[LOOP RESOLVED] {loop[:60]}")
-
-
-# ====================== MEMORY DEDUPLICATION ======================
-
-async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hours: int = 24):
-    """
-    Tarkista onko lähes sama muisto jo tallennettu viimeisen N tunnin aikana.
-    """
-    if not content or len(content.strip()) < 12:
-        return True
-    
-    cutoff_time = time.time() - (hours * 3600)
-    
-    with db_lock:
-        cursor.execute("""
-            SELECT content, created_at
-            FROM episodic_memories
-            WHERE user_id=? AND memory_type=? AND created_at > ?
-            ORDER BY created_at DESC
-            LIMIT 20
-        """, (str(user_id), memory_type, cutoff_time))
-        rows = cursor.fetchall()
-    
-    if not rows:
-        return False
-    
-    # Yksinkertainen samankaltaisuustarkistus (sanojen overlap)
-    new_words = set(content.lower().split())
-    
-    for existing_content, _ in rows:
-        existing_words = set(existing_content.lower().split())
-        overlap = len(new_words & existing_words)
-        total = len(new_words | existing_words)
-        
-        if total > 0:
-            similarity = overlap / total
-            if similarity > 0.75:  # 75% samankaltaisuus
-                return True
-    
-    return False
-
-
 # ====================== HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1595,19 +1690,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_turn_id = save_turn(user_id, "user", text)
 
-        # UUSI: Tarkista viittaako käyttäjä suunnitelmaan (lisätty ohjeen mukaan)
+        # UUSI: Tarkista viittaako käyttäjä suunnitelmaan
         plan_action = resolve_plan_reference(user_id, text)
         if plan_action:
             action = plan_action["action"]
             plan_desc = plan_action["plan"]["description"][:80]
             
-            # Tallenna muistiin että plan päivittyi
             await store_episodic_memory(
                 user_id=user_id,
                 content=f"Plan '{plan_desc}' marked as {action}",
                 memory_type="plan_update",
                 source_turn_id=user_turn_id
             )
+
+        # UUSI: Päivitä submission level
+        update_submission_level(user_id, text)
 
         frame = await extract_turn_frame(user_id, text)
         await apply_frame(user_id, frame, user_turn_id)
@@ -1653,7 +1750,6 @@ User ID: {update.effective_user.id if update and update.effective_user else 'N/A
 """
         print(error_msg)
         
-        # Lähetä lyhyt versio käyttäjälle
         await update.message.reply_text(
             f"⚠️ Virhe: {type(e).__name__}\n"
             f"Yritä uudelleen tai käytä /help"
@@ -1725,15 +1821,11 @@ async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    # Tyhjennä in-memory state
     conversation_history[user_id] = []
     last_replies[user_id] = deque(maxlen=3)
     working_memory[user_id] = {}
     if user_id in continuity_state:
         del continuity_state[user_id]
-    
-    # Tyhjennä KAIKKI tietokantadata
     with db_lock:
         cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
@@ -1744,14 +1836,13 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM profile_facts WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM summaries WHERE user_id=?", (str(user_id),))
         conn.commit()
-    
-    await update.message.reply_text(
-        "🗑️ Kaikki muistot, suunnitelmat ja tila poistettu.\n"
-        "Täysi uusi alku. Käytä /help nähdäksesi komennot."
-    )
+    await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    sync_plans_to_state(user_id)
+    
     state = get_or_create_state(user_id)
     txt = f"""
 📊 STATUS
@@ -1776,6 +1867,9 @@ Plans: {len(state.get('planned_events', []))}
 
 async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    sync_plans_to_state(user_id)
+    
     state = get_or_create_state(user_id)
     plans = state.get("planned_events", [])
     if not plans:
