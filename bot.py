@@ -661,7 +661,7 @@ def get_or_create_state(user_id):
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
     return continuity_state[user_id]
 
-# ====================== MINIMAL COMMAND HANDLERS (täydennetty ohjeen mukaan) ======================
+# ====================== MINIMAL COMMAND HANDLERS ======================
 async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history[user_id] = []
@@ -827,7 +827,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(txt)
 
-# ====================== MINIMAL CHECK_PROACTIVE_TRIGGERS (ohjeen mukaan) ======================
+# ====================== MINIMAL CHECK_PROACTIVE_TRIGGERS ======================
 async def check_proactive_triggers(application):
     while True:
         try:
@@ -835,7 +835,7 @@ async def check_proactive_triggers(application):
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
 
-# ====================== MINIMAL HANDLE_MESSAGE (ohjeen mukaan) ======================
+# ====================== MINIMAL HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
