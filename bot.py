@@ -1434,6 +1434,9 @@ recent_user = deque(maxlen=12)
 recent_context = deque(maxlen=6)
 working_memory = {}
 
+# Timezone for local time functions
+HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
+
 # ====================== STATE PERSISTENCE ======================
 def save_state_to_db(user_id):
     if user_id not in continuity_state:
