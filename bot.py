@@ -1693,10 +1693,12 @@ def update_jealousy_mode(user_id: int):
 
 def should_ignore_message(user_id: int) -> bool:
     state = get_or_create_state(user_id)
-    ignore_prob = state.get("ignore_probability", 0.0)
     
+    # KRIITTINEN: Jos ollaan yhdessä, EI KOSKAAN ignoorata
     if state.get("location_status") == "together":
         return False
+    
+    ignore_prob = state.get("ignore_probability", 0.0)
     
     if random.random() < ignore_prob:
         state["last_response_time"] = time.time()
@@ -1766,11 +1768,13 @@ def generate_jealousy_content(state: dict, intensity: float) -> str:
 async def maybe_send_spontaneous_message(application, user_id: int):
     state = get_or_create_state(user_id)
     
-    cooldown = state.get("spontaneous_message_cooldown", 0)
-    if time.time() < cooldown:
+    # KRIITTINEN: Tarkista ensin location_status
+    if state.get("location_status") == "together":
+        print(f"[SPONTANEOUS] Skipped: user is physically together")
         return
     
-    if state.get("location_status") != "separate":
+    cooldown = state.get("spontaneous_message_cooldown", 0)
+    if time.time() < cooldown:
         return
     
     if not state.get("jealousy_mode"):
@@ -1821,7 +1825,11 @@ async def maybe_send_spontaneous_message(application, user_id: int):
 async def maybe_send_spontaneous_image(application, user_id: int):
     state = get_or_create_state(user_id)
     
-    # LISÄTTY COOLDOWN
+    # KRIITTINEN: Tarkista ensin location_status
+    if state.get("location_status") == "together":
+        print(f"[SPONTANEOUS IMAGE] Skipped: user is physically together")
+        return
+    
     cooldown = state.get("spontaneous_image_cooldown", 0)
     if time.time() < cooldown:
         return
@@ -1884,7 +1892,6 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
             )
             print(f"[SPONTANEOUS IMAGE] Sent provocative image")
             
-            # LISÄTTY COOLDOWN
             state["spontaneous_image_cooldown"] = time.time() + random.randint(7200, 14400)
             
             await store_episodic_memory(
