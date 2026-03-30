@@ -886,7 +886,7 @@ async def check_proactive_triggers(application):
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
 
-# ====================== GENERATE LLM REPLY ======================
+# ====================== GENERATE LLM REPLY (parannettu context-pack) ======================
 async def generate_llm_reply(user_id, user_text):
     state = get_or_create_state(user_id)
 
