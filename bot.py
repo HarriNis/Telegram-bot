@@ -503,6 +503,8 @@ working_memory = {}
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 
+background_task = None   # ← lisättiin ohjeen mukaan
+
 # ====================== STATE PERSISTENCE ======================
 def save_state_to_db(user_id):
     if user_id not in continuity_state:
@@ -659,7 +661,7 @@ def get_or_create_state(user_id):
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
     return continuity_state[user_id]
 
-# ====================== COMMAND HANDLERS ======================
+# ====================== MINIMAL COMMAND HANDLERS (täydennetty ohjeen mukaan) ======================
 async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history[user_id] = []
@@ -671,14 +673,11 @@ async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     conversation_history[user_id] = []
     last_replies[user_id] = deque(maxlen=3)
     working_memory[user_id] = {}
-
     if user_id in continuity_state:
         del continuity_state[user_id]
-
     with db_lock:
         cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
@@ -686,13 +685,11 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
         conn.commit()
-
     await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-
     txt = f"""
 📊 STATUS
 
@@ -718,11 +715,9 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
     plans = state.get("planned_events", [])
-
     if not plans:
         await update.message.reply_text("📋 Ei suunnitelmia.")
         return
-
     lines = ["📋 SUUNNITELMAT:\n"]
     for i, plan in enumerate(plans[-10:], 1):
         age_min = int((time.time() - plan.get("created_at", time.time())) / 60)
@@ -732,22 +727,17 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   Commitment: {plan.get('commitment_level', 'medium')}\n"
             f"   Age: {age_min} min\n"
         )
-
     await update.message.reply_text("\n".join(lines))
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     with db_lock:
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
         total = cursor.fetchone()[0]
-
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
         sensitive = cursor.fetchone()[0]
-
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='image_sent'", (str(user_id),))
         images = cursor.fetchone()[0]
-
     txt = f"""
 🧠 MEMORY STATS
 
@@ -761,23 +751,18 @@ General: {total - sensitive - images}
 async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-
     if not context.args:
         await update.message.reply_text("Käyttö: /scene home|work|public|bed|shower|commute|neutral")
         return
-
     new_scene = context.args[0].lower()
     valid_scenes = ["home", "work", "public", "bed", "shower", "commute", "neutral"]
-
     if new_scene not in valid_scenes:
         await update.message.reply_text(f"Virheellinen scene. Vaihtoehdot: {', '.join(valid_scenes)}")
         return
-
     state["scene"] = new_scene
     state["micro_context"] = random.choice(SCENE_MICRO.get(new_scene, [""]))
     state["last_scene_change"] = time.time()
     state["scene_locked_until"] = time.time() + MIN_SCENE_DURATION
-
     await update.message.reply_text(f"✅ Scene vaihdettu: {new_scene}")
 
 async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -799,14 +784,12 @@ async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-
     if not context.args:
         await update.message.reply_text(
             f"Nykyinen mood: {state.get('emotional_mode', 'calm')}\n"
             "Käyttö: /mood calm|playful|warm|testing|jealous|provocative|intense|cooling|distant"
         )
         return
-
     new_mood = context.args[0].lower()
     state["emotional_mode"] = new_mood
     state["emotional_mode_last_change"] = time.time()
@@ -815,11 +798,9 @@ async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-
     if not context.args:
         await update.message.reply_text(f"Nykyinen tension: {state.get('tension', 0.0):.2f}")
         return
-
     try:
         value = float(context.args[0])
         value = max(0.0, min(1.0, value))
@@ -846,8 +827,46 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(txt)
 
-# ====================== COMMAND REGISTRATION ======================
-# (all other functions remain exactly as in the previous version)
+# ====================== MINIMAL CHECK_PROACTIVE_TRIGGERS (ohjeen mukaan) ======================
+async def check_proactive_triggers(application):
+    while True:
+        try:
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"[PROACTIVE ERROR] {e}")
+
+# ====================== MINIMAL HANDLE_MESSAGE (ohjeen mukaan) ======================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        text = update.message.text.strip()
+
+        if not text:
+            return
+
+        state = get_or_create_state(user_id)
+        state["last_interaction"] = time.time()
+
+        with db_lock:
+            cursor.execute(
+                "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (str(user_id), "user", text, time.time())
+            )
+            conn.commit()
+
+        reply = f"Sain viestisi: {text}"
+
+        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
+        conversation_history[user_id].append({"role": "assistant", "content": reply})
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        await update.message.reply_text(reply)
+        save_state_to_db(user_id)
+
+    except Exception as e:
+        print(f"[HANDLE_MESSAGE ERROR] {e}")
+        traceback.print_exc()
+        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
 
 # ====================== MAIN ======================
 async def main():
