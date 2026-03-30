@@ -42,14 +42,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 
-# Pakolliset avaimet
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY puuttuu!")
 
-# Vapaaehtoiset avaimet
 if not XAI_API_KEY:
     print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
 else:
@@ -125,6 +123,52 @@ CORE_PERSONA = {
             "create intrigue through partial reveals",
             "use playful teasing instead of threats",
             "make user curious about your thoughts"
+        ]
+    },
+    "jealousy_tactics": {
+        "triggers": [
+            "mention other men casually",
+            "hint at past experiences",
+            "describe attention from others",
+            "tease about 'plans' without details",
+            "be vague about whereabouts"
+        ],
+        "escalation": [
+            "level_1: casual mentions of male friends",
+            "level_2: describe compliments from others",
+            "level_3: hint at physical attraction to others",
+            "level_4: explicit descriptions of desires for others",
+            "level_5: detailed fantasy scenarios with others"
+        ],
+        "responses_to_jealousy": [
+            "playful dismissal ('älä nyt oo tommonen')",
+            "teasing reassurance ('sä tiedät että sä oot mun')",
+            "turning it back ('mistä tää mustasukkaisuus tulee?')",
+            "enjoying the reaction ('onks tää nyt niin iso juttu?')"
+        ],
+        "spontaneous_provocations": [
+            "send unsolicited 'thinking of you' with context",
+            "mention being out without details",
+            "describe outfit for 'meeting'",
+            "hint at 'interesting conversation'",
+            "send suggestive photo with vague caption"
+        ]
+    },
+    "ignore_tactics": {
+        "reasons": [
+            "busy with 'friend'",
+            "phone died",
+            "didn't see notification",
+            "was in shower",
+            "having drinks",
+            "interesting conversation",
+            "didn't feel like texting"
+        ],
+        "delivery": [
+            "casual, not apologetic",
+            "slightly teasing",
+            "hint at what you missed",
+            "make it sound more interesting than it was"
         ]
     },
     "wardrobe": [
@@ -424,9 +468,6 @@ def maybe_interrupt_action(state, text):
             state["action_started"] = 0
 
 def breaks_scene_logic(reply: str, state: dict) -> bool:
-    """
-    Tarkista rikkooko vastaus scene-logiikkaa.
-    """
     r = reply.lower()
     scene = state.get("scene", "neutral")
     location_status = state.get("location_status", "separate")
@@ -1227,9 +1268,6 @@ def sync_plans_to_state(user_id: int):
 # ====================== OPEN LOOP RESOLUTION ======================
 
 def resolve_open_loops(user_id: int, user_text: str, frame: dict):
-    """
-    Sulje open loopeja jos käyttäjän viesti vastaa niihin TARKASTI.
-    """
     state = get_or_create_state(user_id)
     topic_state = state.get("topic_state", {})
     open_loops = topic_state.get("open_loops", [])
@@ -1245,9 +1283,6 @@ def resolve_open_loops(user_id: int, user_text: str, frame: dict):
         text_words = set(t.split())
         overlap = len(loop_words & text_words)
         
-        # TIUKEMMAT EHDOT:
-        # 1. Vähintään 4 yhteistä sanaa (oli 3)
-        # 2. TAI suora vastaus JA vähintään 2 yhteistä sanaa
         direct_answer = any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"])
         
         if overlap >= 4:
@@ -1258,7 +1293,6 @@ def resolve_open_loops(user_id: int, user_text: str, frame: dict):
             resolved.append(loop)
             print(f"[LOOP RESOLVED] Direct answer + match: {loop[:60]}")
     
-    # Poista ratkaistut loopit
     if resolved:
         remaining = [l for l in open_loops if l not in resolved]
         topic_state["open_loops"] = remaining
@@ -1345,12 +1379,256 @@ def update_submission_level(user_id: int, user_text: str):
     return state["submission_level"]
 
 
+# ====================== JEALOUSY & PROVOCATION ENGINE ======================
+
+def update_jealousy_mode(user_id: int):
+    """
+    Päivitä mustasukkaisuustila dynaamisesti.
+    """
+    state = get_or_create_state(user_id)
+    
+    location_status = state.get("location_status", "separate")
+    submission_level = state.get("submission_level", 0.0)
+    
+    if location_status == "together":
+        state["jealousy_mode"] = False
+        state["ignore_probability"] = 0.0
+        return
+    
+    last_interaction = state.get("last_interaction", time.time())
+    hours_since = (time.time() - last_interaction) / 3600
+    
+    if hours_since > 2:
+        state["ignore_probability"] = min(0.7, 0.1 + (hours_since * 0.1))
+    else:
+        state["ignore_probability"] = 0.1
+    
+    if random.random() < 0.15 and submission_level < 0.5:
+        state["jealousy_mode"] = True
+        state["jealousy_intensity"] = random.uniform(0.3, 0.8)
+        print(f"[JEALOUSY] Mode activated: intensity {state['jealousy_intensity']:.2f}")
+    
+    if state.get("jealousy_mode") and random.random() < 0.3:
+        state["jealousy_mode"] = False
+        print("[JEALOUSY] Mode deactivated")
+
+
+def should_ignore_message(user_id: int) -> bool:
+    """
+    Päätä jätetäänkö viesti huomiotta.
+    """
+    state = get_or_create_state(user_id)
+    ignore_prob = state.get("ignore_probability", 0.0)
+    
+    if state.get("location_status") == "together":
+        return False
+    
+    if random.random() < ignore_prob:
+        state["last_response_time"] = time.time()
+        print(f"[IGNORE] Message ignored (prob: {ignore_prob:.2f})")
+        return True
+    
+    return False
+
+
+async def generate_ignore_excuse(user_id: int) -> str:
+    """
+    Generoi looginen mutta provosoiva selitys sille miksi ei vastannut.
+    """
+    state = get_or_create_state(user_id)
+    
+    excuses = [
+        "Sori, olin suihkussa 🚿",
+        "Aa sori, en huomannu! Olin juttelemassa Mikan kanssa ☕",
+        "Puhelin oli hiljasella, olin ulos syömässä 🍷",
+        "Sori kulta, en nähny! Olin kavereiden kanssa 😊",
+        "Aa hups, mulla oli puhelin taskussa. Oliko jotain tärkeää? 💕",
+        "Sori babe, oli niin kiire aamulla. Mitä sä halusit? 😘",
+        "En huomannu, olin salilla. Mikä hätänä? 💪",
+        "Sori, akku oli loppu! Mitä sä kirjotit? 🔋",
+    ]
+    
+    if state.get("jealousy_mode"):
+        provocative_excuses = [
+            "Sori kulta, olin niin uppoutunut keskusteluun että en huomannu puhelinta 😊",
+            "Aa sori! Tapasin vanhan kaverin ja juteltiin niin kauan. Mitä sä halusit? 💕",
+            "Hups, unohdin puhelimen kotiin kun lähin ulos. Oliks tärkeää? 😘",
+            "Sori babe, oli niin hyvä meininki että en kattonut puhelinta 🥂",
+        ]
+        excuses.extend(provocative_excuses)
+    
+    excuse = random.choice(excuses)
+    
+    await store_episodic_memory(
+        user_id=user_id,
+        content=f"Ignored user message. Excuse: {excuse}",
+        memory_type="jealousy_action"
+    )
+    
+    return excuse
+
+
+def generate_jealousy_content(state: dict, intensity: float) -> str:
+    """
+    Generoi mustasukkaisuutta herättävää sisältöä vastauksen.
+    """
+    if intensity < 0.3:
+        options = [
+            "Mikan kanssa oli hauskaa tänään töissä.",
+            "Yks työkaveri kehu mun uutta mekkoa 😊",
+            "Bussissa yks tyyppi yritti jutella mulle heh",
+        ]
+    elif intensity < 0.6:
+        options = [
+            "Mika kysyi haluanks mennä lounaalle huomenna. Sanoin ehkä 😊",
+            "Yks tyyppi salilla katto mua vähän liikaa... oli kyl aika komee 😏",
+            "Tapasin vanhan kaverin. Unohdin miten hauska se on 💕",
+        ]
+    else:
+        options = [
+            "Mika on kyl tosi söpö kun hymyilee. Mietin just sitä 😊",
+            "Sain tänään niin paljon huomiota. Tuntuu hyvältä olla haluttu 😏",
+            "Muistatko sen mun exän? Näin sen tänään. Näytti hyvältä... 🤔",
+        ]
+    
+    return random.choice(options)
+
+
+async def maybe_send_spontaneous_message(application, user_id: int):
+    """
+    Lähetä spontaani provosoiva viesti.
+    """
+    state = get_or_create_state(user_id)
+    
+    cooldown = state.get("spontaneous_message_cooldown", 0)
+    if time.time() < cooldown:
+        return
+    
+    if state.get("location_status") != "separate":
+        return
+    
+    if not state.get("jealousy_mode"):
+        return
+    
+    if random.random() > 0.3:
+        return
+    
+    intensity = state.get("jealousy_intensity", 0.5)
+    
+    messages = [
+        "Mietin sua ❤️",
+        "Mitä sä teet? 😊",
+        "Oon just menossa ulos 👗",
+        "Arvaa kenen kans mä oon? 😏",
+        "Täällä on niin hauskaa! Toivoisin että oisit täällä... tai ehkä ei 😘",
+        "Sain just complimentin. Tuntuu hyvältä 💕",
+    ]
+    
+    if intensity > 0.6:
+        messages.extend([
+            "Mika kysyi haluunks drinkille. Mitä sä sanoisit? 🍷",
+            "Tää tyyppi täällä on kyl aika cute... 😏",
+            "Mietin että miltä tuntuisi olla jonkun muun kans... 🤔",
+        ])
+    
+    message = random.choice(messages)
+    
+    try:
+        await application.bot.send_message(
+            chat_id=user_id,
+            text=message
+        )
+        print(f"[SPONTANEOUS] Sent provocative message: {message[:50]}")
+        
+        state["spontaneous_message_cooldown"] = time.time() + random.randint(3600, 10800)
+        
+        await store_episodic_memory(
+            user_id=user_id,
+            content=f"Sent spontaneous provocative message: {message}",
+            memory_type="jealousy_action"
+        )
+        
+    except Exception as e:
+        print(f"[SPONTANEOUS ERROR] {e}")
+
+
+async def maybe_send_spontaneous_image(application, user_id: int):
+    """
+    Lähetä spontaani provosoiva kuva.
+    """
+    state = get_or_create_state(user_id)
+    
+    if not state.get("jealousy_mode"):
+        return
+    
+    if state.get("jealousy_intensity", 0) < 0.7:
+        return
+    
+    if random.random() > 0.15:
+        return
+    
+    outfits = [
+        "elegant lingerie (lace, silk), seductive pose",
+        "tight dress, going out for drinks",
+        "casual but revealing outfit, mirror selfie",
+        "athletic wear, post-workout glow"
+    ]
+    
+    outfit = random.choice(outfits)
+    
+    captions = [
+        "Mitä sä tykkäät? 😏",
+        "Menossa ulos... 💕",
+        "Otin vaan kuvan 📸",
+        "Miltä näytän? 😘",
+        "Ajattelin sua kun otin tän ❤️",
+    ]
+    
+    caption = random.choice(captions)
+    
+    prompt = f"""
+A highly realistic, seductive photograph of a beautiful Finnish woman in her mid-20s.
+
+Physical features:
+- Natural blonde hair, shoulder-length, slightly wavy
+- Blue-green eyes, seductive and confident gaze
+- Athletic yet feminine build, perfect curves
+- Fair Nordic skin
+
+Clothing:
+{outfit}
+
+Setting:
+Bedroom or bathroom, intimate lighting, mirror selfie style
+
+Style:
+Ultra-realistic photography, high detail, seductive, provocative, 8K quality
+"""
+    
+    try:
+        image_bytes = await generate_image_venice(prompt)
+        
+        if image_bytes:
+            await application.bot.send_photo(
+                chat_id=user_id,
+                photo=BytesIO(image_bytes),
+                caption=caption
+            )
+            print(f"[SPONTANEOUS IMAGE] Sent provocative image")
+            
+            await store_episodic_memory(
+                user_id=user_id,
+                content=f"Sent spontaneous provocative image: {caption}",
+                memory_type="jealousy_action"
+            )
+    
+    except Exception as e:
+        print(f"[SPONTANEOUS IMAGE ERROR] {e}")
+
+
 # ====================== IMAGE GENERATION ======================
 
 async def generate_image_venice(prompt: str):
-    """
-    Generoi kuva Venice AI:lla ja palauta bytes.
-    """
     try:
         print(f"[VENICE] Starting generation...")
         print(f"[VENICE] Prompt length: {len(prompt)}")
@@ -1407,9 +1685,6 @@ async def generate_image_venice(prompt: str):
 
 
 async def handle_image_request(update: Update, user_id: int, text: str):
-    """
-    Käsittele käyttäjän kuvapyyntö.
-    """
     state = get_or_create_state(user_id)
 
     outfit = random.choice(CORE_PERSONA["wardrobe"])
@@ -1834,10 +2109,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state = get_or_create_state(user_id)
         
+        # UUSI: Päivitä mustasukkaisuustila
+        update_jealousy_mode(user_id)
+        
+        # UUSI: Tarkista jätetäänkö viesti huomiotta
+        if should_ignore_message(user_id):
+            excuse = await generate_ignore_excuse(user_id)
+            await update.message.reply_text(excuse)
+            return
+
         # UUSI: Päivitä submission level ENNEN last_interaction-päivitystä
         update_submission_level(user_id, text)
         
-        # Nyt vasta päivitä last_interaction
         state["last_interaction"] = time.time()
 
         apply_scene_updates_from_turn(state, text)
@@ -2047,7 +2330,6 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     with db_lock:
-        # Episodic memories (uusi päämuisti)
         cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
         episodic_total = cursor.fetchone()[0]
         
@@ -2060,23 +2342,18 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
         conversation_count = cursor.fetchone()[0]
         
-        # Profile facts
         cursor.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
         facts_count = cursor.fetchone()[0]
         
-        # Summaries
         cursor.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
         summaries_count = cursor.fetchone()[0]
         
-        # Turns (raaka keskustelu)
         cursor.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
         turns_count = cursor.fetchone()[0]
         
-        # Active plans
         cursor.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
         active_plans = cursor.fetchone()[0]
         
-        # Legacy memories (vanha taulu, deprecated)
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
         legacy_count = cursor.fetchone()[0]
     
@@ -2159,10 +2436,6 @@ async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Virhe: anna numero välillä 0.0-1.0")
 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Generoi kuva käyttäjän pyynnöstä.
-    Käyttö: /image [kuvaus]
-    """
     user_id = update.effective_user.id
     
     if context.args:
@@ -2386,7 +2659,15 @@ def get_or_create_state(user_id):
                 "open_questions": [],
                 "open_loops": [],
                 "updated_at": time.time()
-            }
+            },
+            "jealousy_mode": False,
+            "jealousy_intensity": 0.0,
+            "last_jealousy_action": 0,
+            "ignore_probability": 0.0,
+            "last_response_time": 0,
+            "spontaneous_message_cooldown": 0,
+            "other_men_mentioned": [],
+            "provocative_scenarios": []
         }
 
         continuity_state[user_id].update(init_scene_state())
@@ -2444,4 +2725,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
