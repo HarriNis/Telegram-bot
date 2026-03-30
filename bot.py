@@ -489,7 +489,6 @@ CREATE TABLE IF NOT EXISTS turns (
 )
 """)
 
-# Uudet taulut (lisätty ohjeen mukaan)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS episodic_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -606,7 +605,7 @@ def load_plans_from_db(user_id):
         })
     return plans
 
-# ====================== HELPER-FUNKTIOT (lisätty ohjeen mukaan) ======================
+# ====================== HELPER-FUNKTIOT ======================
 def parse_json_object(text: str, default: dict):
     try:
         cleaned = text.strip()
@@ -1302,7 +1301,7 @@ RECENT TURNS:
 """
 
 
-# ====================== GENERATE LLM REPLY (uusi versio) ======================
+# ====================== GENERATE LLM REPLY ======================
 async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     packed = format_context_pack(context_pack)
@@ -1348,7 +1347,7 @@ Rules:
     return response.choices[0].message.content.strip()
 
 
-# ====================== HANDLE_MESSAGE (uusi versio) ======================
+# ====================== HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -1402,12 +1401,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_state_to_db(user_id)
 
     except Exception as e:
-        print(f"[HANDLE_MESSAGE ERROR] {e}")
+        print(f"[HANDLE_MESSAGE ERROR] {type(e).__name__}: {e}")
         traceback.print_exc()
-        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
+        await update.message.reply_text(f"Virhe: {type(e).__name__}: {str(e)[:300]}")
 
 
-# ====================== CHECK_PROACTIVE_TRIGGERS (uusi versio) ======================
+# ====================== CHECK_PROACTIVE_TRIGGERS ======================
 async def check_proactive_triggers(application):
     while True:
         try:
@@ -1428,7 +1427,6 @@ async def check_proactive_triggers(application):
                 if not target_time:
                     continue
 
-                # muistutusikkuna: 15 min ennen tai myöhästynyt 30 min sisällä
                 should_remind = (
                     (0 <= target_time - now_ts <= 900) or
                     (0 <= now_ts - target_time <= 1800)
@@ -1437,7 +1435,6 @@ async def check_proactive_triggers(application):
                 if not should_remind:
                     continue
 
-                # älä spämmää samaa suunnitelmaa minuutin välein
                 if last_updated and (now_ts - last_updated) < 3600:
                     continue
 
@@ -1485,6 +1482,9 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
         cursor.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM episodic_memories WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM profile_facts WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM summaries WHERE user_id=?", (str(user_id),))
         conn.commit()
     await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
 
@@ -1627,6 +1627,199 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Tämä ohje
 """
     await update.message.reply_text(txt)
+
+# ====================== GET TIME BLOCK ======================
+def get_time_block():
+    hour = datetime.now(HELSINKI_TZ).hour
+    if 0 <= hour < 6:
+        return "night"
+    elif 6 <= hour < 10:
+        return "morning"
+    elif 10 <= hour < 17:
+        return "day"
+    elif 17 <= hour < 22:
+        return "evening"
+    return "late_evening"
+
+
+def update_topic_state(user_id, frame):
+    state = get_or_create_state(user_id)
+    ts = state.setdefault("topic_state", {
+        "current_topic": "general",
+        "topic_summary": "",
+        "open_questions": [],
+        "open_loops": [],
+        "updated_at": time.time()
+    })
+
+    if frame.get("topic_changed"):
+        ts["current_topic"] = frame.get("topic", "general")
+        ts["topic_summary"] = frame.get("topic_summary", "")
+
+    if frame.get("open_questions") is not None:
+        ts["open_questions"] = frame.get("open_questions", [])[:5]
+
+    if frame.get("open_loops") is not None:
+        ts["open_loops"] = frame.get("open_loops", [])[:5]
+
+    ts["updated_at"] = time.time()
+
+
+def get_or_create_state(user_id):
+    if user_id not in continuity_state:
+        continuity_state[user_id] = {
+            "energy": "normal",
+            "availability": "free",
+            "last_interaction": 0,
+            "persona_mode": "warm",
+            "last_mode_change": 0,
+            "intent": "casual",
+            "summary": "",
+            "desire": None,
+            "desire_intensity": 0.0,
+            "desire_last_update": 0,
+            "tension": 0.0,
+            "last_direction": None,
+            "core_desires": [],
+            "desire_profile_updated": 0,
+            "phase": "neutral",
+            "phase_last_change": 0,
+            "relationship_arcs": [],
+            "active_arc": None,
+            "arc_last_update": 0,
+            "current_goal": None,
+            "goal_updated": 0,
+            "emotional_state": {
+                "valence": 0.0,
+                "arousal": 0.5,
+                "attachment": 0.5
+            },
+            "persona_vector": {
+                "dominance": 0.7,
+                "warmth": 0.5,
+                "playfulness": 0.4
+            },
+            "personality_evolution": {
+                "curiosity": 0.5,
+                "patience": 0.5,
+                "expressiveness": 0.5,
+                "initiative": 0.5,
+                "stability": 0.7,
+                "last_evolved": 0
+            },
+            "prediction": {
+                "next_user_intent": None,
+                "next_user_mood": None,
+                "confidence": 0.0,
+                "updated_at": 0
+            },
+            "side_characters": {
+                "friend": {"name": "Aino"},
+                "coworker": {"name": "Mika"}
+            },
+            "active_side_character": None,
+            "last_image": None,
+            "image_history": [],
+            "ignore_until": 0,
+            "pending_narrative": None,
+            "jealousy_stage": 0,
+            "jealousy_started": 0,
+            "jealousy_context": None,
+            "last_jealousy_event": None,
+            "emotional_mode": "calm",
+            "emotional_mode_last_change": 0,
+            "location_status": "separate",
+            "with_user_physically": False,
+            "shared_scene": False,
+            "last_scene_source": None,
+            "active_drive": None,
+            "interaction_arc_progress": 0.0,
+            "user_model": {
+                "dominance_preference": 0.5,
+                "emotional_dependency": 0.5,
+                "validation_need": 0.5,
+                "jealousy_sensitivity": 0.5,
+                "control_resistance": 0.5,
+                "last_updated": 0
+            },
+            "master_plan": None,
+            "current_strategy": None,
+            "strategy_updated": 0,
+            "strategy_stats": {},
+            "planned_events": [],
+            "last_plan_check": 0,
+            "final_intent": None,
+            "final_intent_updated": 0,
+            "state_conflicts": [],
+            "last_plan_reference": 0,
+            "salient_memory": None,
+            "salient_memory_updated": 0,
+            "forced_disclosure": None,
+            "conversation_themes": {
+                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            },
+            "user_preferences": {
+                "fantasy_themes": [],
+                "turn_ons": [],
+                "turn_offs": [],
+                "communication_style": "neutral",
+                "resistance_level": 0.5,
+                "last_updated": 0
+            },
+            "conversation_arc": {
+                "current_theme": None,
+                "theme_depth": 0.0,
+                "theme_started": 0,
+                "previous_themes": []
+            },
+            "moods": {
+                "annoyed": 0.20,
+                "warm": 0.45,
+                "bored": 0.20,
+                "playful": 0.35,
+                "tender": 0.40,
+            },
+            "submission_level": 0.0,
+            "humiliation_tolerance": 0.0,
+            "cuckold_acceptance": 0.0,
+            "strap_on_introduced": False,
+            "chastity_discussed": False,
+            "feminization_level": 0.0,
+            "dominance_level": 1,
+            "last_dominance_escalation": 0,
+            "manipulation_history": {
+                "gaslighting_count": 0,
+                "triangulation_count": 0,
+                "push_pull_cycles": 0,
+                "successful_manipulations": 0
+            },
+            "sexual_boundaries": {
+                "hard_nos": [],
+                "soft_nos": [],
+                "accepted": [],
+                "actively_requested": []
+            },
+            "topic_state": {
+                "current_topic": "general",
+                "topic_summary": "",
+                "open_questions": [],
+                "open_loops": [],
+                "updated_at": time.time()
+            }
+        }
+
+        continuity_state[user_id].update(init_scene_state())
+        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
+
+        topic_state = load_topic_state_from_db(user_id)
+        if topic_state:
+            continuity_state[user_id]["topic_state"] = topic_state
+
+    return continuity_state[user_id]
 
 # ====================== MAIN ======================
 async def main():
