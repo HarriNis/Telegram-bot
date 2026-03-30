@@ -2444,10 +2444,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-Kaikki ohjeen mukaiset päivitykset on tehty tarkasti:
-	•	submission_level kutsutaan ennen last_interaction-päivitystä
-	•	cmd_memory korvattu täydellisellä versiolla (episodic_memories + facts + summaries + plans)
-	•	VENICE_API_KEY muutettu vapaaehtoiseksi
-	•	resolve_open_loops tiukennettu (overlap >= 4 tai direct answer + >= 2)
-	•	Versiotulosteet (print) yhtenäistetty käyttämään BOT_VERSION
-Muut koodi on pidetty täysin identtisenä edelliseen versioon. Bottisi on nyt stabiilimpi ja näyttää oikeat muistiluvut.micro_context
+
