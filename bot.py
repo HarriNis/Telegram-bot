@@ -82,7 +82,10 @@ if VENICE_API_KEY:
     )
 
 if ANTHROPIC_API_KEY:
-    claude_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    claude_client = AsyncAnthropic(
+        api_key=ANTHROPIC_API_KEY,
+        default_headers={"anthropic-version": "2023-06-01"}
+    )
 
 print(f"🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
 
@@ -1554,6 +1557,11 @@ async def maybe_send_spontaneous_message(application, user_id: int):
 async def maybe_send_spontaneous_image(application, user_id: int):
     state = get_or_create_state(user_id)
     
+    # LISÄTTY COOLDOWN
+    cooldown = state.get("spontaneous_image_cooldown", 0)
+    if time.time() < cooldown:
+        return
+    
     if not state.get("jealousy_mode"):
         return
     
@@ -1611,6 +1619,9 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
                 caption=caption
             )
             print(f"[SPONTANEOUS IMAGE] Sent provocative image")
+            
+            # LISÄTTY COOLDOWN
+            state["spontaneous_image_cooldown"] = time.time() + random.randint(7200, 14400)
             
             await store_episodic_memory(
                 user_id=user_id,
@@ -1838,11 +1849,10 @@ Latest user turn:
 """
 
     try:
-        # PRIORISOI CLAUDE (paras analyysiin)
         if ANTHROPIC_API_KEY:
             try:
                 response = await claude_client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
+                    model="claude-3-5-sonnet-latest",
                     max_tokens=400,
                     temperature=0.2,
                     messages=[
@@ -1855,7 +1865,6 @@ Latest user turn:
                 print(f"[CLAUDE ERROR] {e}, falling back")
                 raise
         
-        # FALLBACK: GROK
         elif XAI_API_KEY:
             response = await grok_client.chat.completions.create(
                 model="grok-4-1-fast",
@@ -1866,7 +1875,6 @@ Latest user turn:
             raw = response.choices[0].message.content.strip()
             print(f"[GROK] Extracted frame")
         
-        # FALLBACK: OPENAI
         else:
             response = await openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -2084,11 +2092,10 @@ Rules:
 
     user_prompt = f"{packed}\n\nLatest user message:\n{user_text}"
 
-    # PRIORISOI CLAUDE (paras keskusteluun)
     if ANTHROPIC_API_KEY:
         try:
             response = await claude_client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-3-5-sonnet-latest",
                 max_tokens=300,
                 temperature=0.8,
                 system=system_prompt,
@@ -2102,7 +2109,6 @@ Rules:
         except Exception as e:
             print(f"[CLAUDE ERROR] {e}, falling back to Grok/OpenAI")
 
-    # FALLBACK: GROK (hyvä NSFW:ään)
     if XAI_API_KEY:
         try:
             response = await grok_client.chat.completions.create(
@@ -2120,7 +2126,6 @@ Rules:
         except Exception as e:
             print(f"[GROK ERROR] {e}, falling back to OpenAI")
 
-    # FALLBACK: OPENAI (varma valinta)
     response = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
@@ -2144,7 +2149,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             return
 
-        # UUSI: Tarkista kuvapyyntö
         t = text.lower()
         image_triggers = [
             "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
@@ -2158,16 +2162,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         state = get_or_create_state(user_id)
         
-        # UUSI: Päivitä mustasukkaisuustila
         update_jealousy_mode(user_id)
         
-        # UUSI: Tarkista jätetäänkö viesti huomiotta
         if should_ignore_message(user_id):
             excuse = await generate_ignore_excuse(user_id)
             await update.message.reply_text(excuse)
             return
 
-        # UUSI: Päivitä submission level ENNEN last_interaction-päivitystä
         update_submission_level(user_id, text)
         
         state["last_interaction"] = time.time()
@@ -2252,6 +2253,7 @@ async def check_proactive_triggers(application):
             await asyncio.sleep(60)
             now_ts = time.time()
 
+            # PLAN REMINDERS
             with db_lock:
                 cursor.execute("""
                     SELECT user_id, id, description, target_time, status, commitment_level, last_updated
@@ -2294,8 +2296,18 @@ async def check_proactive_triggers(application):
                 except Exception as e:
                     print(f"[PLAN REMINDER ERROR] {e}")
 
+            # SPONTANEOUS MESSAGES & IMAGES
+            for user_id in list(continuity_state.keys()):
+                try:
+                    update_jealousy_mode(user_id)
+                    await maybe_send_spontaneous_message(application, user_id)
+                    await maybe_send_spontaneous_image(application, user_id)
+                except Exception as e:
+                    print(f"[SPONTANEOUS ERROR for user {user_id}] {e}")
+
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
+            traceback.print_exc()
 
 
 # ====================== MINIMAL COMMAND HANDLERS ======================
@@ -2715,6 +2727,7 @@ def get_or_create_state(user_id):
             "ignore_probability": 0.0,
             "last_response_time": 0,
             "spontaneous_message_cooldown": 0,
+            "spontaneous_image_cooldown": 0,
             "other_men_mentioned": [],
             "provocative_scenarios": []
         }
