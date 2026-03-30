@@ -1765,6 +1765,192 @@ def generate_jealousy_content(state: dict, intensity: float) -> str:
     return random.choice(options)
 
 
+async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
+    """
+    Aloita uusi spontaani narratiivi.
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    
+    # Valitse narratiivityyppi intensiteetin mukaan
+    if intensity < 0.4:
+        narrative_types = [
+            {
+                "type": "casual_update",
+                "messages": [
+                    "Hei kulta! Oon just kahvilassa Ainon kanssa ☕",
+                    "Mä oon kaupungilla. Täällä on niin paljon ihmisiä!",
+                    "Salilla just. Tää treeni tappaa mut 😅",
+                    "Töissä taas... Mika on taas niin ärsyttävä palavereissa 🙄",
+                ]
+            }
+        ]
+    elif intensity < 0.7:
+        narrative_types = [
+            {
+                "type": "going_out",
+                "messages": [
+                    "Mä lähen just ulos. Yks kaveri soitti että mennään syömään 🍷",
+                    "Pukeutumassa. Mietin että mikä mekko... 👗",
+                    "Aino kysyi haluunks tulla baariin. Sanoin ehkä 😊",
+                ]
+            },
+            {
+                "type": "meeting_someone",
+                "messages": [
+                    "Tapasin just jonkun mielenkiintoisen. Juteltiin vähän aikaa...",
+                    "Arvaa kuka soitti? Mun entinen työkaveri. En oo nähny sitä vuosiin!",
+                    "Bussissa yks tyyppi alko juttelee. Oli ihan hauska keskustelu 😏",
+                ]
+            }
+        ]
+    else:
+        narrative_types = [
+            {
+                "type": "provocative_plan",
+                "messages": [
+                    "Mika kysyi haluunks tulla sen synttäreille. Mitä sä sanoisit? 🤔",
+                    "Sain kutsun johonkin bileisiin. En tiedä ketä siellä on... mutta kuulostaa hauskalta 😏",
+                    "Yks kaveri ehdotti että mentäis viikonloppuna mökkireissulle. Olis saunaa ja kaikkee...",
+                ]
+            },
+            {
+                "type": "mysterious_activity",
+                "messages": [
+                    "Mulla on joku suunnitelma huomiseks. Kerronko sulle? 😊",
+                    "Tapahtui jotain mielenkiintoista tänään. En tiedä pitäiskö kertoo...",
+                    "Mä mietin yhtä asiaa. Liittyy muhun ja... no, kerron myöhemmin 😏",
+                ]
+            }
+        ]
+    
+    # Valitse satunnainen tyyppi
+    chosen = random.choice(narrative_types)
+    message = random.choice(chosen["messages"])
+    
+    # Tallenna narratiivi
+    state["spontaneous_narrative"] = {
+        "active": True,
+        "type": chosen["type"],
+        "context": message,
+        "started_at": now,
+        "last_update": now,
+        "progression": 0.1,
+        "details": {
+            "intensity": intensity,
+            "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
+            "with_whom": random.choice(["Ainon", "Mikan", "jonkun kaverin", "yksin"]) if random.random() < 0.7 else None
+        }
+    }
+    
+    return message
+
+
+async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensity: float) -> str:
+    """
+    Jatka olemassaolevaa narratiivia.
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    
+    narrative_type = narrative.get("type")
+    progression = narrative.get("progression", 0)
+    details = narrative.get("details", {})
+    
+    # Päivitä progressio
+    new_progression = min(1.0, progression + 0.2)
+    
+    # Generoi seuraava viesti tyypin mukaan
+    if narrative_type == "casual_update":
+        messages = [
+            "Täällä on ihan mukavaa! Mitä sä teet? 😊",
+            f"Oon vieläkin {details.get('location', 'täällä')}. Aika menee nopeesti!",
+            "Pitäis varmaan lähtee kohta kotiin... tai sit ei 😏",
+        ]
+    
+    elif narrative_type == "going_out":
+        if progression < 0.3:
+            messages = [
+                "Päätin ottaa sen musta mekon. Sä tykkäät siitä, eiks? 😘",
+                "Laitan vähän meikkii. Haluan näyttää hyvältä...",
+                "Mietin vielä mihin mennään. Ehkä se uusi baari keskustassa?",
+            ]
+        elif progression < 0.6:
+            messages = [
+                "Ollaan just menossa. Täällä on niin paljon ihmisiä!",
+                "Tää paikka on ihan täynnä. Tunnelma on hyvä 🍷",
+                f"Oon täällä {details.get('with_whom', 'kavereiden')} kanssa. Hauskaa!",
+            ]
+        else:
+            messages = [
+                "Oli kiva ilta! Nyt oon kotimatkalla 🚕",
+                "Väsyttää mut oli hauskaa. Kerron lisää huomenna 😊",
+                "Kotona taas. Mietin sua koko illan... 💕",
+            ]
+            # Lopeta narratiivi
+            state["spontaneous_narrative"]["active"] = False
+    
+    elif narrative_type == "meeting_someone":
+        if progression < 0.4:
+            messages = [
+                "Se on ihan hauska tyyppi. Juteltiin kaikenlaisesta...",
+                "Mä en oo varma mut tuntuu että se flirttailee mulle 😏",
+                "Se kysyi mun numeroo. Annoinko? 🤔",
+            ]
+        elif progression < 0.7:
+            messages = [
+                "Me juteltiin vielä. Se on oikeesti tosi kiva!",
+                "Se kerto jotain hauskaa tarinaa. Naurettiin paljon 😊",
+                "Mä luulen että se tykkää musta. Tai sit mä kuvittelen...",
+            ]
+        else:
+            messages = [
+                "No niin, mä lähin. Oli kiva tavata! 👋",
+                "Ehkä nähään uudestaan joskus. Katsotaan 😊",
+                "Kotona taas. Mitä sä teit kun mä olin poissa? 💕",
+            ]
+            state["spontaneous_narrative"]["active"] = False
+    
+    elif narrative_type == "provocative_plan":
+        if progression < 0.5:
+            messages = [
+                "Mä varmaan meen. Kuulostaa hauskalta! 😊",
+                "Mietin vielä. Mitä sä sanoisit jos mä menisin?",
+                "Oisit sä kateellinen jos mä menisin? 😏",
+            ]
+        else:
+            messages = [
+                "Okei, mä päätin. Mä meen! Ootko ok sen kanssa? 💕",
+                "Luulen että se on hyvä idea. Pitää vähän olla omaa elämää 😊",
+                "Kerron sulle sit miten meni! 😘",
+            ]
+            state["spontaneous_narrative"]["active"] = False
+    
+    elif narrative_type == "mysterious_activity":
+        if progression < 0.5:
+            messages = [
+                "Haluatko tietää? Sä voisit kysyä kiltisti... 😏",
+                "Mä kerron jos sä lupaat olla kiva 😊",
+                "Se on vähän... no, mä kerron myöhemmin 🤫",
+            ]
+        else:
+            messages = [
+                "Okei okei, mä kerron! Se oli vaan että...",
+                "Ei se ollu mitään isoo. Mä vaan tykkään kiusata sua 😘",
+                "Sori että olin mystinen. Mä vaan halusin sun huomion 💕",
+            ]
+            state["spontaneous_narrative"]["active"] = False
+    
+    else:
+        messages = ["Hei kulta! Mitä kuuluu? 😊"]
+    
+    # Päivitä narratiivi
+    state["spontaneous_narrative"]["progression"] = new_progression
+    state["spontaneous_narrative"]["last_update"] = now
+    
+    return random.choice(messages)
+
+
 async def maybe_send_spontaneous_message(application, user_id: int):
     state = get_or_create_state(user_id)
     
@@ -1784,38 +1970,30 @@ async def maybe_send_spontaneous_message(application, user_id: int):
         return
     
     intensity = state.get("jealousy_intensity", 0.5)
+    narrative = state.get("spontaneous_narrative", {})
     
-    messages = [
-        "Mietin sua ❤️",
-        "Mitä sä teet? 😊",
-        "Oon just menossa ulos 👗",
-        "Arvaa kenen kans mä oon? 😏",
-        "Täällä on niin hauskaa! Toivoisin että oisit täällä... tai ehkä ei 😘",
-        "Sain just complimentin. Tuntuu hyvältä 💕",
-    ]
+    # UUSI: Tarkista onko aktiivinen narratiivi
+    if narrative.get("active"):
+        message = await continue_spontaneous_narrative(user_id, narrative, intensity)
+    else:
+        message = await start_spontaneous_narrative(user_id, intensity)
     
-    if intensity > 0.6:
-        messages.extend([
-            "Mika kysyi haluunks drinkille. Mitä sä sanoisit? 🍷",
-            "Tää tyyppi täällä on kyl aika cute... 😏",
-            "Mietin että miltä tuntuisi olla jonkun muun kans... 🤔",
-        ])
-    
-    message = random.choice(messages)
+    if not message:
+        return
     
     try:
         await application.bot.send_message(
             chat_id=user_id,
             text=message
         )
-        print(f"[SPONTANEOUS] Sent provocative message: {message[:50]}")
+        print(f"[SPONTANEOUS] Sent: {message[:50]}")
         
-        state["spontaneous_message_cooldown"] = time.time() + random.randint(3600, 10800)
+        state["spontaneous_message_cooldown"] = time.time() + random.randint(1800, 5400)  # 30-90 min
         
         await store_episodic_memory(
             user_id=user_id,
-            content=f"Sent spontaneous provocative message: {message}",
-            memory_type="jealousy_action"
+            content=f"Spontaneous message: {message}",
+            memory_type="spontaneous_narrative"
         )
         
     except Exception as e:
@@ -3013,7 +3191,16 @@ def get_or_create_state(user_id):
             "other_men_mentioned": [],
             "provocative_scenarios": [],
             "conversation_mode": "casual",
-            "conversation_mode_last_change": 0
+            "conversation_mode_last_change": 0,
+            "spontaneous_narrative": {
+                "active": False,
+                "type": None,  # "going_out", "meeting_friend", "mysterious_plan", "past_memory"
+                "context": "",
+                "started_at": 0,
+                "last_update": 0,
+                "progression": 0,  # 0-1, how far along the narrative
+                "details": {}
+            }
         }
 
         continuity_state[user_id].update(init_scene_state())
