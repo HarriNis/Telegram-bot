@@ -16,6 +16,7 @@ from flask import Flask
 from telegram import Update, InputFile
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 import sqlite3
 import numpy as np
 from io import BytesIO
@@ -41,12 +42,20 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
+# Pakolliset avaimet
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY puuttuu!")
+
+# Vapaaehtoiset avaimet
+if not ANTHROPIC_API_KEY:
+    print("⚠️ WARNING: ANTHROPIC_API_KEY missing! Claude will not work.")
+else:
+    print("✅ Claude API key found")
 
 if not XAI_API_KEY:
     print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
@@ -60,15 +69,20 @@ else:
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-grok_client = AsyncOpenAI(
-    api_key=XAI_API_KEY,
-    base_url="https://api.x.ai/v1"
-)
+if XAI_API_KEY:
+    grok_client = AsyncOpenAI(
+        api_key=XAI_API_KEY,
+        base_url="https://api.x.ai/v1"
+    )
 
-venice_client = AsyncOpenAI(
-    api_key=VENICE_API_KEY,
-    base_url="https://api.venice.ai/v1"
-)
+if VENICE_API_KEY:
+    venice_client = AsyncOpenAI(
+        api_key=VENICE_API_KEY,
+        base_url="https://api.venice.ai/v1"
+    )
+
+if ANTHROPIC_API_KEY:
+    claude_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 print(f"🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
 
@@ -1382,9 +1396,6 @@ def update_submission_level(user_id: int, user_text: str):
 # ====================== JEALOUSY & PROVOCATION ENGINE ======================
 
 def update_jealousy_mode(user_id: int):
-    """
-    Päivitä mustasukkaisuustila dynaamisesti.
-    """
     state = get_or_create_state(user_id)
     
     location_status = state.get("location_status", "separate")
@@ -1414,9 +1425,6 @@ def update_jealousy_mode(user_id: int):
 
 
 def should_ignore_message(user_id: int) -> bool:
-    """
-    Päätä jätetäänkö viesti huomiotta.
-    """
     state = get_or_create_state(user_id)
     ignore_prob = state.get("ignore_probability", 0.0)
     
@@ -1432,9 +1440,6 @@ def should_ignore_message(user_id: int) -> bool:
 
 
 async def generate_ignore_excuse(user_id: int) -> str:
-    """
-    Generoi looginen mutta provosoiva selitys sille miksi ei vastannut.
-    """
     state = get_or_create_state(user_id)
     
     excuses = [
@@ -1469,9 +1474,6 @@ async def generate_ignore_excuse(user_id: int) -> str:
 
 
 def generate_jealousy_content(state: dict, intensity: float) -> str:
-    """
-    Generoi mustasukkaisuutta herättävää sisältöä vastauksen.
-    """
     if intensity < 0.3:
         options = [
             "Mikan kanssa oli hauskaa tänään töissä.",
@@ -1495,9 +1497,6 @@ def generate_jealousy_content(state: dict, intensity: float) -> str:
 
 
 async def maybe_send_spontaneous_message(application, user_id: int):
-    """
-    Lähetä spontaani provosoiva viesti.
-    """
     state = get_or_create_state(user_id)
     
     cooldown = state.get("spontaneous_message_cooldown", 0)
@@ -1553,9 +1552,6 @@ async def maybe_send_spontaneous_message(application, user_id: int):
 
 
 async def maybe_send_spontaneous_image(application, user_id: int):
-    """
-    Lähetä spontaani provosoiva kuva.
-    """
     state = get_or_create_state(user_id)
     
     if not state.get("jealousy_mode"):
@@ -1842,26 +1838,49 @@ Latest user turn:
 """
 
     try:
-        if XAI_API_KEY:
-            resp = await grok_client.chat.completions.create(
+        # PRIORISOI CLAUDE (paras analyysiin)
+        if ANTHROPIC_API_KEY:
+            try:
+                response = await claude_client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=400,
+                    temperature=0.2,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                raw = response.content[0].text.strip()
+                print(f"[CLAUDE] Extracted frame")
+            except Exception as e:
+                print(f"[CLAUDE ERROR] {e}, falling back")
+                raise
+        
+        # FALLBACK: GROK
+        elif XAI_API_KEY:
+            response = await grok_client.chat.completions.create(
                 model="grok-4-1-fast",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.2
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = response.choices[0].message.content.strip()
+            print(f"[GROK] Extracted frame")
+        
+        # FALLBACK: OPENAI
         else:
-            resp = await openai_client.chat.completions.create(
+            response = await openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.2
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = response.choices[0].message.content.strip()
+            print(f"[OPENAI] Extracted frame")
 
         frame = parse_json_object(raw, default)
         frame["user_text"] = user_text
         return frame
+        
     except Exception as e:
         print(f"[FRAME ERROR] {e}")
         default["user_text"] = user_text
@@ -2063,27 +2082,57 @@ Rules:
 - Respect scene realism and current action when relevant
 """
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"{packed}\n\nLatest user message:\n{user_text}"}
-    ]
+    user_prompt = f"{packed}\n\nLatest user message:\n{user_text}"
 
+    # PRIORISOI CLAUDE (paras keskusteluun)
+    if ANTHROPIC_API_KEY:
+        try:
+            response = await claude_client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=300,
+                temperature=0.8,
+                system=system_prompt,
+                messages=[
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+            reply = response.content[0].text.strip()
+            print(f"[CLAUDE] Generated reply ({len(reply)} chars)")
+            return reply
+        except Exception as e:
+            print(f"[CLAUDE ERROR] {e}, falling back to Grok/OpenAI")
+
+    # FALLBACK: GROK (hyvä NSFW:ään)
     if XAI_API_KEY:
-        response = await grok_client.chat.completions.create(
-            model="grok-4-1-fast",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.8
-        )
-        return response.choices[0].message.content.strip()
+        try:
+            response = await grok_client.chat.completions.create(
+                model="grok-4-1-fast",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=300,
+                temperature=0.8
+            )
+            reply = response.choices[0].message.content.strip()
+            print(f"[GROK] Generated reply ({len(reply)} chars)")
+            return reply
+        except Exception as e:
+            print(f"[GROK ERROR] {e}, falling back to OpenAI")
 
+    # FALLBACK: OPENAI (varma valinta)
     response = await openai_client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
         max_tokens=300,
         temperature=0.8
     )
-    return response.choices[0].message.content.strip()
+    reply = response.choices[0].message.content.strip()
+    print(f"[OPENAI] Generated reply ({len(reply)} chars)")
+    return reply
 
 
 # ====================== HANDLE_MESSAGE ======================
