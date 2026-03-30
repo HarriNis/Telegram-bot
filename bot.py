@@ -2704,7 +2704,7 @@ Rules:
         try:
             response = await claude_client.messages.create(
                 model="claude-sonnet-4-20250514",  # ← MUUTETTU
-                max_tokens=300,
+                max_tokens=800,  # ← NOSTETTU 300 → 800
                 temperature=0.8,
                 system=system_prompt,
                 messages=[
@@ -2725,7 +2725,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=300,
+                max_tokens=800,  # ← NOSTETTU 300 → 800
                 temperature=0.8
             )
             reply = response.choices[0].message.content.strip()
@@ -2740,7 +2740,7 @@ Rules:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        max_tokens=300,
+        max_tokens=800,  # ← NOSTETTU 300 → 800
         temperature=0.8
     )
     reply = response.choices[0].message.content.strip()
@@ -2831,7 +2831,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await maybe_create_summary(user_id)
 
-        await update.message.reply_text(reply)
+        # UUSI: Jaa pitkät viestit automaattisesti
+        if len(reply) > 4000:
+            print(f"[LONG MESSAGE] Splitting {len(reply)} chars into chunks")
+            chunks = [reply[i:i+3900] for i in range(0, len(reply), 3900)]
+            for i, chunk in enumerate(chunks, 1):
+                await update.message.reply_text(chunk)
+                print(f"[CHUNK {i}/{len(chunks)}] Sent {len(chunk)} chars")
+                if i < len(chunks):
+                    await asyncio.sleep(0.3)  # Pieni viive osien välillä
+        else:
+            await update.message.reply_text(reply)
+        
         save_state_to_db(user_id)
 
     except Exception as e:
@@ -3411,3 +3422,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+```USI
