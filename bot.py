@@ -769,6 +769,8 @@ CREATE TABLE IF NOT EXISTS planned_events (
     commitment_level TEXT DEFAULT 'medium',
     must_fulfill INTEGER DEFAULT 0,
     last_updated REAL,
+    last_reminded_at REAL DEFAULT 0,
+    status_changed_at REAL,
     evolution_log TEXT DEFAULT '[]',
     needs_check INTEGER DEFAULT 0,
     urgency TEXT DEFAULT 'normal',
@@ -885,6 +887,7 @@ def load_plans_from_db(user_id):
         cursor.execute("""
             SELECT id, description, created_at, target_time, status,
                    commitment_level, must_fulfill, last_updated,
+                   last_reminded_at, status_changed_at,
                    evolution_log, needs_check, urgency,
                    user_referenced, reference_time, proactive,
                    plan_type, plan_intent
@@ -906,14 +909,16 @@ def load_plans_from_db(user_id):
             "commitment_level": row[5] or "medium",
             "must_fulfill": bool(row[6]) if row[6] is not None else False,
             "last_updated": row[7] or row[2],
-            "evolution_log": json.loads(row[8]) if row[8] else [],
-            "needs_check": bool(row[9]) if row[9] is not None else False,
-            "urgency": row[10] or "normal",
-            "user_referenced": bool(row[11]) if row[11] is not None else False,
-            "reference_time": row[12] or 0,
-            "proactive": bool(row[13]) if row[13] is not None else False,
-            "plan_type": row[14],
-            "plan_intent": row[15]
+            "last_reminded_at": row[8] or 0,
+            "status_changed_at": row[9] or row[2],
+            "evolution_log": json.loads(row[10]) if row[10] else [],
+            "needs_check": bool(row[11]) if row[11] is not None else False,
+            "urgency": row[12] or "normal",
+            "user_referenced": bool(row[13]) if row[13] is not None else False,
+            "reference_time": row[14] or 0,
+            "proactive": bool(row[15]) if row[15] is not None else False,
+            "plan_type": row[16],
+            "plan_intent": row[17]
         })
     return plans
 
@@ -1230,6 +1235,7 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
 
     due_at = resolve_due_hint(plan_data.get("due_hint"))
     commitment = plan_data.get("commitment_strength", "medium")
+    now = time.time()
 
     existing = find_similar_plan(user_id, description)
 
@@ -1237,14 +1243,16 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
         with db_lock:
             cursor.execute("""
                 UPDATE planned_events
-                SET description=?, target_time=?, status=?, commitment_level=?, last_updated=?
+                SET description=?, target_time=?, status=?, commitment_level=?, 
+                    last_updated=?, status_changed_at=?
                 WHERE id=?
             """, (
                 description,
                 due_at,
                 "planned",
                 commitment,
-                time.time(),
+                now,
+                now,  # Status muuttui -> päivitä status_changed_at
                 existing["id"]
             ))
             conn.commit()
@@ -1257,20 +1265,22 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
         cursor.execute("""
             INSERT INTO planned_events
             (id, user_id, description, created_at, target_time, status,
-             commitment_level, must_fulfill, last_updated, evolution_log,
-             needs_check, urgency, user_referenced, reference_time,
-             proactive, plan_type, plan_intent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             commitment_level, must_fulfill, last_updated, last_reminded_at,
+             status_changed_at, evolution_log, needs_check, urgency, 
+             user_referenced, reference_time, proactive, plan_type, plan_intent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             plan_id,
             str(user_id),
             description,
-            time.time(),
+            now,
             due_at,
             "planned",
             commitment,
             1 if commitment == "strong" else 0,
-            time.time(),
+            now,
+            0,  # last_reminded_at
+            now,  # status_changed_at
             json.dumps([], ensure_ascii=False),
             0,
             "normal",
@@ -1412,77 +1422,114 @@ Conversation:
 # ====================== PLAN LIFECYCLE MANAGEMENT ======================
 
 def mark_plan_completed(user_id: int, plan_id: str):
+    now = time.time()
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
-            SET status='completed', last_updated=?
+            SET status='completed', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
+        """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
 
 
 def mark_plan_cancelled(user_id: int, plan_id: str):
+    now = time.time()
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
-            SET status='cancelled', last_updated=?
+            SET status='cancelled', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
+        """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
 
 
 def mark_plan_in_progress(user_id: int, plan_id: str):
+    now = time.time()
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
-            SET status='in_progress', last_updated=?
+            SET status='in_progress', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
-        """, (time.time(), plan_id, str(user_id)))
+        """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
 
 
 def resolve_plan_reference(user_id: int, user_text: str):
     t = user_text.lower()
+    state = get_or_create_state(user_id)
     
     completion_keywords = [
         "tein sen", "tein jo", "tehty", "valmis", "hoidettu",
-        "done", "finished", "completed", "se on tehty"
+        "done", "finished", "completed", "se on tehty", "hoitui"
     ]
     
     cancel_keywords = [
         "en tee", "peruutetaan", "ei käy", "unohda se",
-        "cancel", "forget it", "ei enää"
+        "cancel", "forget it", "ei enää", "en ehdi"
     ]
     
     progress_keywords = [
         "aloitin", "teen parhaillaan", "olen tekemässä",
-        "started", "working on it"
+        "started", "working on it", "teen sitä"
     ]
     
     plans = get_active_plans(user_id, limit=5)
     if not plans:
         return None
     
+    # UUSI: Tarkista viimeksi viitattu suunnitelma
+    last_referenced_plan_id = state.get("last_referenced_plan_id")
+    
+    # Jos viesti on lyhyt ja sisältää action-keywordin, käytä viimeistä
+    if len(t.split()) <= 5 and last_referenced_plan_id:
+        if any(kw in t for kw in completion_keywords + cancel_keywords + progress_keywords):
+            for plan in plans:
+                if plan["id"] == last_referenced_plan_id:
+                    print(f"[PLAN REF] Using last referenced plan: {plan['description'][:50]}")
+                    
+                    if any(kw in t for kw in completion_keywords):
+                        mark_plan_completed(user_id, plan["id"])
+                        return {"action": "completed", "plan": plan}
+                    elif any(kw in t for kw in cancel_keywords):
+                        mark_plan_cancelled(user_id, plan["id"])
+                        return {"action": "cancelled", "plan": plan}
+                    elif any(kw in t for kw in progress_keywords):
+                        mark_plan_in_progress(user_id, plan["id"])
+                        return {"action": "in_progress", "plan": plan}
+    
+    # Tavallinen overlap-matching
+    best_match = None
+    best_score = 0
+    
     for plan in plans:
         plan_words = set(plan["description"].lower().split())
         text_words = set(t.split())
         overlap = len(plan_words & text_words)
         
-        if overlap >= 2:
-            if any(kw in t for kw in completion_keywords):
-                mark_plan_completed(user_id, plan["id"])
-                return {"action": "completed", "plan": plan}
-            
-            elif any(kw in t for kw in cancel_keywords):
-                mark_plan_cancelled(user_id, plan["id"])
-                return {"action": "cancelled", "plan": plan}
-            
-            elif any(kw in t for kw in progress_keywords):
-                mark_plan_in_progress(user_id, plan["id"])
-                return {"action": "in_progress", "plan": plan}
+        # Bonusta viimeaikaisille suunnitelmille
+        age_hours = (time.time() - plan.get("created_at", 0)) / 3600
+        recency_bonus = max(0, 1.0 - (age_hours / 168))  # 7 päivää
+        score = overlap * (1 + recency_bonus)
+        
+        if score > best_score:
+            best_score = score
+            best_match = plan
+    
+    if best_match and best_score >= 2:
+        if any(kw in t for kw in completion_keywords):
+            mark_plan_completed(user_id, best_match["id"])
+            return {"action": "completed", "plan": best_match}
+        
+        elif any(kw in t for kw in cancel_keywords):
+            mark_plan_cancelled(user_id, best_match["id"])
+            return {"action": "cancelled", "plan": best_match}
+        
+        elif any(kw in t for kw in progress_keywords):
+            mark_plan_in_progress(user_id, best_match["id"])
+            return {"action": "in_progress", "plan": best_match}
     
     return None
 
@@ -1568,7 +1615,7 @@ def update_submission_level(user_id: int, user_text: str):
     t = user_text.lower()
     
     submission_keywords = [
-        "teen mitä haluat", "totteelen", "käske", "sä päätät", 
+        "teen mitä haluat", "totteleen", "käske", "sä päätät", 
         "olen sun", "haluan olla", "nöyryytä", "hallitse",
         "strap", "pegging", "chastity", "cuckold"
     ]
@@ -1584,7 +1631,16 @@ def update_submission_level(user_id: int, user_text: str):
     ]
     
     current_level = state.get("submission_level", 0.0)
+    last_interaction = state.get("last_interaction", time.time())
+    hours_since = (time.time() - last_interaction) / 3600
     
+    # KORJAUS: Laske decay ENSIN
+    if hours_since > 24:
+        decay = 0.98 ** (hours_since / 24)
+        current_level = current_level * decay
+        print(f"[SUBMISSION] Applied decay: {decay:.3f}, new base: {current_level:.2f}")
+    
+    # Käytä decay:n jälkeistä tasoa pohjana
     if any(kw in t for kw in submission_keywords):
         state["submission_level"] = min(1.0, current_level + 0.15)
         print(f"[SUBMISSION] Increased to {state['submission_level']:.2f}")
@@ -1597,11 +1653,9 @@ def update_submission_level(user_id: int, user_text: str):
         state["submission_level"] = min(1.0, current_level + 0.05)
         print(f"[SUBMISSION] Slight increase to {state['submission_level']:.2f}")
     
-    last_interaction = state.get("last_interaction", time.time())
-    hours_since = (time.time() - last_interaction) / 3600
-    if hours_since > 24:
-        decay = 0.98 ** (hours_since / 24)
-        state["submission_level"] = current_level * decay
+    else:
+        # Jos ei muutosta, käytä decay:n jälkeistä tasoa
+        state["submission_level"] = current_level
     
     return state["submission_level"]
 
@@ -2475,27 +2529,29 @@ async def check_proactive_triggers(application):
             # PLAN REMINDERS
             with db_lock:
                 cursor.execute("""
-                    SELECT user_id, id, description, target_time, status, commitment_level, last_updated
+                    SELECT user_id, id, description, target_time, status, 
+                           commitment_level, last_reminded_at
                     FROM planned_events
                     WHERE status='planned' AND target_time IS NOT NULL
                 """)
                 rows = cursor.fetchall()
 
             for row in rows:
-                user_id, plan_id, description, target_time, status, commitment_level, last_updated = row
+                user_id, plan_id, description, target_time, status, commitment_level, last_reminded_at = row
 
                 if not target_time:
                     continue
 
                 should_remind = (
-                    (0 <= target_time - now_ts <= 900) or
-                    (0 <= now_ts - target_time <= 1800)
+                    (0 <= target_time - now_ts <= 900) or  # 15 min ennen
+                    (0 <= now_ts - target_time <= 1800)     # 30 min jälkeen
                 )
 
                 if not should_remind:
                     continue
 
-                if last_updated and (now_ts - last_updated) < 3600:
+                # KORJAUS: Käytä last_reminded_at eikä last_updated
+                if last_reminded_at and (now_ts - last_reminded_at) < 3600:
                     continue
 
                 try:
@@ -2507,7 +2563,7 @@ async def check_proactive_triggers(application):
                     with db_lock:
                         cursor.execute("""
                             UPDATE planned_events
-                            SET last_updated=?
+                            SET last_reminded_at=?
                             WHERE id=?
                         """, (now_ts, plan_id))
                         conn.commit()
@@ -3008,3 +3064,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+``` elif any
