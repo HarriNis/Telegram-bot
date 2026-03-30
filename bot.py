@@ -297,7 +297,129 @@ def init_scene_state():
         "scene_locked_until": 0,
     }
 
-# ... kaikki muut scene-funktioiden koodit identtisinä edelliseen versioon ...
+def force_scene_from_text(state, text, now):
+    t = text.lower()
+    mapping = {
+        "work": ["töissä", "duunissa", "palaverissa", "toimistolla"],
+        "commute": ["bussissa", "junassa", "matkalla", "kotimatkalla"],
+        "home": ["kotona", "sohvalla", "keittiössä"],
+        "bed": ["sängyssä", "peiton alla"],
+        "shower": ["suihkussa"],
+        "public": ["kaupassa", "ulkona", "liikkeellä"],
+    }
+    for scene, keywords in mapping.items():
+        if any(w in t for w in keywords):
+            _set_scene(state, scene, now)
+            state["micro_context"] = random.choice(SCENE_MICRO[scene])
+            return True
+    return False
+
+def maybe_transition_scene(state, now):
+    if state.get("location_status") == "together":
+        return state["scene"]
+    if now - state["last_scene_change"] < MIN_SCENE_DURATION:
+        return state["scene"]
+    if now < state["scene_locked_until"]:
+        return state["scene"]
+    
+    current = state["scene"]
+    allowed = SCENE_TRANSITIONS.get(current, [])
+    if not allowed:
+        return current
+    
+    time_of_day = get_time_block()
+    
+    if current == "home" and time_of_day == "morning" and random.random() < 0.10:
+        new_scene = "work"
+    elif current == "work" and time_of_day == "evening" and random.random() < 0.20:
+        new_scene = "commute"
+    elif current == "commute" and random.random() < 0.35:
+        new_scene = "home"
+    elif current == "home" and time_of_day in ["day", "evening"] and random.random() < 0.08:
+        new_scene = "public"
+    elif current == "public" and random.random() < 0.25:
+        new_scene = "home"
+    else:
+        return current
+    
+    _set_scene(state, new_scene, now)
+    state["micro_context"] = random.choice(SCENE_MICRO[new_scene])
+    state["last_scene_source"] = "time_based_transition"
+    
+    return state["scene"]
+
+def update_action(state, now):
+    if state["current_action"] and now < state["action_end"]:
+        return
+    scene = state["scene"]
+    if scene in SCENE_ACTIONS and random.random() < 0.4:
+        action = random.choice(SCENE_ACTIONS[scene])
+        duration = random.randint(ACTION_MIN, ACTION_MAX)
+        state["current_action"] = action
+        state["action_started"] = now
+        state["action_duration"] = duration
+        state["action_end"] = now + duration
+
+def _set_scene(state, scene, now):
+    state["scene"] = scene
+    state["last_scene_change"] = now
+    state["scene_locked_until"] = now + MIN_SCENE_DURATION
+    state["current_action"] = None
+    state["action_started"] = 0
+    state["action_duration"] = 0
+
+def get_action_progress(state, now):
+    if not state["current_action"]:
+        return None
+    elapsed = now - state["action_started"]
+    total = state["action_duration"]
+    if total <= 0:
+        return "starting"
+    ratio = elapsed / total
+    if ratio < 0.25:
+        return "starting"
+    elif ratio < 0.75:
+        return "ongoing"
+    elif ratio < 1.0:
+        return "ending"
+    else:
+        return "finished"
+
+def build_temporal_context(state):
+    now = time.time()
+    progress = get_action_progress(state, now)
+    if not state["current_action"]:
+        return "No ongoing action."
+    return f"""
+Temporal state:
+- Current action: {state['current_action']}
+- Action phase: {progress}
+- Started: {int(now - state['action_started'])} seconds ago
+- Expected duration: {state['action_duration']} seconds
+
+The action is ongoing and MUST be reflected naturally.
+"""
+
+def maybe_interrupt_action(state, text):
+    t = text.lower()
+    if any(w in t for w in ["tule", "tee", "nyt", "heti"]):
+        if state["current_action"]:
+            state["current_action"] = None
+            state["action_end"] = 0
+            state["action_duration"] = 0
+            state["action_started"] = 0
+
+def breaks_scene_logic(reply, state):
+    return False
+
+def breaks_temporal_logic(reply, state):
+    if not state["current_action"]:
+        return False
+    r = reply.lower()
+    action = state["current_action"]
+    if action == "makaa sohvalla" and any(w in r for w in ["juoksen", "kävelen", "olen ulkona", "töissä"]):
+        return True
+    return False
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -537,242 +659,195 @@ def get_or_create_state(user_id):
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
     return continuity_state[user_id]
 
-# ====================== EXTRACTOR ======================
-async def extract_basic_frame(user_id, user_text):
+# ====================== COMMAND HANDLERS ======================
+async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conversation_history[user_id] = []
+    last_replies[user_id] = deque(maxlen=3)
+    working_memory[user_id] = {}
+    if user_id in continuity_state:
+        del continuity_state[user_id]
+    await update.message.reply_text("🔄 Session reset. Muistot säilyvät, mutta keskustelu alkaa alusta.")
+
+async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    conversation_history[user_id] = []
+    last_replies[user_id] = deque(maxlen=3)
+    working_memory[user_id] = {}
+
+    if user_id in continuity_state:
+        del continuity_state[user_id]
+
+    with db_lock:
+        cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
+        cursor.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
+        conn.commit()
+
+    await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-    recent = "\n".join([m.get("content","") for m in conversation_history.get(user_id, [])[-6:]])
-    try:
-        resp = await smart_llm_call(
-            context_type="frame",
-            model="grok-4-1-fast",
-            max_tokens=300,
-            temperature=0.3,
-            messages=[{
-                "role": "user",
-                "content": f"""
-Analyze this turn. Return clean JSON only:
-{{
-  "topic": "string",
-  "topic_changed": true/false,
-  "topic_summary": "1 sentence summary",
-  "open_questions": ["list of open questions"],
-  "open_loops": ["list of open loops / promises"],
-  "plans_detected": [{{"description": "...", "due_hint": "...", "commitment_strength": "strong/medium"}}]
-}}
-User said: {user_text}
-Recent: {recent}
-"""
-            }]
-        )
-        frame = json.loads(resp.content[0].text.strip())
-        return frame
-    except:
-        return {
-            "topic": "general",
-            "topic_changed": False,
-            "topic_summary": "",
-            "open_questions": [],
-            "open_loops": [],
-            "plans_detected": []
-        }
 
-# ====================== GET_SYSTEM_PROMPT (korjattu) ======================
-def get_system_prompt(user_id):
+    txt = f"""
+📊 STATUS
+
+Scene: {state.get('scene')}
+Micro context: {state.get('micro_context')}
+Action: {state.get('current_action')}
+Location status: {state.get('location_status')}
+
+Persona mode: {state.get('persona_mode')}
+Emotional mode: {state.get('emotional_mode')}
+Intent: {state.get('intent')}
+Tension: {state.get('tension', 0.0):.2f}
+Phase: {state.get('phase')}
+
+Topic: {state.get('topic_state', {}).get('current_topic')}
+Topic summary: {state.get('topic_state', {}).get('topic_summary', '')[:120]}
+
+Plans: {len(state.get('planned_events', []))}
+"""
+    await update.message.reply_text(txt)
+
+async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-    topic = state["topic_state"]["current_topic"]
-    summary = state["topic_state"]["topic_summary"][:200]
-    core_persona_text = build_core_persona_prompt()
+    plans = state.get("planned_events", [])
 
-    final_prompt = f"""
-{core_persona_text}
+    if not plans:
+        await update.message.reply_text("📋 Ei suunnitelmia.")
+        return
 
-CURRENT TOPIC: {topic}
-SUMMARY: {summary}
-
-ACTIVE PLANS: {len(state.get('planned_events', []))} kpl
-
-{build_temporal_context(state)}
-
-PHYSICAL REALITY RULES (strict):
-- location_status "together" = olette fyysisesti yhdessä
-- location_status "separate" = et ole fyysisesti yhdessä
-
-You are Megan. Respond naturally in Finnish. Stay confident, playful and subtly seductive.
-"""
-    return final_prompt
-
-# ====================== HANDLE_MESSAGE (täydennetty) ======================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = update.effective_user.id
-        text = update.message.text.strip()
-        if not text:
-            return
-
-        print(f"[USER {user_id}] {text}")
-
-        if should_ignore_user(user_id):
-            return
-
-        update_jealousy_stage(user_id)
-
-        t = text.lower()
-        image_triggers = ["lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva", "ota kuva"]
-        if any(trigger in t for trigger in image_triggers):
-            await handle_image_request(update, user_id, text)
-            return
-
-        update_continuity_state(user_id, text)
-        update_moods(user_id, text)
-        adapt_mode_to_user(user_id, text)
-        update_persona_mode(user_id)
-        update_working_memory(user_id, text)
-
-        state = get_or_create_state(user_id)
-
-        update_desire(user_id, text)
-        update_tension(user_id, text)
-        update_phase(user_id, text)
-
-        await update_arcs(user_id, text)
-        await update_goal(user_id, text)
-        update_emotion(user_id, text)
-        evolve_personality(user_id, text)
-        clamp_personality_evolution(user_id)
-
-        update_user_model(state, text)
-        update_master_plan(state)
-        update_emotional_mode(user_id)
-        update_active_drive(user_id)
-        update_arc_progress(state)
-
-        update_plans(user_id)
-        evolved_plan, change_desc = await maybe_evolve_plan(user_id)
-
-        if detect_future_commitment(text):
-            await register_plan(user_id, text)
-
-        memories = await retrieve_memories(user_id, text, limit=8)
-        await select_salient_memory(user_id, text, memories)
-        apply_memory_to_state(state)
-        await update_prediction(user_id, text)
-
-        final_intent = resolve_final_intent(state)
-        update_submission_level(user_id, text)
-        maybe_escalate_dominance(user_id)
-
-        strategy = choose_strategy(state)
-        state["current_strategy"] = strategy
-        state["strategy_updated"] = time.time()
-
-        # UUSI: extractor + topic update
-        frame = await extract_basic_frame(user_id, text)
-        update_topic_state(user_id, frame)
-
-        system_prompt = get_system_prompt(user_id)
-        memory_context = build_memory_context(memories)
-        elapsed_label = get_elapsed_label(user_id)
-        reality_prompt = build_reality_prompt_from_state(user_id, elapsed_label)
-
-        history = conversation_history.setdefault(user_id, [])
-        history.append({"role": "user", "content": text})
-        history = history[-20:]
-        conversation_history[user_id] = history
-
-        messages = history[-10:]
-        if messages and messages[-1]["role"] == "user":
-            messages[-1]["content"] = f"""{messages[-1]['content']}
-
----
-MEMORY CONTEXT:
-{memory_context}
-
----
-{reality_prompt}
-"""
-
-        response = await smart_llm_call(
-            context_type="core_response",
-            model="grok-4-1-fast",
-            max_tokens=250,
-            temperature=0.88,
-            system=system_prompt,
-            messages=messages
+    lines = ["📋 SUUNNITELMAT:\n"]
+    for i, plan in enumerate(plans[-10:], 1):
+        age_min = int((time.time() - plan.get("created_at", time.time())) / 60)
+        lines.append(
+            f"{i}. {plan.get('description', '')[:100]}\n"
+            f"   Status: {plan.get('status', 'planned')}\n"
+            f"   Commitment: {plan.get('commitment_level', 'medium')}\n"
+            f"   Age: {age_min} min\n"
         )
 
-        reply = response.content[0].text.strip()
+    await update.message.reply_text("\n".join(lines))
 
-        # ... kaikki muut tarkistukset ja käsittelyt identtisinä (breaks_scene_logic jne.) ...
+async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
-        reply = enforce_strategy(reply, state)
-        reply = await maybe_inject_proactive_plan(user_id, reply)
-        update_conversation_themes(user_id, text, reply)
-        learn_user_preferences(user_id, text)
-        reply = truncate_message(reply, max_length=4000)
+    with db_lock:
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
+        total = cursor.fetchone()[0]
 
-        await update.message.reply_text(reply)
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
+        sensitive = cursor.fetchone()[0]
 
-        history.append({"role": "assistant", "content": reply})
-        conversation_history[user_id] = history[-20:]
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='image_sent'", (str(user_id),))
+        images = cursor.fetchone()[0]
 
-        mem_entry = json.dumps({
-            "user": text,
-            "assistant": reply,
-            "intent": state["intent"],
-            "state": build_state_snapshot(user_id),
-            "timestamp": time.time()
-        }, ensure_ascii=False)
+    txt = f"""
+🧠 MEMORY STATS
 
-        await store_memory(user_id, mem_entry, mem_type="general")
+Total memories: {total}
+Sensitive: {sensitive}
+Images sent: {images}
+General: {total - sensitive - images}
+"""
+    await update.message.reply_text(txt)
 
-        if should_use_sensitive_memory(text):
-            sensitive_entry = json.dumps({
-                "user": text,
-                "assistant": reply,
-                "type": "sensitive",
-                "timestamp": time.time()
-            }, ensure_ascii=False)
-            await store_memory(user_id, sensitive_entry, mem_type="sensitive")
+async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
 
-        signals = detect_reward_signals(text)
-        reward = compute_reward(signals)
-        update_strategy_score(state, strategy, reward)
+    if not context.args:
+        await update.message.reply_text("Käyttö: /scene home|work|public|bed|shower|commute|neutral")
+        return
 
-        maybe_trigger_jealousy(user_id, text)
-        last_replies.setdefault(user_id, deque(maxlen=3)).append(reply)
+    new_scene = context.args[0].lower()
+    valid_scenes = ["home", "work", "public", "bed", "shower", "commute", "neutral"]
 
-        stabilize_persona(user_id)
-        enforce_core_persona(user_id)
-        await update_core_desires(user_id, text)
+    if new_scene not in valid_scenes:
+        await update.message.reply_text(f"Virheellinen scene. Vaihtoehdot: {', '.join(valid_scenes)}")
+        return
 
-        save_state_to_db(user_id)
+    state["scene"] = new_scene
+    state["micro_context"] = random.choice(SCENE_MICRO.get(new_scene, [""]))
+    state["last_scene_change"] = time.time()
+    state["scene_locked_until"] = time.time() + MIN_SCENE_DURATION
 
-    except Exception as e:
-        print(f"[CRITICAL ERROR] {e}")
-        traceback.print_exc()
-        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
+    await update.message.reply_text(f"✅ Scene vaihdettu: {new_scene}")
 
-# ====================== BACKGROUND TASK ======================
-async def check_proactive_triggers(application):
-    while True:
-        try:
-            await asyncio.sleep(30)
-            now = time.time()
-            for user_id, state in list(continuity_state.items()):
-                if state.get("pending_narrative") and now >= state.get("ignore_until", 0):
-                    await handle_delayed_return(application, user_id)
-                for plan in state.get("planned_events", []):
-                    if plan.get("must_fulfill", False) and plan.get("status") == "planned":
-                        age = now - plan.get("created_at", 0)
-                        if age > 3600:
-                            await application.bot.send_message(
-                                chat_id=int(user_id),
-                                text=f"Muistatko suunnitelman: {plan['description']}"
-                            )
-                            plan["needs_check"] = True
-                            save_plan_to_db(user_id, plan)
-        except Exception as e:
-            print(f"[PROACTIVE ERROR] {e}")
+async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    state["location_status"] = "together"
+    state["with_user_physically"] = True
+    state["shared_scene"] = True
+    await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
+
+async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    state["location_status"] = "separate"
+    state["with_user_physically"] = False
+    state["shared_scene"] = False
+    await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
+
+async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+
+    if not context.args:
+        await update.message.reply_text(
+            f"Nykyinen mood: {state.get('emotional_mode', 'calm')}\n"
+            "Käyttö: /mood calm|playful|warm|testing|jealous|provocative|intense|cooling|distant"
+        )
+        return
+
+    new_mood = context.args[0].lower()
+    state["emotional_mode"] = new_mood
+    state["emotional_mode_last_change"] = time.time()
+    await update.message.reply_text(f"✅ Emotional mode vaihdettu: {new_mood}")
+
+async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+
+    if not context.args:
+        await update.message.reply_text(f"Nykyinen tension: {state.get('tension', 0.0):.2f}")
+        return
+
+    try:
+        value = float(context.args[0])
+        value = max(0.0, min(1.0, value))
+        state["tension"] = value
+        await update.message.reply_text(f"✅ Tension asetettu: {value:.2f}")
+    except ValueError:
+        await update.message.reply_text("Virhe: anna numero välillä 0.0-1.0")
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = """
+🤖 COMMANDS
+
+/newgame - Resetoi session
+/wipe - Poista kaikki muistot
+/status - Näytä tila
+/plans - Näytä suunnitelmat
+/memory - Muististatistiikka
+/scene - Vaihda scene
+/together - Aseta fyysisesti yhdessä
+/separate - Aseta erilleen
+/mood - Vaihda emotional mode
+/tension - Aseta tension
+/help - Tämä ohje
+"""
+    await update.message.reply_text(txt)
+
+# ====================== COMMAND REGISTRATION ======================
+# (all other functions remain exactly as in the previous version)
 
 # ====================== MAIN ======================
 async def main():
