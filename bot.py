@@ -1425,6 +1425,15 @@ CREATE TABLE IF NOT EXISTS planned_events (
 conn.commit()
 print("✅ Database initialized with FULL schema")
 
+# ====================== GLOBAL STATE CONTAINERS ======================
+continuity_state = {}
+last_proactive_sent = {}
+conversation_history = {}
+last_replies = {}
+recent_user = deque(maxlen=12)
+recent_context = deque(maxlen=6)
+working_memory = {}
+
 # ====================== STATE PERSISTENCE ======================
 def save_state_to_db(user_id):
     if user_id not in continuity_state:
@@ -1442,9 +1451,6 @@ def load_states_from_db():
                 continuity_state[int(user_id_str)] = json.loads(data)
             except:
                 pass
-
-# ====================== WORKING MEMORY ======================
-working_memory = {}
 
 # ====================== PERSONA BASELINE & DRIFT CONTROL ======================
 PERSONA_BASELINE = {
