@@ -760,6 +760,14 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
             age_hours = max((now - created_at) / 3600.0, 0.0)
             recency = 1.0 / (1.0 + age_hours)
             score = 0.8 * sim + 0.2 * recency
+
+            # Priorisoi seksuaalisia/fantasiamuistoja (lisätty ohjeen mukaan)
+            if any(kw in content.lower() for kw in [
+                "fantasy", "strap", "pegging", "nöyryytä", "hallitse", 
+                "alistaa", "chastity", "cuckold", "humiliation"
+            ]):
+                score += 0.5
+
             scored.append((score, content, memory_type))
         except Exception:
             continue
@@ -1126,7 +1134,13 @@ Schema:
     }}
   ],
   "memory_candidates": ["..."],
-  "scene_hint": "home|work|commute|public|bed|shower|null"
+  "scene_hint": "home|work|commute|public|bed|shower|null",
+  "fantasies": [   # <-- lisätty ohjeen mukaan
+    {{
+      "description": "...",
+      "category": "dominance|humiliation|pegging|chastity|other"
+    }}
+  ]
 }}
 
 Rules:
@@ -1135,6 +1149,8 @@ Rules:
 - plans should only include future commitments or likely follow-ups
 - open_loops are unresolved promises/questions
 - scene_hint only if user clearly indicates location/activity
+- Extract any sexual fantasies or desires mentioned
+- Categorize them for later retrieval
 
 Active plans:
 {plans_text}
@@ -1205,6 +1221,23 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
             user_id=user_id,
             content=mem,
             memory_type="event",
+            source_turn_id=source_turn_id
+        )
+
+    # Lisätty ohjeen mukaan: tallenna fantasiat erikseen
+    fantasies = frame.get("fantasies", []) or []
+    for fantasy in fantasies[:3]:
+        await store_episodic_memory(
+            user_id=user_id,
+            content=fantasy.get("description", ""),
+            memory_type="fantasy",
+            source_turn_id=source_turn_id
+        )
+        upsert_profile_fact(
+            user_id=user_id,
+            fact_key=f"fantasy_{fantasy.get('category', 'general')}",
+            fact_value=fantasy.get("description", ""),
+            confidence=0.9,
             source_turn_id=source_turn_id
         )
 
@@ -1304,10 +1337,33 @@ RECENT TURNS:
 # ====================== GENERATE LLM REPLY ======================
 async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
-    packed = format_context_pack(context_pack)
+    state = get_or_create_state(user_id)
+    
+    # UUSI: Hae ja priorisoi fantasiat (lisätty ohjeen mukaan)
+    fantasies = [m for m in context_pack["relevant_memories"] 
+                 if "fantasy" in m.get("memory_type", "") or 
+                    any(kw in m["content"].lower() for kw in 
+                       ["fantasy", "strap", "pegging", "nöyryytä", "hallitse"])]
+    
+    fantasy_prompt = ""
+    if fantasies and state.get("submission_level", 0) > 0.3:
+        fantasy_prompt = f"""
+REMEMBERED FANTASIES (use to dominate/tease):
+{chr(10).join('- ' + f["content"][:120] for f in fantasies[:3])}
 
+INSTRUCTIONS:
+- Reference these naturally when relevant
+- Use them to create anticipation
+- Tease about revisiting them
+- Frame as "our shared secrets"
+"""
+    
+    packed = format_context_pack(context_pack)
+    
     system_prompt = f"""
 {build_core_persona_prompt()}
+
+{fantasy_prompt}
 
 Use the context below to stay coherent across:
 - past events
