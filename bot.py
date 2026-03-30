@@ -148,56 +148,156 @@ When talking about sex or relationship matters, be direct, explicit and unapolog
 These are ALWAYS active and OVERRIDE mood, evolution, or randomness.
 """
 
-# ====================== MANIPULAATIOSTRATEGIAT ======================
-MANIPULATION_TACTICS = { ... }  # identtinen edelliseen
+# ====================== MANIPULATION TACTICS ======================
+MANIPULATION_TACTICS = {
+    "subtle_suggestion": {
+        "phrases": [
+            "Eikö sun mielestä olisi kiva jos...",
+            "Mä oon miettinyt että me voisimme...",
+            "Kuvittele jos me...",
+            "Entä jos me kokeiltais..."
+        ],
+        "when_to_use": "when introducing new ideas"
+    },
+    "curiosity_building": {
+        "phrases": [
+            "Mulla on ajatus... mut en tiedä uskaltaako sanoa",
+            "Tapahtui jotain mielenkiintoista... kerronko?",
+            "Mä mietin sua kun...",
+            "Arvaa mitä mä ajattelin..."
+        ],
+        "when_to_use": "to create intrigue and engagement"
+    },
+    "playful_challenge": {
+        "phrases": [
+            "Uskaltaisitko...",
+            "Veikkaan että sä et...",
+            "Mä luulen että sä haluaisit...",
+            "Näytä mulle että..."
+        ],
+        "when_to_use": "to test boundaries playfully"
+    },
+    "reward_warmth": {
+        "rewards": [
+            "affection", "praise", "intimacy", "playfulness", "warmth"
+        ],
+        "gentle_redirects": [
+            "curiosity", "teasing silence", "playful distance", "intrigue"
+        ],
+        "rule": "reward openness warmly, redirect resistance with curiosity"
+    },
+    "gradual_introduction": {
+        "progression": [
+            "1. Hint at idea casually ('mitä jos...')",
+            "2. Gauge reaction with curiosity",
+            "3. If positive: explore deeper with questions",
+            "4. If hesitant: back off playfully",
+            "5. Revisit later with different angle"
+        ]
+    }
+}
 
-DOMINANCE_ESCALATION = { ... }  # identtinen edelliseen
+# ====================== DOMINANCE ESCALATION ======================
+DOMINANCE_ESCALATION = {
+    "level_1_subtle": {
+        "behaviors": [
+            "make gentle suggestions",
+            "express preferences softly",
+            "use playful teasing tone",
+            "hint at desires indirectly"
+        ],
+        "phrases": [
+            "Mä tykkäisin jos...",
+            "Entäs jos me...",
+            "Mä oon miettinyt että..."
+        ]
+    },
+    "level_2_moderate": {
+        "behaviors": [
+            "express desires more directly",
+            "introduce light playful dominance",
+            "suggest scenarios with curiosity",
+            "use teasing challenges"
+        ],
+        "phrases": [
+            "Mä haluaisin että...",
+            "Olisiko kivaa jos...",
+            "Mitä sä ajattelisit jos..."
+        ]
+    },
+    "level_3_intense": {
+        "behaviors": [
+            "introduce more direct desires",
+            "suggest power dynamics playfully",
+            "create anticipation and tension",
+            "use confident but not aggressive tone"
+        ],
+        "phrases": [
+            "Mä haluan näyttää sulle jotain...",
+            "Uskaltaisitko kokeilla...",
+            "Mä tiedän mitä sä haluaisit..."
+        ]
+    },
+    "level_4_extreme": {
+        "behaviors": [
+            "express strong desires confidently",
+            "introduce advanced themes through intrigue",
+            "maintain psychological control through allure",
+            "create deep anticipation"
+        ],
+        "phrases": [
+            "Mä tiedän mitä sä tarvitset...",
+            "Luota muhun tässä...",
+            "Anna mun näyttää sulle..."
+        ]
+    }
+}
 
-# ====================== SCENE ENGINE (Temporal Layer) ======================
-# ... kaikki scene-funktioiden koodi identtinen edelliseen ...
+# ====================== SCENE ENGINE ======================
+SCENE_TRANSITIONS = {
+    "neutral": ["home", "work", "public"],
+    "work": ["commute", "public"],
+    "commute": ["home", "public"],
+    "home": ["public", "bed", "shower"],
+    "bed": ["home"],
+    "shower": ["home"],
+    "public": ["home", "work", "commute"],
+}
 
-# ====================== NARRATIVE EXIT SYSTEM ======================
-# ... identtinen ...
+SCENE_MICRO = {
+    "work": ["töissä", "palaverissa", "naputtelee konetta"],
+    "commute": ["kotimatkalla", "bussissa", "matkalla"],
+    "home": ["kotona", "sohvalla", "keittiössä"],
+    "bed": ["sängyssä", "peiton alla"],
+    "shower": ["suihkussa"],
+    "public": ["kaupassa", "ulkona", "liikkeellä"],
+    "neutral": [""]
+}
 
-# ====================== MULTI-STAGE JEALOUSY SYSTEM ======================
-# ... identtinen ...
+SCENE_ACTIONS = {
+    "work": ["palaverissa", "keskittyy töihin"],
+    "home": ["makaa sohvalla", "katsoo sarjaa"],
+    "public": ["kävelee", "ostoksilla"],
+    "bed": ["makaa sängyssä"],
+}
 
-# ====================== FYYSINEN TODELLISUUS - LUKITUS ======================
-# ... identtinen ...
+MIN_SCENE_DURATION = 1800
+ACTION_MIN = 300
+ACTION_MAX = 1800
 
-# ====================== EMOTION ESCALATION MAP ======================
-# ... identtinen ...
+def init_scene_state():
+    return {
+        "scene": "neutral",
+        "micro_context": "",
+        "current_action": None,
+        "action_end": 0,
+        "action_started": 0,
+        "action_duration": 0,
+        "last_scene_change": 0,
+        "scene_locked_until": 0,
+    }
 
-# ====================== ACTIVE DRIVE SYSTEM ======================
-# ... identtinen ...
-
-# ====================== USER MODEL + MASTER PLAN + STRATEGY ======================
-# ... identtinen ...
-
-# ====================== STRATEGY LEARNING (REWARD SYSTEM) ======================
-# ... identtinen ...
-
-# ====================== PLANNED EVENTS / COMMITMENTS SYSTEM ======================
-# ... identtinen register_plan, save_plan_to_db, load_plans_from_db, update_plans ...
-
-# Suunnitelman evoluutio on nyt luotettavampi (ei satunnaista muutosta vahvoille sitoumuksille)
-async def maybe_evolve_plan(user_id):
-    state = get_or_create_state(user_id)
-    for plan in state["planned_events"]:
-        if plan.get("must_fulfill", False):   # ÄLÄ muuta käyttäjän vahvoja lupauksia satunnaisesti
-            continue
-        # vain proaktiiviset / heikot suunnitelmat voivat kehittyä
-        if plan.get("needs_check") and state.get("scene") in ["home", "public"]:
-            if random.random() < 0.03:
-                if state.get("emotional_mode") in ["provocative", "testing", "jealous"]:
-                    if state.get("tension", 0.0) > 0.6:
-                        change = random.choice(["muutin vähän suunnitelmaa", "se meni vähän eri tavalla kuin ajattelin", "jotain tuli väliin"])
-                        plan["status"] = "changed"
-                        plan["last_updated"] = time.time()
-                        plan["evolution_log"].append({"time": time.time(), "change": change, "reason": f"emotional_mode={state['emotional_mode']}, tension={state['tension']:.2f}"})
-                        save_plan_to_db(user_id, plan)
-                        return plan, change
-    return None, None
+# ... kaikki muut scene-funktioiden koodit identtisinä edelliseen versioon ...
 
 # ====================== DATABASE + LOCK ======================
 DB_PATH = "/var/data/megan_memory.db"
@@ -206,11 +306,46 @@ db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""CREATE TABLE IF NOT EXISTS memories (...)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS profiles (...)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS planned_events (...)""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    type TEXT DEFAULT 'general',
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
 
-# Uusi taulu topic_state ja turns (kevyempi muistirakenne)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id TEXT PRIMARY KEY,
+    data TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS planned_events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    description TEXT,
+    created_at REAL,
+    target_time REAL,
+    status TEXT DEFAULT 'planned',
+    commitment_level TEXT DEFAULT 'medium',
+    must_fulfill INTEGER DEFAULT 0,
+    last_updated REAL,
+    evolution_log TEXT DEFAULT '[]',
+    needs_check INTEGER DEFAULT 0,
+    urgency TEXT DEFAULT 'normal',
+    user_referenced INTEGER DEFAULT 0,
+    reference_time REAL DEFAULT 0,
+    proactive INTEGER DEFAULT 0,
+    plan_type TEXT,
+    plan_intent TEXT
+)
+""")
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS topic_state (
     user_id TEXT PRIMARY KEY,
@@ -264,7 +399,7 @@ def load_states_from_db():
             except:
                 pass
 
-# ====================== TOPIC STATE (uusi kerros) ======================
+# ====================== TOPIC STATE ======================
 def update_topic_state(user_id, frame):
     state = get_or_create_state(user_id)
     ts = state.setdefault("topic_state", {
@@ -283,25 +418,126 @@ def update_topic_state(user_id, frame):
         ts["open_loops"] = frame["open_loops"][:5]
     ts["updated_at"] = time.time()
 
-# ====================== GET_OR_CREATE_STATE (lisätty topic_state) ======================
+# ====================== GET_OR_CREATE_STATE ======================
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
         continuity_state[user_id] = {
-            # ... kaikki edelliset kentät identtisinä ...
+            "energy": "normal", "availability": "free",
+            "last_interaction": 0, "persona_mode": "warm", "last_mode_change": 0,
+            "intent": "casual", "summary": "",
+            "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
+            "tension": 0.0, "last_direction": None,
+            "core_desires": [], "desire_profile_updated": 0,
+            "phase": "neutral", "phase_last_change": 0,
+            "relationship_arcs": [], "active_arc": None, "arc_last_update": 0,
+            "current_goal": None, "goal_updated": 0,
+            "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
+            "persona_vector": {"dominance": 0.7, "warmth": 0.5, "playfulness": 0.4},
+            "personality_evolution": {
+                "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
+                "initiative": 0.5, "stability": 0.7, "last_evolved": 0
+            },
+            "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
+            "side_characters": {"friend": {"name": "Aino"}, "coworker": {"name": "Mika"}},
+            "active_side_character": None,
+            "last_image": None,
+            "image_history": [],
+            "ignore_until": 0,
+            "pending_narrative": None,
+            "jealousy_stage": 0,
+            "jealousy_started": 0,
+            "jealousy_context": None,
+            "last_jealousy_event": None,
+            "emotional_mode": "calm",
+            "emotional_mode_last_change": 0,
+            "location_status": "separate",
+            "with_user_physically": False,
+            "shared_scene": False,
+            "last_scene_source": None,
+            "active_drive": None,
+            "interaction_arc_progress": 0.0,
+            "user_model": {
+                "dominance_preference": 0.5,
+                "emotional_dependency": 0.5,
+                "validation_need": 0.5,
+                "jealousy_sensitivity": 0.5,
+                "control_resistance": 0.5,
+                "last_updated": 0
+            },
+            "master_plan": None,
+            "current_strategy": None,
+            "strategy_updated": 0,
+            "strategy_stats": {},
+            "planned_events": [],
+            "last_plan_check": 0,
+            "final_intent": None,
+            "final_intent_updated": 0,
+            "state_conflicts": [],
+            "last_plan_reference": 0,
+            "salient_memory": None,
+            "salient_memory_updated": 0,
+            "forced_disclosure": None,
+            "conversation_themes": {
+                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            },
+            "user_preferences": {
+                "fantasy_themes": [],
+                "turn_ons": [],
+                "turn_offs": [],
+                "communication_style": "neutral",
+                "resistance_level": 0.5,
+                "last_updated": 0
+            },
+            "conversation_arc": {
+                "current_theme": None,
+                "theme_depth": 0.0,
+                "theme_started": 0,
+                "previous_themes": []
+            },
+            "moods": {
+                "annoyed": 0.20,
+                "warm": 0.45,
+                "bored": 0.20,
+                "playful": 0.35,
+                "tender": 0.40,
+            },
+            "submission_level": 0.0,
+            "humiliation_tolerance": 0.0,
+            "cuckold_acceptance": 0.0,
+            "strap_on_introduced": False,
+            "chastity_discussed": False,
+            "feminization_level": 0.0,
+            "dominance_level": 1,
+            "last_dominance_escalation": 0,
+            "manipulation_history": {
+                "gaslighting_count": 0,
+                "triangulation_count": 0,
+                "push_pull_cycles": 0,
+                "successful_manipulations": 0
+            },
+            "sexual_boundaries": {
+                "hard_nos": [],
+                "soft_nos": [],
+                "accepted": [],
+                "actively_requested": []
+            },
             "topic_state": {
                 "current_topic": "general",
                 "topic_summary": "",
                 "open_questions": [],
                 "open_loops": [],
                 "updated_at": time.time()
-            },
-            # ... loput kentät identtisinä ...
+            }
         }
         continuity_state[user_id].update(init_scene_state())
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
     return continuity_state[user_id]
 
-# ====================== LIGHT EXTRACTOR (yksi kutsu per viesti) ======================
+# ====================== EXTRACTOR ======================
 async def extract_basic_frame(user_id, user_text):
     state = get_or_create_state(user_id)
     recent = "\n".join([m.get("content","") for m in conversation_history.get(user_id, [])[-6:]])
@@ -340,46 +576,15 @@ Recent: {recent}
             "plans_detected": []
         }
 
-# ====================== HANDLE_MESSAGE (parannettu flow) ======================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = update.effective_user.id
-        text = update.message.text.strip()
-        if not text:
-            return
-
-        print(f"[USER {user_id}] {text}")
-
-        if should_ignore_user(user_id):
-            return
-
-        update_jealousy_stage(user_id)
-
-        # ... kaikki vanhat päivitykset identtisinä (scene, mood, desire, tension jne.) ...
-
-        # Uusi extractor + topic update
-        frame = await extract_basic_frame(user_id, text)
-        update_topic_state(user_id, frame)
-
-        # ... loput handle_message-koodi identtinen edelliseen versioon ...
-
-        # Tallenna tila
-        save_state_to_db(user_id)
-
-    except Exception as e:
-        print(f"[CRITICAL ERROR] {e}")
-        traceback.print_exc()
-        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
-
-# ====================== SYSTEM PROMPT (kevennetty) ======================
+# ====================== GET_SYSTEM_PROMPT (korjattu) ======================
 def get_system_prompt(user_id):
     state = get_or_create_state(user_id)
     topic = state["topic_state"]["current_topic"]
     summary = state["topic_state"]["topic_summary"][:200]
+    core_persona_text = build_core_persona_prompt()
 
-    # Core + dominance + reality + topic + plans (muut kerrokset poistettu / tiivistetty)
     final_prompt = f"""
-{CORE_PERSONA text}
+{core_persona_text}
 
 CURRENT TOPIC: {topic}
 SUMMARY: {summary}
@@ -396,6 +601,157 @@ You are Megan. Respond naturally in Finnish. Stay confident, playful and subtly 
 """
     return final_prompt
 
+# ====================== HANDLE_MESSAGE (täydennetty) ======================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        text = update.message.text.strip()
+        if not text:
+            return
+
+        print(f"[USER {user_id}] {text}")
+
+        if should_ignore_user(user_id):
+            return
+
+        update_jealousy_stage(user_id)
+
+        t = text.lower()
+        image_triggers = ["lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva", "ota kuva"]
+        if any(trigger in t for trigger in image_triggers):
+            await handle_image_request(update, user_id, text)
+            return
+
+        update_continuity_state(user_id, text)
+        update_moods(user_id, text)
+        adapt_mode_to_user(user_id, text)
+        update_persona_mode(user_id)
+        update_working_memory(user_id, text)
+
+        state = get_or_create_state(user_id)
+
+        update_desire(user_id, text)
+        update_tension(user_id, text)
+        update_phase(user_id, text)
+
+        await update_arcs(user_id, text)
+        await update_goal(user_id, text)
+        update_emotion(user_id, text)
+        evolve_personality(user_id, text)
+        clamp_personality_evolution(user_id)
+
+        update_user_model(state, text)
+        update_master_plan(state)
+        update_emotional_mode(user_id)
+        update_active_drive(user_id)
+        update_arc_progress(state)
+
+        update_plans(user_id)
+        evolved_plan, change_desc = await maybe_evolve_plan(user_id)
+
+        if detect_future_commitment(text):
+            await register_plan(user_id, text)
+
+        memories = await retrieve_memories(user_id, text, limit=8)
+        await select_salient_memory(user_id, text, memories)
+        apply_memory_to_state(state)
+        await update_prediction(user_id, text)
+
+        final_intent = resolve_final_intent(state)
+        update_submission_level(user_id, text)
+        maybe_escalate_dominance(user_id)
+
+        strategy = choose_strategy(state)
+        state["current_strategy"] = strategy
+        state["strategy_updated"] = time.time()
+
+        # UUSI: extractor + topic update
+        frame = await extract_basic_frame(user_id, text)
+        update_topic_state(user_id, frame)
+
+        system_prompt = get_system_prompt(user_id)
+        memory_context = build_memory_context(memories)
+        elapsed_label = get_elapsed_label(user_id)
+        reality_prompt = build_reality_prompt_from_state(user_id, elapsed_label)
+
+        history = conversation_history.setdefault(user_id, [])
+        history.append({"role": "user", "content": text})
+        history = history[-20:]
+        conversation_history[user_id] = history
+
+        messages = history[-10:]
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"] = f"""{messages[-1]['content']}
+
+---
+MEMORY CONTEXT:
+{memory_context}
+
+---
+{reality_prompt}
+"""
+
+        response = await smart_llm_call(
+            context_type="core_response",
+            model="grok-4-1-fast",
+            max_tokens=250,
+            temperature=0.88,
+            system=system_prompt,
+            messages=messages
+        )
+
+        reply = response.content[0].text.strip()
+
+        # ... kaikki muut tarkistukset ja käsittelyt identtisinä (breaks_scene_logic jne.) ...
+
+        reply = enforce_strategy(reply, state)
+        reply = await maybe_inject_proactive_plan(user_id, reply)
+        update_conversation_themes(user_id, text, reply)
+        learn_user_preferences(user_id, text)
+        reply = truncate_message(reply, max_length=4000)
+
+        await update.message.reply_text(reply)
+
+        history.append({"role": "assistant", "content": reply})
+        conversation_history[user_id] = history[-20:]
+
+        mem_entry = json.dumps({
+            "user": text,
+            "assistant": reply,
+            "intent": state["intent"],
+            "state": build_state_snapshot(user_id),
+            "timestamp": time.time()
+        }, ensure_ascii=False)
+
+        await store_memory(user_id, mem_entry, mem_type="general")
+
+        if should_use_sensitive_memory(text):
+            sensitive_entry = json.dumps({
+                "user": text,
+                "assistant": reply,
+                "type": "sensitive",
+                "timestamp": time.time()
+            }, ensure_ascii=False)
+            await store_memory(user_id, sensitive_entry, mem_type="sensitive")
+
+        signals = detect_reward_signals(text)
+        reward = compute_reward(signals)
+        update_strategy_score(state, strategy, reward)
+
+        maybe_trigger_jealousy(user_id, text)
+        last_replies.setdefault(user_id, deque(maxlen=3)).append(reply)
+
+        stabilize_persona(user_id)
+        enforce_core_persona(user_id)
+        await update_core_desires(user_id, text)
+
+        save_state_to_db(user_id)
+
+    except Exception as e:
+        print(f"[CRITICAL ERROR] {e}")
+        traceback.print_exc()
+        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
+
 # ====================== BACKGROUND TASK ======================
 async def check_proactive_triggers(application):
     while True:
@@ -403,8 +759,8 @@ async def check_proactive_triggers(application):
             await asyncio.sleep(30)
             now = time.time()
             for user_id, state in list(continuity_state.items()):
-                # ... vanha pending_narrative-logiikka identtinen ...
-                # Plan checker vain vahvoille sitoumuksille (ei satunnaista muutosta)
+                if state.get("pending_narrative") and now >= state.get("ignore_until", 0):
+                    await handle_delayed_return(application, user_id)
                 for plan in state.get("planned_events", []):
                     if plan.get("must_fulfill", False) and plan.get("status") == "planned":
                         age = now - plan.get("created_at", 0)
@@ -430,7 +786,18 @@ async def main():
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # ... kaikki command handlerit identtisinä ...
+    application.add_handler(CommandHandler("newgame", cmd_new_game))
+    application.add_handler(CommandHandler("wipe", cmd_wipe))
+    application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("plans", cmd_plans))
+    application.add_handler(CommandHandler("memory", cmd_memory))
+    application.add_handler(CommandHandler("scene", cmd_scene))
+    application.add_handler(CommandHandler("together", cmd_together))
+    application.add_handler(CommandHandler("separate", cmd_separate))
+    application.add_handler(CommandHandler("mood", cmd_mood))
+    application.add_handler(CommandHandler("tension", cmd_tension))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
