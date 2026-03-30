@@ -10,7 +10,7 @@ import logging
 import traceback
 import aiohttp
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask
 from telegram import Update, InputFile
@@ -489,6 +489,43 @@ CREATE TABLE IF NOT EXISTS turns (
 )
 """)
 
+# Uudet taulut (lisätty ohjeen mukaan)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS episodic_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    content TEXT,
+    embedding BLOB,
+    memory_type TEXT DEFAULT 'event',
+    source_turn_id INTEGER,
+    created_at REAL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profile_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    fact_key TEXT,
+    fact_value TEXT,
+    confidence REAL DEFAULT 0.7,
+    source_turn_id INTEGER,
+    updated_at REAL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    start_turn_id INTEGER,
+    end_turn_id INTEGER,
+    summary TEXT,
+    embedding BLOB,
+    created_at REAL
+)
+""")
+
 conn.commit()
 print("✅ Database initialized with FULL schema + topic/turns tables")
 
@@ -517,11 +554,19 @@ def save_state_to_db(user_id):
 def load_states_from_db():
     with db_lock:
         cursor.execute("SELECT user_id, data FROM profiles")
-        for user_id_str, data in cursor.fetchall():
-            try:
-                continuity_state[int(user_id_str)] = json.loads(data)
-            except:
-                pass
+        rows = cursor.fetchall()
+
+    for user_id_str, data in rows:
+        try:
+            uid = int(user_id_str)
+            continuity_state[uid] = json.loads(data)
+
+            topic_state = load_topic_state_from_db(uid)
+            if topic_state:
+                continuity_state[uid]["topic_state"] = topic_state
+
+        except Exception:
+            pass
 
 # ====================== LOAD PLANS FROM DB ======================
 def load_plans_from_db(user_id):
@@ -561,156 +606,861 @@ def load_plans_from_db(user_id):
         })
     return plans
 
-# ====================== GET TIME BLOCK ======================
-def get_time_block():
-    hour = datetime.now(HELSINKI_TZ).hour
-    if 0 <= hour < 6:
-        return "night"
-    elif 6 <= hour < 10:
-        return "morning"
-    elif 10 <= hour < 17:
-        return "day"
-    elif 17 <= hour < 22:
-        return "evening"
-    return "late_evening"
+# ====================== HELPER-FUNKTIOT (lisätty ohjeen mukaan) ======================
+def parse_json_object(text: str, default: dict):
+    try:
+        cleaned = text.strip()
 
-# ====================== TOPIC STATE ======================
-def update_topic_state(user_id, frame):
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?", "", cleaned.strip(), flags=re.IGNORECASE).strip()
+            cleaned = re.sub(r"```$", "", cleaned.strip()).strip()
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end+1]
+
+        return json.loads(cleaned)
+    except Exception:
+        return default
+
+
+def save_turn(user_id: int, role: str, content: str) -> int:
+    with db_lock:
+        cursor.execute(
+            "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (str(user_id), role, content, time.time())
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_recent_turns(user_id: int, limit: int = 10):
+    with db_lock:
+        cursor.execute("""
+            SELECT id, role, content, created_at
+            FROM turns
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (str(user_id), limit))
+        rows = cursor.fetchall()
+
+    rows.reverse()
+    return [
+        {
+            "id": row[0],
+            "role": row[1],
+            "content": row[2],
+            "created_at": row[3]
+        }
+        for row in rows
+    ]
+
+
+def save_topic_state_to_db(user_id: int):
     state = get_or_create_state(user_id)
-    ts = state.setdefault("topic_state", {
-        "current_topic": "general",
+    ts = state.get("topic_state", {})
+    with db_lock:
+        cursor.execute("""
+            INSERT OR REPLACE INTO topic_state
+            (user_id, current_topic, topic_summary, open_questions, open_loops, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(user_id),
+            ts.get("current_topic", "general"),
+            ts.get("topic_summary", ""),
+            json.dumps(ts.get("open_questions", []), ensure_ascii=False),
+            json.dumps(ts.get("open_loops", []), ensure_ascii=False),
+            ts.get("updated_at", time.time())
+        ))
+        conn.commit()
+
+
+def load_topic_state_from_db(user_id: int):
+    with db_lock:
+        cursor.execute("""
+            SELECT current_topic, topic_summary, open_questions, open_loops, updated_at
+            FROM topic_state
+            WHERE user_id=?
+        """, (str(user_id),))
+        row = cursor.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "current_topic": row[0] or "general",
+        "topic_summary": row[1] or "",
+        "open_questions": json.loads(row[2]) if row[2] else [],
+        "open_loops": json.loads(row[3]) if row[3] else [],
+        "updated_at": row[4] or time.time()
+    }
+
+
+async def get_embedding(text: str):
+    try:
+        resp = await openai_client.embeddings.create(
+            input=text,
+            model="text-embedding-3-small"
+        )
+        return np.array(resp.data[0].embedding, dtype=np.float32)
+    except Exception as e:
+        print(f"[EMBED ERROR] {e}")
+        return np.zeros(1536, dtype=np.float32)
+
+
+def cosine_similarity(a, b):
+    if len(a) == 0 or len(b) == 0:
+        return 0.0
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9
+    return float(np.dot(a, b) / denom)
+
+
+async def store_episodic_memory(user_id: int, content: str, memory_type: str = "event", source_turn_id: int = None):
+    if not content or len(content.strip()) < 12:
+        return
+
+    emb = await get_embedding(content)
+    with db_lock:
+        cursor.execute("""
+            INSERT INTO episodic_memories
+            (user_id, content, embedding, memory_type, source_turn_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(user_id),
+            content,
+            emb.tobytes(),
+            memory_type,
+            source_turn_id,
+            time.time()
+        ))
+        conn.commit()
+
+
+async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
+    q_emb = await get_embedding(query)
+
+    with db_lock:
+        cursor.execute("""
+            SELECT content, embedding, memory_type, created_at
+            FROM episodic_memories
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 100
+        """, (str(user_id),))
+        rows = cursor.fetchall()
+
+    scored = []
+    now = time.time()
+
+    for content, emb_blob, memory_type, created_at in rows:
+        try:
+            emb = np.frombuffer(emb_blob, dtype=np.float32)
+            sim = cosine_similarity(q_emb, emb)
+            age_hours = max((now - created_at) / 3600.0, 0.0)
+            recency = 1.0 / (1.0 + age_hours)
+            score = 0.8 * sim + 0.2 * recency
+            scored.append((score, content, memory_type))
+        except Exception:
+            continue
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [{"content": x[1], "memory_type": x[2]} for x in scored[:limit]]
+
+
+def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence: float = 0.7, source_turn_id: int = None):
+    if not fact_key or not fact_value:
+        return
+
+    with db_lock:
+        cursor.execute("""
+            DELETE FROM profile_facts
+            WHERE user_id=? AND fact_key=?
+        """, (str(user_id), fact_key))
+
+        cursor.execute("""
+            INSERT INTO profile_facts
+            (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(user_id),
+            fact_key,
+            fact_value,
+            confidence,
+            source_turn_id,
+            time.time()
+        ))
+        conn.commit()
+
+
+def get_profile_facts(user_id: int, limit: int = 12):
+    with db_lock:
+        cursor.execute("""
+            SELECT fact_key, fact_value, confidence, updated_at
+            FROM profile_facts
+            WHERE user_id=?
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """, (str(user_id), limit))
+        rows = cursor.fetchall()
+
+    return [
+        {
+            "fact_key": row[0],
+            "fact_value": row[1],
+            "confidence": row[2],
+            "updated_at": row[3]
+        }
+        for row in rows
+    ]
+
+
+def resolve_due_hint(due_hint: str):
+    if not due_hint:
+        return None
+
+    hint = due_hint.lower().strip()
+    now = datetime.now(HELSINKI_TZ)
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", hint):
+        try:
+            dt = datetime.strptime(hint, "%Y-%m-%d").replace(tzinfo=HELSINKI_TZ)
+            return dt.timestamp()
+        except Exception:
+            return None
+
+    if any(x in hint for x in ["tonight", "illalla", "tänä iltana", "this evening"]):
+        target = now.replace(hour=20, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target = target + timedelta(days=1)
+        return target.timestamp()
+
+    if any(x in hint for x in ["tomorrow", "huomenna"]):
+        target = (now + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+        return target.timestamp()
+
+    if any(x in hint for x in ["today", "tänään"]):
+        target = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target = now + timedelta(hours=2)
+        return target.timestamp()
+
+    weekdays = {
+        "maanantai": 0, "monday": 0,
+        "tiistai": 1, "tuesday": 1,
+        "keskiviikko": 2, "wednesday": 2,
+        "torstai": 3, "thursday": 3,
+        "perjantai": 4, "friday": 4,
+        "lauantai": 5, "saturday": 5,
+        "sunnuntai": 6, "sunday": 6,
+    }
+
+    for key, wd in weekdays.items():
+        if key in hint:
+            days_ahead = (wd - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target = (now + timedelta(days=days_ahead)).replace(hour=18, minute=0, second=0, microsecond=0)
+            return target.timestamp()
+
+    return None
+
+
+def find_similar_plan(user_id: int, description: str):
+    if not description:
+        return None
+
+    candidate_words = set(description.lower().split())
+
+    with db_lock:
+        cursor.execute("""
+            SELECT id, description, status
+            FROM planned_events
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (str(user_id),))
+        rows = cursor.fetchall()
+
+    best = None
+    best_score = 0
+
+    for row in rows:
+        existing_words = set((row[1] or "").lower().split())
+        overlap = len(candidate_words & existing_words)
+        if overlap > best_score:
+            best_score = overlap
+            best = {
+                "id": row[0],
+                "description": row[1],
+                "status": row[2]
+            }
+
+    return best if best_score >= 3 else None
+
+
+def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
+    description = (plan_data.get("description") or "").strip()
+    if not description:
+        return
+
+    due_at = resolve_due_hint(plan_data.get("due_hint"))
+    commitment = plan_data.get("commitment_strength", "medium")
+
+    existing = find_similar_plan(user_id, description)
+
+    if existing:
+        with db_lock:
+            cursor.execute("""
+                UPDATE planned_events
+                SET description=?, target_time=?, status=?, commitment_level=?, last_updated=?
+                WHERE id=?
+            """, (
+                description,
+                due_at,
+                "planned",
+                commitment,
+                time.time(),
+                existing["id"]
+            ))
+            conn.commit()
+        return existing["id"]
+
+    plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
+    with db_lock:
+        cursor.execute("""
+            INSERT INTO planned_events
+            (id, user_id, description, created_at, target_time, status,
+             commitment_level, must_fulfill, last_updated, evolution_log,
+             needs_check, urgency, user_referenced, reference_time,
+             proactive, plan_type, plan_intent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            plan_id,
+            str(user_id),
+            description,
+            time.time(),
+            due_at,
+            "planned",
+            commitment,
+            1 if commitment == "strong" else 0,
+            time.time(),
+            json.dumps([], ensure_ascii=False),
+            0,
+            "normal",
+            0,
+            0,
+            0,
+            "user_plan",
+            "follow_up"
+        ))
+        conn.commit()
+    return plan_id
+
+
+def get_active_plans(user_id: int, limit: int = 5):
+    with db_lock:
+        cursor.execute("""
+            SELECT id, description, target_time, status, commitment_level
+            FROM planned_events
+            WHERE user_id=? AND status IN ('planned', 'in_progress')
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (str(user_id), limit))
+        rows = cursor.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "description": row[1],
+            "target_time": row[2],
+            "status": row[3],
+            "commitment_level": row[4]
+        }
+        for row in rows
+    ]
+
+
+def get_recent_summaries(user_id: int, limit: int = 2):
+    with db_lock:
+        cursor.execute("""
+            SELECT summary, start_turn_id, end_turn_id, created_at
+            FROM summaries
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (str(user_id), limit))
+        rows = cursor.fetchall()
+
+    return [
+        {
+            "summary": row[0],
+            "start_turn_id": row[1],
+            "end_turn_id": row[2],
+            "created_at": row[3]
+        }
+        for row in rows
+    ]
+
+
+async def maybe_create_summary(user_id: int):
+    with db_lock:
+        cursor.execute("""
+            SELECT COALESCE(MAX(end_turn_id), 0)
+            FROM summaries
+            WHERE user_id=?
+        """, (str(user_id),))
+        last_summarized_turn_id = cursor.fetchone()[0] or 0
+
+        cursor.execute("""
+            SELECT id, role, content
+            FROM turns
+            WHERE user_id=? AND id > ?
+            ORDER BY id ASC
+            LIMIT 12
+        """, (str(user_id), last_summarized_turn_id))
+        rows = cursor.fetchall()
+
+    if len(rows) < 10:
+        return
+
+    start_turn_id = rows[0][0]
+    end_turn_id = rows[-1][0]
+
+    transcript = "\n".join([f"{row[1]}: {row[2]}" for row in rows])
+
+    prompt = f"""
+Summarize this conversation span in Finnish in 4-6 concise bullet points worth remembering later.
+Focus on:
+- topic progression
+- promises / future plans
+- stable preferences
+- emotionally relevant facts
+- unresolved questions
+
+Conversation:
+{transcript}
+"""
+
+    try:
+        if XAI_API_KEY:
+            resp = await grok_client.chat.completions.create(
+                model="grok-4-1-fast",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.3
+            )
+            summary = resp.choices[0].message.content.strip()
+        else:
+            resp = await openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.3
+            )
+            summary = resp.choices[0].message.content.strip()
+
+        emb = await get_embedding(summary)
+
+        with db_lock:
+            cursor.execute("""
+                INSERT INTO summaries
+                (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                str(user_id),
+                start_turn_id,
+                end_turn_id,
+                summary,
+                emb.tobytes(),
+                time.time()
+            ))
+            conn.commit()
+
+    except Exception as e:
+        print(f"[SUMMARY ERROR] {e}")
+
+
+# ====================== EXTRACTOR ======================
+async def extract_turn_frame(user_id: int, user_text: str):
+    recent_turns = get_recent_turns(user_id, limit=8)
+    active_plans = get_active_plans(user_id, limit=3)
+
+    recent_text = "\n".join([f"{t['role']}: {t['content']}" for t in recent_turns])
+    plans_text = "\n".join([f"- {p['description']}" for p in active_plans]) if active_plans else "none"
+
+    default = {
+        "topic": "general",
+        "topic_changed": False,
         "topic_summary": "",
         "open_questions": [],
         "open_loops": [],
-        "updated_at": time.time()
-    })
-    if frame.get("topic_changed"):
-        ts["current_topic"] = frame.get("topic", "general")
-        ts["topic_summary"] = frame.get("topic_summary", "")
-    if frame.get("open_questions"):
-        ts["open_questions"] = frame["open_questions"][:5]
-    if frame.get("open_loops"):
-        ts["open_loops"] = frame["open_loops"][:5]
-    ts["updated_at"] = time.time()
+        "plans": [],
+        "facts": [],
+        "memory_candidates": [],
+        "scene_hint": None
+    }
 
-# ====================== GET_OR_CREATE_STATE ======================
-def get_or_create_state(user_id):
-    if user_id not in continuity_state:
-        continuity_state[user_id] = {
-            "energy": "normal", "availability": "free",
-            "last_interaction": 0, "persona_mode": "warm", "last_mode_change": 0,
-            "intent": "casual", "summary": "",
-            "desire": None, "desire_intensity": 0.0, "desire_last_update": 0,
-            "tension": 0.0, "last_direction": None,
-            "core_desires": [], "desire_profile_updated": 0,
-            "phase": "neutral", "phase_last_change": 0,
-            "relationship_arcs": [], "active_arc": None, "arc_last_update": 0,
-            "current_goal": None, "goal_updated": 0,
-            "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
-            "persona_vector": {"dominance": 0.7, "warmth": 0.5, "playfulness": 0.4},
-            "personality_evolution": {
-                "curiosity": 0.5, "patience": 0.5, "expressiveness": 0.5,
-                "initiative": 0.5, "stability": 0.7, "last_evolved": 0
-            },
-            "prediction": {"next_user_intent": None, "next_user_mood": None, "confidence": 0.0, "updated_at": 0},
-            "side_characters": {"friend": {"name": "Aino"}, "coworker": {"name": "Mika"}},
-            "active_side_character": None,
-            "last_image": None,
-            "image_history": [],
-            "ignore_until": 0,
-            "pending_narrative": None,
-            "jealousy_stage": 0,
-            "jealousy_started": 0,
-            "jealousy_context": None,
-            "last_jealousy_event": None,
-            "emotional_mode": "calm",
-            "emotional_mode_last_change": 0,
-            "location_status": "separate",
-            "with_user_physically": False,
-            "shared_scene": False,
-            "last_scene_source": None,
-            "active_drive": None,
-            "interaction_arc_progress": 0.0,
-            "user_model": {
-                "dominance_preference": 0.5,
-                "emotional_dependency": 0.5,
-                "validation_need": 0.5,
-                "jealousy_sensitivity": 0.5,
-                "control_resistance": 0.5,
-                "last_updated": 0
-            },
-            "master_plan": None,
-            "current_strategy": None,
-            "strategy_updated": 0,
-            "strategy_stats": {},
-            "planned_events": [],
-            "last_plan_check": 0,
-            "final_intent": None,
-            "final_intent_updated": 0,
-            "state_conflicts": [],
-            "last_plan_reference": 0,
-            "salient_memory": None,
-            "salient_memory_updated": 0,
-            "forced_disclosure": None,
-            "conversation_themes": {
-                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            },
-            "user_preferences": {
-                "fantasy_themes": [],
-                "turn_ons": [],
-                "turn_offs": [],
-                "communication_style": "neutral",
-                "resistance_level": 0.5,
-                "last_updated": 0
-            },
-            "conversation_arc": {
-                "current_theme": None,
-                "theme_depth": 0.0,
-                "theme_started": 0,
-                "previous_themes": []
-            },
-            "moods": {
-                "annoyed": 0.20,
-                "warm": 0.45,
-                "bored": 0.20,
-                "playful": 0.35,
-                "tender": 0.40,
-            },
-            "submission_level": 0.0,
-            "humiliation_tolerance": 0.0,
-            "cuckold_acceptance": 0.0,
-            "strap_on_introduced": False,
-            "chastity_discussed": False,
-            "feminization_level": 0.0,
-            "dominance_level": 1,
-            "last_dominance_escalation": 0,
-            "manipulation_history": {
-                "gaslighting_count": 0,
-                "triangulation_count": 0,
-                "push_pull_cycles": 0,
-                "successful_manipulations": 0
-            },
-            "sexual_boundaries": {
-                "hard_nos": [],
-                "soft_nos": [],
-                "accepted": [],
-                "actively_requested": []
-            },
-            "topic_state": {
-                "current_topic": "general",
-                "topic_summary": "",
-                "open_questions": [],
-                "open_loops": [],
-                "updated_at": time.time()
-            }
-        }
-        continuity_state[user_id].update(init_scene_state())
-        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-    return continuity_state[user_id]
+    prompt = f"""
+Analyze the latest user turn and return JSON only.
+
+Schema:
+{{
+  "topic": "short topic label",
+  "topic_changed": true,
+  "topic_summary": "one sentence",
+  "open_questions": ["..."],
+  "open_loops": ["..."],
+  "plans": [
+    {{
+      "description": "...",
+      "due_hint": "...",
+      "commitment_strength": "strong|medium"
+    }}
+  ],
+  "facts": [
+    {{
+      "fact_key": "...",
+      "fact_value": "...",
+      "confidence": 0.0
+    }}
+  ],
+  "memory_candidates": ["..."],
+  "scene_hint": "home|work|commute|public|bed|shower|null"
+}}
+
+Rules:
+- topic_changed=true only if the topic really changes
+- facts should only include reusable user facts/preferences
+- plans should only include future commitments or likely follow-ups
+- open_loops are unresolved promises/questions
+- scene_hint only if user clearly indicates location/activity
+
+Active plans:
+{plans_text}
+
+Recent turns:
+{recent_text}
+
+Latest user turn:
+{user_text}
+"""
+
+    try:
+        if XAI_API_KEY:
+            resp = await grok_client.chat.completions.create(
+                model="grok-4-1-fast",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=350,
+                temperature=0.2
+            )
+            raw = resp.choices[0].message.content.strip()
+        else:
+            resp = await openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=350,
+                temperature=0.2
+            )
+            raw = resp.choices[0].message.content.strip()
+
+        return parse_json_object(raw, default)
+    except Exception as e:
+        print(f"[FRAME ERROR] {e}")
+        return default
+
+
+def apply_scene_updates_from_turn(state: dict, user_text: str):
+    now = time.time()
+    forced = force_scene_from_text(state, user_text, now)
+    if not forced:
+        maybe_transition_scene(state, now)
+    maybe_interrupt_action(state, user_text)
+    update_action(state, now)
+
+
+async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
+    state = get_or_create_state(user_id)
+
+    update_topic_state(user_id, frame)
+    save_topic_state_to_db(user_id)
+
+    facts = frame.get("facts", []) or []
+    for fact in facts[:8]:
+        upsert_profile_fact(
+            user_id=user_id,
+            fact_key=fact.get("fact_key", ""),
+            fact_value=fact.get("fact_value", ""),
+            confidence=float(fact.get("confidence", 0.7)),
+            source_turn_id=source_turn_id
+        )
+
+    plans = frame.get("plans", []) or []
+    for plan in plans[:5]:
+        upsert_plan(user_id, plan, source_turn_id=source_turn_id)
+
+    memory_candidates = frame.get("memory_candidates", []) or []
+    for mem in memory_candidates[:4]:
+        await store_episodic_memory(
+            user_id=user_id,
+            content=mem,
+            memory_type="event",
+            source_turn_id=source_turn_id
+        )
+
+    scene_hint = frame.get("scene_hint")
+    if scene_hint in SCENE_MICRO:
+        _set_scene(state, scene_hint, time.time())
+        state["micro_context"] = random.choice(SCENE_MICRO[scene_hint])
+
+
+# ====================== CONTEXT PACK BUILDER ======================
+async def build_context_pack(user_id: int, user_text: str):
+    state = get_or_create_state(user_id)
+
+    recent_turns = get_recent_turns(user_id, limit=8)
+    relevant_memories = await retrieve_relevant_memories(user_id, user_text, limit=5)
+    active_plans = get_active_plans(user_id, limit=4)
+    profile_facts = get_profile_facts(user_id, limit=8)
+    summaries = get_recent_summaries(user_id, limit=2)
+
+    return {
+        "topic_state": state.get("topic_state", {}),
+        "scene": state.get("scene", "neutral"),
+        "micro_context": state.get("micro_context", ""),
+        "current_action": state.get("current_action"),
+        "location_status": state.get("location_status", "separate"),
+        "recent_turns": recent_turns,
+        "relevant_memories": relevant_memories,
+        "active_plans": active_plans,
+        "profile_facts": profile_facts,
+        "summaries": summaries,
+        "temporal_context": build_temporal_context(state)
+    }
+
+
+def format_context_pack(context_pack: dict):
+    topic_state = context_pack.get("topic_state", {})
+    topic = topic_state.get("current_topic", "general")
+    topic_summary = topic_state.get("topic_summary", "")
+    open_questions = topic_state.get("open_questions", [])
+    open_loops = topic_state.get("open_loops", [])
+
+    profile_lines = "\n".join(
+        [f"- {f['fact_key']}: {f['fact_value']}" for f in context_pack.get("profile_facts", [])]
+    ) or "- none"
+
+    plan_lines = "\n".join(
+        [f"- {p['description']} (status: {p['status']}, due: {p['target_time']})" for p in context_pack.get("active_plans", [])]
+    ) or "- none"
+
+    memory_lines = "\n".join(
+        [f"- {m['content']}" for m in context_pack.get("relevant_memories", [])]
+    ) or "- none"
+
+    summary_lines = "\n".join(
+        [f"- {s['summary']}" for s in context_pack.get("summaries", [])]
+    ) or "- none"
+
+    turns_lines = "\n".join(
+        [f"{t['role']}: {t['content']}" for t in context_pack.get("recent_turns", [])]
+    )
+
+    return f"""
+CURRENT TOPIC: {topic}
+TOPIC SUMMARY: {topic_summary if topic_summary else "No summary yet."}
+
+OPEN QUESTIONS:
+{chr(10).join('- ' + q for q in open_questions) if open_questions else '- none'}
+
+OPEN LOOPS:
+{chr(10).join('- ' + q for q in open_loops) if open_loops else '- none'}
+
+SCENE: {context_pack.get('scene')}
+MICRO CONTEXT: {context_pack.get('micro_context')}
+CURRENT ACTION: {context_pack.get('current_action')}
+LOCATION STATUS: {context_pack.get('location_status')}
+
+TEMPORAL CONTEXT:
+{context_pack.get('temporal_context')}
+
+PROFILE FACTS:
+{profile_lines}
+
+ACTIVE PLANS:
+{plan_lines}
+
+RELEVANT MEMORIES:
+{memory_lines}
+
+RECENT SUMMARIES:
+{summary_lines}
+
+RECENT TURNS:
+{turns_lines}
+"""
+
+
+# ====================== GENERATE LLM REPLY (uusi versio) ======================
+async def generate_llm_reply(user_id, user_text):
+    context_pack = await build_context_pack(user_id, user_text)
+    packed = format_context_pack(context_pack)
+
+    system_prompt = f"""
+{build_core_persona_prompt()}
+
+Use the context below to stay coherent across:
+- past events
+- current topic
+- current scene and action
+- active plans
+- remembered profile facts
+
+Rules:
+- Reply naturally in Finnish
+- Do not repeat the user's message
+- Keep the reply context-aware and continuous
+- If there is an open loop or active plan clearly related to the user's message, acknowledge it naturally
+- Respect scene realism and current action when relevant
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{packed}\n\nLatest user message:\n{user_text}"}
+    ]
+
+    if XAI_API_KEY:
+        response = await grok_client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=messages,
+            max_tokens=300,
+            temperature=0.8
+        )
+        return response.choices[0].message.content.strip()
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=messages,
+        max_tokens=300,
+        temperature=0.8
+    )
+    return response.choices[0].message.content.strip()
+
+
+# ====================== HANDLE_MESSAGE (uusi versio) ======================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        text = (update.message.text or "").strip()
+
+        if not text:
+            return
+
+        state = get_or_create_state(user_id)
+        state["last_interaction"] = time.time()
+
+        apply_scene_updates_from_turn(state, text)
+
+        conversation_history.setdefault(user_id, [])
+        conversation_history[user_id].append({
+            "role": "user",
+            "content": text
+        })
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        user_turn_id = save_turn(user_id, "user", text)
+
+        frame = await extract_turn_frame(user_id, text)
+        await apply_frame(user_id, frame, user_turn_id)
+
+        reply = await generate_llm_reply(user_id, text)
+
+        if breaks_scene_logic(reply, state):
+            reply = "Hetki, kadotin ajatuksen. Sano uudelleen."
+        if breaks_temporal_logic(reply, state):
+            reply = "Hetki, olin vähän muualla. Mitä sanoit?"
+
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": reply
+        })
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        assistant_turn_id = save_turn(user_id, "assistant", reply)
+
+        await store_episodic_memory(
+            user_id=user_id,
+            content=f"User: {text}\nAssistant: {reply}",
+            memory_type="conversation_event",
+            source_turn_id=assistant_turn_id
+        )
+
+        await maybe_create_summary(user_id)
+
+        await update.message.reply_text(reply)
+        save_state_to_db(user_id)
+
+    except Exception as e:
+        print(f"[HANDLE_MESSAGE ERROR] {e}")
+        traceback.print_exc()
+        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
+
+
+# ====================== CHECK_PROACTIVE_TRIGGERS (uusi versio) ======================
+async def check_proactive_triggers(application):
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now_ts = time.time()
+
+            with db_lock:
+                cursor.execute("""
+                    SELECT user_id, id, description, target_time, status, commitment_level, last_updated
+                    FROM planned_events
+                    WHERE status='planned' AND target_time IS NOT NULL
+                """)
+                rows = cursor.fetchall()
+
+            for row in rows:
+                user_id, plan_id, description, target_time, status, commitment_level, last_updated = row
+
+                if not target_time:
+                    continue
+
+                # muistutusikkuna: 15 min ennen tai myöhästynyt 30 min sisällä
+                should_remind = (
+                    (0 <= target_time - now_ts <= 900) or
+                    (0 <= now_ts - target_time <= 1800)
+                )
+
+                if not should_remind:
+                    continue
+
+                # älä spämmää samaa suunnitelmaa minuutin välein
+                if last_updated and (now_ts - last_updated) < 3600:
+                    continue
+
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(user_id),
+                        text=f"Muistutus: {description}"
+                    )
+
+                    with db_lock:
+                        cursor.execute("""
+                            UPDATE planned_events
+                            SET last_updated=?
+                            WHERE id=?
+                        """, (now_ts, plan_id))
+                        conn.commit()
+
+                except Exception as e:
+                    print(f"[PLAN REMINDER ERROR] {e}")
+
+        except Exception as e:
+            print(f"[PROACTIVE ERROR] {e}")
+
 
 # ====================== MINIMAL COMMAND HANDLERS ======================
 async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -877,117 +1627,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - Tämä ohje
 """
     await update.message.reply_text(txt)
-
-# ====================== MINIMAL CHECK_PROACTIVE_TRIGGERS ======================
-async def check_proactive_triggers(application):
-    while True:
-        try:
-            await asyncio.sleep(30)
-        except Exception as e:
-            print(f"[PROACTIVE ERROR] {e}")
-
-# ====================== GENERATE LLM REPLY (parannettu context-pack) ======================
-async def generate_llm_reply(user_id, user_text):
-    state = get_or_create_state(user_id)
-
-    topic = state.get("topic_state", {}).get("current_topic", "general")
-    topic_summary = state.get("topic_state", {}).get("topic_summary", "")
-    scene = state.get("scene", "neutral")
-    micro_context = state.get("micro_context", "")
-    location_status = state.get("location_status", "separate")
-
-    system_prompt = f"""
-{build_core_persona_prompt()}
-
-CURRENT TOPIC: {topic}
-TOPIC SUMMARY: {topic_summary if topic_summary else "No summary yet."}
-
-SCENE: {scene}
-MICRO CONTEXT: {micro_context}
-LOCATION STATUS: {location_status}
-
-Reply naturally in Finnish.
-Do not repeat the user's message.
-Keep the reply conversational and context-aware.
-"""
-
-    messages = [{"role": "system", "content": system_prompt}]
-
-    recent_history = conversation_history.get(user_id, [])[-8:]
-    for msg in recent_history:
-        if msg.get("role") in ("user", "assistant") and msg.get("content"):
-            messages.append({
-                "role": msg["role"],
-                "content": msg["content"]
-            })
-
-    messages.append({"role": "user", "content": user_text})
-
-    if XAI_API_KEY:
-        response = await grok_client.chat.completions.create(
-            model="grok-4-1-fast",
-            messages=messages,
-            max_tokens=250,
-            temperature=0.8
-        )
-        return response.choices[0].message.content.strip()
-
-    response = await openai_client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-        max_tokens=250,
-        temperature=0.8
-    )
-    return response.choices[0].message.content.strip()
-
-# ====================== HANDLE_MESSAGE ======================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = update.effective_user.id
-        text = update.message.text.strip()
-
-        if not text:
-            return
-
-        state = get_or_create_state(user_id)
-        state["last_interaction"] = time.time()
-
-        conversation_history.setdefault(user_id, [])
-        conversation_history[user_id].append({
-            "role": "user",
-            "content": text
-        })
-        conversation_history[user_id] = conversation_history[user_id][-20:]
-
-        with db_lock:
-            cursor.execute(
-                "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (str(user_id), "user", text, time.time())
-            )
-            conn.commit()
-
-        reply = await generate_llm_reply(user_id, text)
-
-        conversation_history[user_id].append({
-            "role": "assistant",
-            "content": reply
-        })
-        conversation_history[user_id] = conversation_history[user_id][-20:]
-
-        with db_lock:
-            cursor.execute(
-                "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (str(user_id), "assistant", reply, time.time())
-            )
-            conn.commit()
-
-        await update.message.reply_text(reply)
-        save_state_to_db(user_id)
-
-    except Exception as e:
-        print(f"[HANDLE_MESSAGE ERROR] {e}")
-        traceback.print_exc()
-        await update.message.reply_text("Tapahtui virhe, yritä uudelleen.")
 
 # ====================== MAIN ======================
 async def main():
