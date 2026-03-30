@@ -8,7 +8,7 @@ import re
 import base64
 import logging
 import traceback
-import aiohttp  # ← LISÄTTY VENICE-KORJAUKSEN TAKIA
+import aiohttp
 from collections import deque
 from io import BytesIO
 from datetime import datetime
@@ -1399,10 +1399,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 )
 """)
 
-# POISTA VANHA TAULU JA LUO UUSI (varmistaa oikean skeeman)
-cursor.execute("DROP TABLE IF EXISTS planned_events")
-
-# Luo taulu UUDELLA TÄYDELLÄ skeemalla
+# Luo taulu UUDELLA TÄYDELLÄ skeemalla (ei DROP)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS planned_events (
     id TEXT PRIMARY KEY,
@@ -1428,13 +1425,23 @@ CREATE TABLE IF NOT EXISTS planned_events (
 conn.commit()
 print("✅ Database initialized with FULL schema")
 
-HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
-continuity_state = {}
-last_proactive_sent = {}
-conversation_history = {}
-last_replies = {}
-recent_user = deque(maxlen=12)
-recent_context = deque(maxlen=6)
+# ====================== STATE PERSISTENCE ======================
+def save_state_to_db(user_id):
+    if user_id not in continuity_state:
+        return
+    data = json.dumps(continuity_state[user_id], ensure_ascii=False)
+    with db_lock:
+        cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
+        conn.commit()
+
+def load_states_from_db():
+    with db_lock:
+        cursor.execute("SELECT user_id, data FROM profiles")
+        for user_id_str, data in cursor.fetchall():
+            try:
+                continuity_state[int(user_id_str)] = json.loads(data)
+            except:
+                pass
 
 # ====================== WORKING MEMORY ======================
 working_memory = {}
@@ -2623,25 +2630,25 @@ async def handle_image_request(update: Update, user_id, text):
     outfit = random.choice(CORE_PERSONA["wardrobe"])
     scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
 
+    # Päivitetty seksikkäämpi ja provosoivampi prompt (tilanne-sidonnainen, jos outfit ei ole jo lateksi/nahka)
     base_prompt = f"""
-A photorealistic portrait of a beautiful Finnish woman in her mid-20s.
+A highly realistic, extremely provocative and seductive photograph of a beautiful Finnish woman in her mid-20s.
 
 Physical features:
 - Natural blonde hair, shoulder-length, slightly wavy
-- Blue-green eyes, expressive and confident
-- Athletic yet feminine build, fit body
+- Blue-green eyes, expressive and seductive
+- Athletic yet feminine build, toned curves with perfect proportions
 - Fair Nordic skin tone with natural freckles
-- Natural makeup, subtle and elegant
-- Confident, slightly playful expression
+- Natural makeup with smoky eyes and glossy lips
 
 Clothing:
-{outfit}
+{outfit} – tight, shiny black latex or leather leggings that hug every curve, paired with a revealing corset, cropped top or sheer blouse that accentuates her figure. Tiny string panties visible underneath, push-up bra or stay-up stockings with garters for extra provocation. The outfit is extremely sexy and teasing.
 
 Setting:
-{scene_desc}, natural lighting, intimate atmosphere
+{scene_desc}, dramatic cinematic lighting, intimate and sensual atmosphere
 
 Style:
-Professional photography, cinematic lighting, high detail, realistic skin texture
+Ultra-realistic professional photography, high detail, glossy skin texture, sharp focus, 8K quality
 """
 
     await update.message.reply_text("Hetki, otan kuvan...")
@@ -3337,6 +3344,9 @@ MEMORY CONTEXT:
 
         await update_core_desires(user_id, text)
 
+        # Tallenna tila DB:hen jokaisen viestin jälkeen
+        save_state_to_db(user_id)
+
     except Exception as e:
         print(f"[CRITICAL ERROR in handle_message]")
         print(f"Error type: {type(e).__name__}")
@@ -3554,7 +3564,20 @@ async def check_proactive_triggers(application):
                 if state.get("pending_narrative") and now >= state.get("ignore_until", 0):
                     print(f"[PROACTIVE] Sending delayed return to user {user_id}")
                     await handle_delayed_return(application, user_id)
-                    
+                
+                # Plan checker (uusi toiminnallisuus)
+                plans = state.get("planned_events", [])
+                for plan in plans:
+                    if plan.get("status") == "planned" and plan.get("must_fulfill", False):
+                        age = now - plan.get("created_at", 0)
+                        if age > 3600:
+                            await application.bot.send_message(
+                                chat_id=int(user_id),
+                                text=f"Muistatko suunnitelman: {plan['description']}"
+                            )
+                            plan["needs_check"] = True
+                            save_plan_to_db(user_id, plan)
+            
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
             traceback.print_exc()
@@ -3566,6 +3589,10 @@ async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print("✅ Flask health check started")
+
+    # Lataa tallennetut tilat ennen botin käynnistymistä
+    load_states_from_db()
+    print("✅ Loaded persistent states from database")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
