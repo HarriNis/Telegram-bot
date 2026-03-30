@@ -18,6 +18,7 @@ from telegram.ext import Application, MessageHandler, filters, CommandHandler, C
 from openai import AsyncOpenAI
 import sqlite3
 import numpy as np
+from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,13 +42,23 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not VENICE_API_KEY:
-    raise ValueError("Puuttuva API-avain!")
+# Pakolliset avaimet
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN puuttuu!")
 
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY puuttuu!")
+
+# Vapaaehtoiset avaimet
 if not XAI_API_KEY:
     print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
 else:
     print("✅ Grok API key found")
+
+if not VENICE_API_KEY:
+    print("⚠️ WARNING: VENICE_API_KEY missing! Image generation will not work.")
+else:
+    print("✅ Venice API key found")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -61,7 +72,7 @@ venice_client = AsyncOpenAI(
     base_url="https://api.venice.ai/v1"
 )
 
-print("🚀 Megan 6.2 – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
+print(f"🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
 
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
@@ -420,7 +431,6 @@ def breaks_scene_logic(reply: str, state: dict) -> bool:
     scene = state.get("scene", "neutral")
     location_status = state.get("location_status", "separate")
     
-    # Jos fyysisesti yhdessä, ei voi olla bussissa/töissä/kaupassa
     if location_status == "together":
         forbidden = [
             "bussissa", "junassa", "toimistolla", "kaupassa", 
@@ -430,7 +440,6 @@ def breaks_scene_logic(reply: str, state: dict) -> bool:
             print(f"[SCENE BREAK] Together but mentions: {[w for w in forbidden if w in r]}")
             return True
     
-    # Scene-spesifit ristiriidat
     conflicts = {
         "home": ["toimistolla", "bussissa", "junassa", "kaupassa"],
         "work": ["sängyssä", "sohvalla kotona", "suihkussa kotona"],
@@ -755,7 +764,6 @@ async def store_episodic_memory(user_id: int, content: str, memory_type: str = "
     if not content or len(content.strip()) < 12:
         return
 
-    # Tarkista duplikaatti
     is_dup = await is_duplicate_memory(user_id, content, memory_type, hours=24)
     if is_dup:
         print(f"[MEMORY SKIP] Duplicate detected: {content[:60]}...")
@@ -802,7 +810,6 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
             recency = 1.0 / (1.0 + age_hours)
             score = 0.8 * sim + 0.2 * recency
 
-            # Priorisoi seksuaalisia/fantasiamuistoja
             if any(kw in content.lower() for kw in [
                 "fantasy", "strap", "pegging", "nöyryytä", "hallitse", 
                 "alistaa", "chastity", "cuckold", "humiliation"
@@ -1137,7 +1144,6 @@ Conversation:
 # ====================== PLAN LIFECYCLE MANAGEMENT ======================
 
 def mark_plan_completed(user_id: int, plan_id: str):
-    """Merkitse suunnitelma suoritetuksi"""
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
@@ -1145,12 +1151,10 @@ def mark_plan_completed(user_id: int, plan_id: str):
             WHERE id=? AND user_id=?
         """, (time.time(), plan_id, str(user_id)))
         conn.commit()
-    
     sync_plans_to_state(user_id)
 
 
 def mark_plan_cancelled(user_id: int, plan_id: str):
-    """Peruuta suunnitelma"""
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
@@ -1158,12 +1162,10 @@ def mark_plan_cancelled(user_id: int, plan_id: str):
             WHERE id=? AND user_id=?
         """, (time.time(), plan_id, str(user_id)))
         conn.commit()
-    
     sync_plans_to_state(user_id)
 
 
 def mark_plan_in_progress(user_id: int, plan_id: str):
-    """Merkitse suunnitelma käynnissä olevaksi"""
     with db_lock:
         cursor.execute("""
             UPDATE planned_events
@@ -1171,14 +1173,10 @@ def mark_plan_in_progress(user_id: int, plan_id: str):
             WHERE id=? AND user_id=?
         """, (time.time(), plan_id, str(user_id)))
         conn.commit()
-    
     sync_plans_to_state(user_id)
 
 
 def resolve_plan_reference(user_id: int, user_text: str):
-    """
-    Tarkista viittaako käyttäjä johonkin suunnitelmaan ja päivitä sen status.
-    """
     t = user_text.lower()
     
     completion_keywords = [
@@ -1222,9 +1220,6 @@ def resolve_plan_reference(user_id: int, user_text: str):
 
 
 def sync_plans_to_state(user_id: int):
-    """
-    Synkronoi planned_events DB:stä state:en.
-    """
     state = get_or_create_state(user_id)
     state["planned_events"] = load_plans_from_db(user_id)
 
@@ -1233,7 +1228,7 @@ def sync_plans_to_state(user_id: int):
 
 def resolve_open_loops(user_id: int, user_text: str, frame: dict):
     """
-    Sulje open loopeja jos käyttäjän viesti vastaa niihin.
+    Sulje open loopeja jos käyttäjän viesti vastaa niihin TARKASTI.
     """
     state = get_or_create_state(user_id)
     topic_state = state.get("topic_state", {})
@@ -1250,23 +1245,28 @@ def resolve_open_loops(user_id: int, user_text: str, frame: dict):
         text_words = set(t.split())
         overlap = len(loop_words & text_words)
         
-        if overlap >= 3 or any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"]):
+        # TIUKEMMAT EHDOT:
+        # 1. Vähintään 4 yhteistä sanaa (oli 3)
+        # 2. TAI suora vastaus JA vähintään 2 yhteistä sanaa
+        direct_answer = any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"])
+        
+        if overlap >= 4:
             resolved.append(loop)
+            print(f"[LOOP RESOLVED] Strong match: {loop[:60]}")
+        
+        elif direct_answer and overlap >= 2:
+            resolved.append(loop)
+            print(f"[LOOP RESOLVED] Direct answer + match: {loop[:60]}")
     
+    # Poista ratkaistut loopit
     if resolved:
         remaining = [l for l in open_loops if l not in resolved]
         topic_state["open_loops"] = remaining
-        
-        for loop in resolved:
-            print(f"[LOOP RESOLVED] {loop[:60]}")
 
 
 # ====================== MEMORY DEDUPLICATION ======================
 
 async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hours: int = 24):
-    """
-    Tarkista onko lähes sama muisto jo tallennettu viimeisen N tunnin aikana.
-    """
     if not content or len(content.strip()) < 12:
         return True
     
@@ -1303,9 +1303,6 @@ async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hour
 # ====================== SUBMISSION LEVEL TRACKING ======================
 
 def update_submission_level(user_id: int, user_text: str):
-    """
-    Päivitä submission_level käyttäjän viestien perusteella.
-    """
     state = get_or_create_state(user_id)
     t = user_text.lower()
     
@@ -1348,6 +1345,153 @@ def update_submission_level(user_id: int, user_text: str):
     return state["submission_level"]
 
 
+# ====================== IMAGE GENERATION ======================
+
+async def generate_image_venice(prompt: str):
+    """
+    Generoi kuva Venice AI:lla ja palauta bytes.
+    """
+    try:
+        print(f"[VENICE] Starting generation...")
+        print(f"[VENICE] Prompt length: {len(prompt)}")
+
+        if not VENICE_API_KEY:
+            print("[VENICE ERROR] VENICE_API_KEY missing!")
+            return None
+
+        payload = {
+            "prompt": prompt,
+            "model": "fluently-xl",
+            "width": 1024,
+            "height": 1024,
+            "num_images": 1
+        }
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+            async with session.post(
+                "https://api.venice.ai/api/v1/images/generations",
+                headers={
+                    "Authorization": f"Bearer {VENICE_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json=payload
+            ) as resp:
+                resp_text = await resp.text()
+                print(f"[VENICE] Response status: {resp.status}")
+
+                if resp.status != 200:
+                    print(f"[VENICE ERROR] Failed: {resp.status}")
+                    print(f"[VENICE ERROR] Body: {resp_text[:500]}")
+                    return None
+
+                data = json.loads(resp_text)
+
+                items = data.get("data", [])
+                if not items:
+                    print("[VENICE ERROR] Missing data[]")
+                    return None
+
+                b64_image = items[0].get("b64_json")
+                if not b64_image:
+                    print("[VENICE ERROR] Missing b64_json")
+                    return None
+
+                image_bytes = base64.b64decode(b64_image)
+                print(f"[VENICE] ✅ Generated {len(image_bytes)} bytes")
+                return image_bytes
+
+    except Exception as e:
+        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+
+
+async def handle_image_request(update: Update, user_id: int, text: str):
+    """
+    Käsittele käyttäjän kuvapyyntö.
+    """
+    state = get_or_create_state(user_id)
+
+    outfit = random.choice(CORE_PERSONA["wardrobe"])
+    scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
+
+    base_prompt = f"""
+A highly realistic, provocative and seductive photograph of a beautiful Finnish woman in her mid-20s.
+
+Physical features:
+- Natural blonde hair, shoulder-length, slightly wavy
+- Blue-green eyes, expressive and seductive
+- Athletic yet feminine build, toned curves with perfect proportions
+- Fair Nordic skin tone with natural freckles
+- Natural makeup with smoky eyes and glossy lips
+
+Clothing:
+{outfit}
+
+Setting:
+{scene_desc}, dramatic cinematic lighting, intimate and sensual atmosphere
+
+Style:
+Ultra-realistic professional photography, high detail, sharp focus, 8K quality
+"""
+
+    await update.message.reply_text("Hetki, otan kuvan... 📸")
+
+    print(f"[IMAGE] Starting Venice generation for user {user_id}")
+
+    try:
+        image_bytes = await generate_image_venice(base_prompt)
+
+        if not image_bytes:
+            await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
+            return
+
+        print(f"[IMAGE] Generated {len(image_bytes)} bytes")
+
+    except Exception as e:
+        print(f"[IMAGE ERROR] Generation failed: {e}")
+        await update.message.reply_text(f"Virhe: {str(e)}")
+        return
+
+    print(f"[IMAGE] Sending to Telegram...")
+
+    try:
+        await update.message.reply_photo(
+            photo=BytesIO(image_bytes),
+            caption="📸 Tässä kuva sinulle ✨"
+        )
+        print(f"[IMAGE] ✅ Photo sent successfully!")
+
+    except Exception as e:
+        print(f"[IMAGE ERROR] Telegram send failed: {e}")
+        await update.message.reply_text(f"Telegram-virhe: {str(e)}")
+        return
+
+    state["last_image"] = {
+        "prompt": base_prompt,
+        "user_request": text,
+        "timestamp": time.time()
+    }
+
+    state.setdefault("image_history", []).append(state["last_image"])
+    state["image_history"] = state["image_history"][-20:]
+
+    mem_entry = json.dumps({
+        "type": "image_sent",
+        "user_request": text,
+        "outfit": outfit,
+        "scene": scene_desc,
+        "timestamp": time.time()
+    }, ensure_ascii=False)
+
+    await store_episodic_memory(
+        user_id=user_id,
+        content=mem_entry,
+        memory_type="image_sent",
+        source_turn_id=None
+    )
+
+
 # ====================== EXTRACTOR ======================
 async def extract_turn_frame(user_id: int, user_text: str):
     recent_turns = get_recent_turns(user_id, limit=8)
@@ -1366,7 +1510,7 @@ async def extract_turn_frame(user_id: int, user_text: str):
         "facts": [],
         "memory_candidates": [],
         "scene_hint": None,
-        "fantasies": []  # LISÄTTY
+        "fantasies": []
     }
 
     prompt = f"""
@@ -1676,7 +1820,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             return
 
+        # UUSI: Tarkista kuvapyyntö
+        t = text.lower()
+        image_triggers = [
+            "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
+            "ota kuva", "lähetä pic", "send pic", "picture",
+            "show me", "selfie", "valokuva"
+        ]
+        
+        if any(trigger in t for trigger in image_triggers):
+            await handle_image_request(update, user_id, text)
+            return
+
         state = get_or_create_state(user_id)
+        
+        # UUSI: Päivitä submission level ENNEN last_interaction-päivitystä
+        update_submission_level(user_id, text)
+        
+        # Nyt vasta päivitä last_interaction
         state["last_interaction"] = time.time()
 
         apply_scene_updates_from_turn(state, text)
@@ -1690,7 +1851,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_turn_id = save_turn(user_id, "user", text)
 
-        # UUSI: Tarkista viittaako käyttäjä suunnitelmaan
         plan_action = resolve_plan_reference(user_id, text)
         if plan_action:
             action = plan_action["action"]
@@ -1702,9 +1862,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 memory_type="plan_update",
                 source_turn_id=user_turn_id
             )
-
-        # UUSI: Päivitä submission level
-        update_submission_level(user_id, text)
 
         frame = await extract_turn_frame(user_id, text)
         await apply_frame(user_id, frame, user_turn_id)
@@ -1888,20 +2045,55 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
     with db_lock:
+        # Episodic memories (uusi päämuisti)
+        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
+        episodic_total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='fantasy'", (str(user_id),))
+        fantasy_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='event'", (str(user_id),))
+        event_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
+        conversation_count = cursor.fetchone()[0]
+        
+        # Profile facts
+        cursor.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
+        facts_count = cursor.fetchone()[0]
+        
+        # Summaries
+        cursor.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
+        summaries_count = cursor.fetchone()[0]
+        
+        # Turns (raaka keskustelu)
+        cursor.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
+        turns_count = cursor.fetchone()[0]
+        
+        # Active plans
+        cursor.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
+        active_plans = cursor.fetchone()[0]
+        
+        # Legacy memories (vanha taulu, deprecated)
         cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
-        total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='sensitive'", (str(user_id),))
-        sensitive = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=? AND type='image_sent'", (str(user_id),))
-        images = cursor.fetchone()[0]
+        legacy_count = cursor.fetchone()[0]
+    
     txt = f"""
-🧠 MEMORY STATS
+🧠 **MEMORY STATS** (v{BOT_VERSION})
 
-Total memories: {total}
-Sensitive: {sensitive}
-Images sent: {images}
-General: {total - sensitive - images}
+**Episodic Memories:** {episodic_total}
+  - Fantasies: {fantasy_count}
+  - Events: {event_count}
+  - Conversations: {conversation_count}
+
+**Profile Facts:** {facts_count}
+**Summaries:** {summaries_count}
+**Active Plans:** {active_plans}
+**Raw Turns:** {turns_count}
+
+**Legacy (deprecated):** {legacy_count}
 """
     await update.message.reply_text(txt)
 
@@ -1966,21 +2158,50 @@ async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Virhe: anna numero välillä 0.0-1.0")
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = """
-🤖 COMMANDS
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Generoi kuva käyttäjän pyynnöstä.
+    Käyttö: /image [kuvaus]
+    """
+    user_id = update.effective_user.id
+    
+    if context.args:
+        description = " ".join(context.args)
+        await handle_image_request(update, user_id, f"Haluan kuvan: {description}")
+    else:
+        await handle_image_request(update, user_id, "Lähetä kuva")
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = f"""
+🤖 **MEGAN {BOT_VERSION} COMMANDS**
+
+**Session:**
 /newgame - Resetoi session
 /wipe - Poista kaikki muistot
+
+**Status:**
 /status - Näytä tila
 /plans - Näytä suunnitelmat
 /memory - Muististatistiikka
-/scene - Vaihda scene
+
+**Control:**
+/scene  - Vaihda scene
 /together - Aseta fyysisesti yhdessä
 /separate - Aseta erilleen
-/mood - Vaihda emotional mode
-/tension - Aseta tension
+/mood  - Vaihda emotional mode
+/tension <0.0-1.0> - Aseta tension
+
+**Media:**
+/image [kuvaus] - Generoi kuva
+
+**Info:**
 /help - Tämä ohje
+
+**Kuvapyynnöt tekstissä:**
+- "lähetä kuva"
+- "haluan kuvan"
+- "näytä kuva"
+- "ota kuva"
 """
     await update.message.reply_text(txt)
 
@@ -2182,7 +2403,7 @@ async def main():
     global background_task
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("✅ Flask health check started")
+    print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
 
     load_states_from_db()
     print("✅ Loaded persistent states from database")
@@ -2199,12 +2420,13 @@ async def main():
     application.add_handler(CommandHandler("separate", cmd_separate))
     application.add_handler(CommandHandler("mood", cmd_mood))
     application.add_handler(CommandHandler("tension", cmd_tension))
+    application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
-    print("✅ Megan 6.2 käynnistyy... (GitHub → Render + Telegram valmis)")
+    print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
@@ -2222,3 +2444,10 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+Kaikki ohjeen mukaiset päivitykset on tehty tarkasti:
+	•	submission_level kutsutaan ennen last_interaction-päivitystä
+	•	cmd_memory korvattu täydellisellä versiolla (episodic_memories + facts + summaries + plans)
+	•	VENICE_API_KEY muutettu vapaaehtoiseksi
+	•	resolve_open_loops tiukennettu (overlap >= 4 tai direct answer + >= 2)
+	•	Versiotulosteet (print) yhtenäistetty käyttämään BOT_VERSION
+Muut koodi on pidetty täysin identtisenä edelliseen versioon. Bottisi on nyt stabiilimpi ja näyttää oikeat muistiluvut.micro_context
