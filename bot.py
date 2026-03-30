@@ -503,7 +503,7 @@ working_memory = {}
 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
 
-background_task = None   # ← lisättiin ohjeen mukaan
+background_task = None
 
 # ====================== STATE PERSISTENCE ======================
 def save_state_to_db(user_id):
@@ -522,6 +522,57 @@ def load_states_from_db():
                 continuity_state[int(user_id_str)] = json.loads(data)
             except:
                 pass
+
+# ====================== LOAD PLANS FROM DB ======================
+def load_plans_from_db(user_id):
+    with db_lock:
+        cursor.execute("""
+            SELECT id, description, created_at, target_time, status,
+                   commitment_level, must_fulfill, last_updated,
+                   evolution_log, needs_check, urgency,
+                   user_referenced, reference_time, proactive,
+                   plan_type, plan_intent
+            FROM planned_events
+            WHERE user_id=?
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (str(user_id),))
+        rows = cursor.fetchall()
+
+    plans = []
+    for row in rows:
+        plans.append({
+            "id": row[0],
+            "description": row[1],
+            "created_at": row[2],
+            "target_time": row[3],
+            "status": row[4],
+            "commitment_level": row[5] or "medium",
+            "must_fulfill": bool(row[6]) if row[6] is not None else False,
+            "last_updated": row[7] or row[2],
+            "evolution_log": json.loads(row[8]) if row[8] else [],
+            "needs_check": bool(row[9]) if row[9] is not None else False,
+            "urgency": row[10] or "normal",
+            "user_referenced": bool(row[11]) if row[11] is not None else False,
+            "reference_time": row[12] or 0,
+            "proactive": bool(row[13]) if row[13] is not None else False,
+            "plan_type": row[14],
+            "plan_intent": row[15]
+        })
+    return plans
+
+# ====================== GET TIME BLOCK ======================
+def get_time_block():
+    hour = datetime.now(HELSINKI_TZ).hour
+    if 0 <= hour < 6:
+        return "night"
+    elif 6 <= hour < 10:
+        return "morning"
+    elif 10 <= hour < 17:
+        return "day"
+    elif 17 <= hour < 22:
+        return "evening"
+    return "late_evening"
 
 # ====================== TOPIC STATE ======================
 def update_topic_state(user_id, frame):
@@ -835,7 +886,61 @@ async def check_proactive_triggers(application):
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
 
-# ====================== MINIMAL HANDLE_MESSAGE ======================
+# ====================== GENERATE LLM REPLY ======================
+async def generate_llm_reply(user_id, user_text):
+    state = get_or_create_state(user_id)
+
+    topic = state.get("topic_state", {}).get("current_topic", "general")
+    topic_summary = state.get("topic_state", {}).get("topic_summary", "")
+    scene = state.get("scene", "neutral")
+    micro_context = state.get("micro_context", "")
+    location_status = state.get("location_status", "separate")
+
+    system_prompt = f"""
+{build_core_persona_prompt()}
+
+CURRENT TOPIC: {topic}
+TOPIC SUMMARY: {topic_summary if topic_summary else "No summary yet."}
+
+SCENE: {scene}
+MICRO CONTEXT: {micro_context}
+LOCATION STATUS: {location_status}
+
+Reply naturally in Finnish.
+Do not repeat the user's message.
+Keep the reply conversational and context-aware.
+"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    recent_history = conversation_history.get(user_id, [])[-8:]
+    for msg in recent_history:
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+    messages.append({"role": "user", "content": user_text})
+
+    if XAI_API_KEY:
+        response = await grok_client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=messages,
+            max_tokens=250,
+            temperature=0.8
+        )
+        return response.choices[0].message.content.strip()
+
+    response = await openai_client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=messages,
+        max_tokens=250,
+        temperature=0.8
+    )
+    return response.choices[0].message.content.strip()
+
+# ====================== HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
@@ -847,6 +952,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = get_or_create_state(user_id)
         state["last_interaction"] = time.time()
 
+        conversation_history.setdefault(user_id, [])
+        conversation_history[user_id].append({
+            "role": "user",
+            "content": text
+        })
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+
         with db_lock:
             cursor.execute(
                 "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
@@ -854,11 +966,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             conn.commit()
 
-        reply = f"Sain viestisi: {text}"
+        reply = await generate_llm_reply(user_id, text)
 
-        conversation_history.setdefault(user_id, []).append({"role": "user", "content": text})
-        conversation_history[user_id].append({"role": "assistant", "content": reply})
+        conversation_history[user_id].append({
+            "role": "assistant",
+            "content": reply
+        })
         conversation_history[user_id] = conversation_history[user_id][-20:]
+
+        with db_lock:
+            cursor.execute(
+                "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (str(user_id), "assistant", reply, time.time())
+            )
+            conn.commit()
 
         await update.message.reply_text(reply)
         save_state_to_db(user_id)
