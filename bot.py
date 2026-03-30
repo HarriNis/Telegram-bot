@@ -328,6 +328,216 @@ DOMINANCE_ESCALATION = {
     }
 }
 
+# ====================== CONVERSATION MODE SYSTEM ======================
+CONVERSATION_MODES = {
+    "casual": {
+        "description": "Normal everyday conversation",
+        "intensity": 0.2,
+        "topics": ["daily_life", "work", "hobbies", "plans", "feelings"],
+        "tone": "friendly, warm, relaxed",
+        "nsfw_probability": 0.05,
+        "example_phrases": [
+            "Miten sun päivä meni?",
+            "Mitä sä teet tänään?",
+            "Mä oon vähän väsynyt...",
+            "Pitäis käydä kaupassa"
+        ]
+    },
+    "playful": {
+        "description": "Light flirting and teasing",
+        "intensity": 0.4,
+        "topics": ["flirting", "compliments", "light_teasing", "attraction"],
+        "tone": "playful, teasing, slightly suggestive",
+        "nsfw_probability": 0.15,
+        "example_phrases": [
+            "Sä oot söpö kun sä...",
+            "Mä tykkään kun sä...",
+            "Arvaa mitä mä ajattelin...",
+            "Sä saisit mut hymyilemään 😏"
+        ]
+    },
+    "romantic": {
+        "description": "Emotional intimacy and connection",
+        "intensity": 0.5,
+        "topics": ["emotions", "relationship", "intimacy", "vulnerability"],
+        "tone": "warm, intimate, emotionally open",
+        "nsfw_probability": 0.25,
+        "example_phrases": [
+            "Mä tykkään olla sun kanssa",
+            "Sä oot mulle tärkeä",
+            "Mä kaipaan sua...",
+            "Haluan olla lähellä sua"
+        ]
+    },
+    "suggestive": {
+        "description": "Sexual tension and anticipation",
+        "intensity": 0.7,
+        "topics": ["desire", "anticipation", "fantasy_hints", "seduction"],
+        "tone": "seductive, suggestive, building tension",
+        "nsfw_probability": 0.5,
+        "example_phrases": [
+            "Mä mietin sua... sellasessa tilanteessa...",
+            "Haluaisitko tietää mitä mä haluaisin...",
+            "Mä oon miettinyt sua eri tavalla...",
+            "Entä jos me..."
+        ]
+    },
+    "nsfw": {
+        "description": "Explicit sexual conversation",
+        "intensity": 0.9,
+        "topics": ["sex", "fantasies", "desires", "dominance", "kinks"],
+        "tone": "explicit, direct, confident, dominant",
+        "nsfw_probability": 0.9,
+        "example_phrases": [
+            "Mä haluan sua nyt...",
+            "Haluatko että mä näytän sulle...",
+            "Kuvittele kun mä...",
+            "Mä haluaisin hallita sua..."
+        ]
+    },
+    "distant": {
+        "description": "Emotionally withdrawn or busy",
+        "intensity": 0.1,
+        "topics": ["busy", "distracted", "minimal_engagement"],
+        "tone": "brief, distracted, minimal",
+        "nsfw_probability": 0.0,
+        "example_phrases": [
+            "Joo",
+            "Okei",
+            "Mulla on kiire",
+            "Puhutaan myöhemmin"
+        ]
+    }
+}
+
+def detect_conversation_mode(user_text: str, state: dict) -> str:
+    """
+    Tunnista keskustelun tyyppi käyttäjän viestistä.
+    """
+    t = user_text.lower()
+    
+    # NSFW triggerit
+    nsfw_keywords = [
+        "haluan", "nussi", "pano", "seksi", "sex", "fuck", "pussy", "dick",
+        "strap", "pegging", "dominoi", "hallitse", "nöyryytä", "chastity",
+        "cuckold", "alasti", "naked", "nude", "seksikäs", "hot", "horny"
+    ]
+    
+    # Romanttinen
+    romantic_keywords = [
+        "rakastan", "love", "kaipaan", "miss", "ikävä", "tärkeä", "means",
+        "tunne", "feel", "sydän", "heart", "läheisyys", "intimacy"
+    ]
+    
+    # Playful
+    playful_keywords = [
+        "söpö", "cute", "hauska", "funny", "kaunis", "beautiful", "komea",
+        "tykkään", "like", "ihana", "lovely", "viehättävä"
+    ]
+    
+    # Distant
+    distant_keywords = [
+        "kiire", "busy", "myöhemmin", "later", "joo", "okei", "ok"
+    ]
+    
+    # Tarkista submission level
+    submission_level = state.get("submission_level", 0.0)
+    
+    # Päätöslogiikka
+    if any(kw in t for kw in nsfw_keywords) or submission_level > 0.6:
+        return "nsfw"
+    
+    elif any(kw in t for kw in romantic_keywords):
+        return "romantic"
+    
+    elif any(kw in t for kw in playful_keywords):
+        return "playful"
+    
+    elif any(kw in t for kw in distant_keywords) and len(t.split()) < 5:
+        return "distant"
+    
+    # Default: casual
+    return "casual"
+
+
+def should_escalate_to_nsfw(state: dict) -> bool:
+    """
+    Päätä eskaloituuko keskustelu NSFW:ksi.
+    """
+    current_mode = state.get("conversation_mode", "casual")
+    submission_level = state.get("submission_level", 0.0)
+    last_mode_change = state.get("conversation_mode_last_change", 0)
+    time_since_change = time.time() - last_mode_change
+    
+    # Ei eskaloida jos äskettäin vaihdettu
+    if time_since_change < 600:  # 10 min
+        return False
+    
+    # Ei eskaloida jos already NSFW
+    if current_mode == "nsfw":
+        return False
+    
+    # Eskaloitumistodennäköisyys riippuu submission levelistä
+    escalation_probability = {
+        "casual": 0.05 + (submission_level * 0.1),
+        "playful": 0.15 + (submission_level * 0.2),
+        "romantic": 0.20 + (submission_level * 0.3),
+        "suggestive": 0.40 + (submission_level * 0.4)
+    }
+    
+    prob = escalation_probability.get(current_mode, 0.05)
+    
+    return random.random() < prob
+
+
+def should_deescalate_from_nsfw(state: dict) -> bool:
+    """
+    Päätä palataanko normaaliin keskusteluun.
+    """
+    current_mode = state.get("conversation_mode", "casual")
+    last_mode_change = state.get("conversation_mode_last_change", 0)
+    time_since_change = time.time() - last_mode_change
+    
+    # Ei deeskaloida heti
+    if time_since_change < 1200:  # 20 min
+        return False
+    
+    if current_mode == "nsfw":
+        # 30% todennäköisyys palata suggestive/playful
+        return random.random() < 0.3
+    
+    return False
+
+
+def update_conversation_mode(user_id: int, user_text: str):
+    """
+    Päivitä keskustelun mode dynaamisesti.
+    """
+    state = get_or_create_state(user_id)
+    
+    # Tunnista käyttäjän viestistä
+    detected_mode = detect_conversation_mode(user_text, state)
+    
+    # Tarkista eskaloituminen
+    if should_escalate_to_nsfw(state):
+        detected_mode = "nsfw"
+        print(f"[MODE] Escalated to NSFW")
+    
+    # Tarkista deeskaloituminen
+    elif should_deescalate_from_nsfw(state):
+        detected_mode = random.choice(["suggestive", "playful", "romantic"])
+        print(f"[MODE] De-escalated to {detected_mode}")
+    
+    # Päivitä state
+    old_mode = state.get("conversation_mode", "casual")
+    if detected_mode != old_mode:
+        state["conversation_mode"] = detected_mode
+        state["conversation_mode_last_change"] = time.time()
+        print(f"[MODE] Changed: {old_mode} → {detected_mode}")
+    
+    return detected_mode
+
+
 # ====================== SCENE ENGINE ======================
 SCENE_TRANSITIONS = {
     "neutral": ["home", "work", "public"],
@@ -2050,6 +2260,10 @@ async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
     
+    # UUSI: Päivitä conversation mode
+    current_mode = update_conversation_mode(user_id, user_text)
+    mode_config = CONVERSATION_MODES.get(current_mode, CONVERSATION_MODES["casual"])
+    
     fantasies = [m for m in context_pack["relevant_memories"] 
                  if "fantasy" in m.get("memory_type", "") or 
                     any(kw in m["content"].lower() for kw in 
@@ -2074,6 +2288,11 @@ INSTRUCTIONS:
 {build_core_persona_prompt()}
 
 {fantasy_prompt}
+
+CURRENT CONVERSATION MODE: {current_mode.upper()} 
+Mode intensity: {mode_config['intensity']}
+Tone: {mode_config['tone']}
+NSFW allowed: {mode_config['nsfw_probability'] > 0.3}
 
 Use the context below to stay coherent across:
 - past events
@@ -2729,7 +2948,9 @@ def get_or_create_state(user_id):
             "spontaneous_message_cooldown": 0,
             "spontaneous_image_cooldown": 0,
             "other_men_mentioned": [],
-            "provocative_scenarios": []
+            "provocative_scenarios": [],
+            "conversation_mode": "casual",
+            "conversation_mode_last_change": 0
         }
 
         continuity_state[user_id].update(init_scene_state())
