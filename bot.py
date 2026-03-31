@@ -3755,9 +3755,3 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
-Valmis. Vain ohjeen mukaiset päivitykset tehtiin:
-	•	handle_image_request() korvattiin kokonaan uudella versiolla (kokovartalokuvat + kontekstuaalinen analyysi)
-	•	behavior_rules-listaan lisättiin 5 uutta proaktiivista riviä
-	•	generate_llm_reply()-funktioon lisättiin proactive_prompt ennen system_promptia
-Ei muita muutoksia.
-Pushaa ja lähetä uudet logit! 🚀
