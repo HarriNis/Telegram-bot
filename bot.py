@@ -34,8 +34,12 @@ def health_check():
     return "Megan is alive 💕", 200
 
 def run_flask():
+    print("[FLASK] Starting Flask server...")
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        print(f"[FLASK ERROR] {e}")
 
 # ====================== ASETUKSET ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -3311,14 +3315,17 @@ async def main():
     global background_task
     
     print("[MAIN] ===== STARTING MAIN FUNCTION =====")
-    print("[MAIN] Step 1: Starting Flask...")
+    print("[MAIN] Step 1: Starting Flask thread...")
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("[MAIN] Step 2: Flask started")
+    
+    print("[MAIN] Step 2: Waiting for Flask to initialize...")
+    await asyncio.sleep(2)
+    print("[MAIN] Step 3: Flask should be running now")
 
-    print("[MAIN] Step 3: Skipping migration for now...")
-    print("[MAIN] Step 4: Skipping state loading for now...")
+    print("[MAIN] Step 4: Skipping migration for now...")
+    print("[MAIN] Step 5: Skipping state loading for now...")
     
     # VENICE-TESTI (PAKKO AJAA HETI)
     print("[MAIN] ===== VENICE TEST START =====")
@@ -3349,23 +3356,23 @@ async def main():
     print("[VENICE TEST] ===== TEST COMPLETE =====")
     
     # NYT AJA MIGRAATIO JA STATE LOADING
-    print("[MAIN] Step 5: Now running migration...")
+    print("[MAIN] Step 6: Now running migration...")
     try:
         migrate_database()
     except Exception as e:
         print(f"[MAIN] Migration error: {e}")
     
-    print("[MAIN] Step 6: Now loading states...")
+    print("[MAIN] Step 7: Now loading states...")
     try:
         load_states_from_db()
     except Exception as e:
         print(f"[MAIN] Load states error: {e}")
 
     # TELEGRAM BOT
-    print("[MAIN] Step 7: Building Telegram application...")
+    print("[MAIN] Step 8: Building Telegram application...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    print("[MAIN] Step 8: Adding handlers...")
+    print("[MAIN] Step 9: Adding handlers...")
     application.add_handler(CommandHandler("newgame", cmd_new_game))
     application.add_handler(CommandHandler("wipe", cmd_wipe))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -3380,10 +3387,10 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("[MAIN] Step 9: Starting background task...")
+    print("[MAIN] Step 10: Starting background task...")
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
-    print("[MAIN] Step 10: Initializing Telegram bot...")
+    print("[MAIN] Step 11: Initializing Telegram bot...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
