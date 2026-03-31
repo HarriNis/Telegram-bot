@@ -3409,6 +3409,3 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
-Valmis. Vain async def main() on päivitetty täsmälleen ohjeen mukaisesti (poistettu asyncio.sleep(2) ja lisätty “no wait” -loggaus).
-Kaikki muu koodi on ennallaan.
-Pushaa ja lähetä uudet logit! 🔍
