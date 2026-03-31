@@ -3755,10 +3755,3 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
-Valmis. Vain ohjeen mukaiset päivitykset tehtiin:
-	•	should_ignore_message() korvattu uudella realistisemmalla versiolla
-	•	Lisätty generate_ignore_response()
-	•	handle_message()-funktion ignore-lohko korvattu uudella (viestien tallennus)
-	•	continue_spontaneous_narrative() korvattu uudella versiolla (käsittelee pending-viestejä)
-Ei muita muutoksia.
-Pushaa ja lähetä uudet logit! 🚀
