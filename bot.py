@@ -9,6 +9,7 @@ import base64
 import logging
 import traceback
 import aiohttp
+import replicate
 from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -2106,8 +2107,6 @@ async def generate_image_replicate(prompt: str):
         if not REPLICATE_API_KEY:
             print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
             return None
-        
-        import replicate
         
         # FLUX PRO v1.1 ULTRA - paras laatu + NSFW-tuki
         model = "black-forest-labs/flux-1.1-pro-ultra"
