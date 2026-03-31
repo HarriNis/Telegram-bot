@@ -1777,6 +1777,9 @@ def update_submission_level(user_id: int, user_text: str):
 # ====================== JEALOUSY & PROVOCATION ENGINE ======================
 
 def update_jealousy_mode(user_id: int):
+    """
+    UUSI: Jealousy mode aktivoituu HARVOIN (vain jos todella pitkä hiljaisuus).
+    """
     state = get_or_create_state(user_id)
     
     location_status = state.get("location_status", "separate")
@@ -1790,16 +1793,20 @@ def update_jealousy_mode(user_id: int):
     last_interaction = state.get("last_interaction", time.time())
     hours_since = (time.time() - last_interaction) / 3600
     
-    if hours_since > 2:
-        state["ignore_probability"] = min(0.7, 0.1 + (hours_since * 0.1))
+    # UUSI: Ignore probability vain jos TODELLA pitkä hiljaisuus (12h+)
+    if hours_since > 12:
+        state["ignore_probability"] = min(0.5, 0.05 + (hours_since * 0.02))
     else:
-        state["ignore_probability"] = 0.1
+        state["ignore_probability"] = 0.0
     
-    if random.random() < 0.15 and submission_level < 0.5:
+    # UUSI: Jealousy mode aktivoituu vain HARVOIN (5% todennäköisyys)
+    # JA vain jos pitkä hiljaisuus (6h+)
+    if hours_since > 6 and random.random() < 0.05 and submission_level < 0.5:
         state["jealousy_mode"] = True
-        state["jealousy_intensity"] = random.uniform(0.3, 0.8)
-        print(f"[JEALOUSY] Mode activated: intensity {state['jealousy_intensity']:.2f}")
+        state["jealousy_intensity"] = random.uniform(0.3, 0.7)
+        print(f"[JEALOUSY] Mode activated: intensity {state['jealousy_intensity']:.2f} (after {hours_since:.1f}h silence)")
     
+    # Deaktivointi (30% todennäköisyys)
     if state.get("jealousy_mode") and random.random() < 0.3:
         state["jealousy_mode"] = False
         print("[JEALOUSY] Mode deactivated")
@@ -1807,7 +1814,8 @@ def update_jealousy_mode(user_id: int):
 
 def should_ignore_message(user_id: int) -> bool:
     """
-    UUSI: Tarkista pitääkö ignoorata viesti VAIN jos on aktiivinen spontaani narratiivi.
+    UUSI: Ignooraa viesti VAIN jos on aktiivinen spontaani narratiivi.
+    Ignore-aika: 5-30 min (realistinen).
     """
     state = get_or_create_state(user_id)
     
@@ -1825,12 +1833,17 @@ def should_ignore_message(user_id: int) -> bool:
     last_spontaneous_message = narrative.get("last_update", 0)
     time_since_spontaneous = time.time() - last_spontaneous_message
     
-    # Ignooraa vain jos spontaani viesti lähetettiin alle 5 min sitten
-    if time_since_spontaneous < 300:  # 5 minuuttia
-        # Satunnaisesti ignooraa (70% todennäköisyys)
-        if random.random() < 0.7:
-            print(f"[IGNORE] Ignoring message during active narrative (sent {int(time_since_spontaneous/60)} min ago)")
+    # UUSI: Ignooraa vain 5-30 min (realistinen aika)
+    ignore_duration = narrative.get("ignore_duration", random.randint(300, 1800))  # 5-30 min
+    
+    if time_since_spontaneous < ignore_duration:
+        # Satunnaisesti ignooraa (60% todennäköisyys)
+        if random.random() < 0.6:
+            print(f"[IGNORE] Ignoring message during narrative ({int(time_since_spontaneous/60)}/{int(ignore_duration/60)} min)")
             return True
+    else:
+        # Ignore-aika ohi, deaktivoi automaattisesti
+        print(f"[IGNORE] Ignore period ended ({int(time_since_spontaneous/60)} min)")
     
     return False
 
@@ -1914,6 +1927,8 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         "started_at": now,
         "last_update": now,
         "progression": 0.1,
+        "user_attempts": 0,  # UUSI: Laske montako kertaa käyttäjä yritti
+        "ignore_duration": random.randint(300, 1800),  # UUSI: 5-30 min ignore-aika
         "details": {
             "intensity": intensity,
             "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
@@ -2063,10 +2078,7 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
 
 async def maybe_send_spontaneous_message(application, user_id: int):
     """
-    UUSI: Lähetä spontaani viesti VAIN jos:
-    1. Ollaan erillään
-    2. Ei ole aktiivista keskustelua (30+ min hiljaisuus)
-    3. Ei ole aktiivista narratiivia ELLER narratiivi tarvitsee jatkoa
+    UUSI: Lähetä spontaani viesti HARVOIN (1-7 päivää välein).
     """
     state = get_or_create_state(user_id)
     
@@ -2082,20 +2094,25 @@ async def maybe_send_spontaneous_message(application, user_id: int):
         print(f"[SPONTANEOUS] Skipped: recent activity ({int(time_since_interaction/60)} min ago)")
         return
     
-    # Tarkista cooldown
+    # UUSI: Pitkä cooldown (1-7 päivää)
     cooldown = state.get("spontaneous_message_cooldown", 0)
     if time.time() < cooldown:
+        remaining_hours = (cooldown - time.time()) / 3600
+        print(f"[SPONTANEOUS] Cooldown active: {remaining_hours:.1f}h remaining")
         return
     
-    # Tarkista jealousy mode
-    if not state.get("jealousy_mode") and random.random() > 0.1:
+    # UUSI: Hyvin pieni todennäköisyys (2% per check = ~1-2 kertaa viikossa)
+    if random.random() > 0.02:  # 2% todennäköisyys
         return
     
-    # Todennäköisyys
-    if random.random() > 0.3:  # 30% todennäköisyys
-        return
-    
+    # Tarkista jealousy mode (ei pakollinen enää)
+    # Voi lähettää spontaaneja viestejä myös ilman jealousy modea
     intensity = state.get("jealousy_intensity", 0.5)
+    
+    # Jos ei jealousy mode, käytä matalampaa intensiteettiä
+    if not state.get("jealousy_mode"):
+        intensity = random.uniform(0.2, 0.5)
+    
     narrative = state.get("spontaneous_narrative", {})
     
     # Valitse: aloita uusi vai jatka vanhaa
@@ -2116,8 +2133,10 @@ async def maybe_send_spontaneous_message(application, user_id: int):
         )
         print(f"[SPONTANEOUS] Sent: {message[:60]}")
         
-        # Päivitä cooldown (1-3h)
-        state["spontaneous_message_cooldown"] = time.time() + random.randint(3600, 10800)
+        # UUSI: Pitkä cooldown (1-7 päivää)
+        cooldown_hours = random.randint(24, 168)  # 1-7 päivää
+        state["spontaneous_message_cooldown"] = time.time() + (cooldown_hours * 3600)
+        print(f"[SPONTANEOUS] Next possible in {cooldown_hours}h ({cooldown_hours/24:.1f} days)")
         
         # Tallenna muistiin
         await store_episodic_memory(
@@ -2903,10 +2922,11 @@ User ID: {update.effective_user.id if update and update.effective_user else 'N/A
 async def check_proactive_triggers(application):
     while True:
         try:
-            await asyncio.sleep(60)
+            # UUSI: Tarkista vain kerran tunnissa (ei joka minuutti)
+            await asyncio.sleep(3600)  # 1 tunti
             now_ts = time.time()
 
-            # PLAN REMINDERS
+            # PLAN REMINDERS (säilyy samana)
             with db_lock:
                 cursor.execute("""
                     SELECT user_id, id, description, target_time, status, 
@@ -2951,12 +2971,14 @@ async def check_proactive_triggers(application):
                 except Exception as e:
                     print(f"[PLAN REMINDER ERROR] {e}")
 
-            # SPONTANEOUS MESSAGES & IMAGES
+            # SPONTANEOUS MESSAGES & IMAGES (harvemmin)
             for user_id in list(continuity_state.keys()):
                 try:
                     update_jealousy_mode(user_id)
                     await maybe_send_spontaneous_message(application, user_id)
-                    await maybe_send_spontaneous_image(application, user_id)
+                    # Kuvat vielä harvemmin (ei tarvita usein)
+                    if random.random() < 0.1:  # 10% todennäköisyys
+                        await maybe_send_spontaneous_image(application, user_id)
                 except Exception as e:
                     print(f"[SPONTANEOUS ERROR for user {user_id}] {e}")
 
