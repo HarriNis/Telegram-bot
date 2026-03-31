@@ -2105,11 +2105,15 @@ async def generate_image_venice(prompt: str):
         
         print(f"[VENICE] Payload: {json.dumps(payload, indent=2)}")
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        # MUUTETTU: Kokeile ilman /api
+        endpoint = "https://api.venice.ai/v1/images/generations"
+        print(f"[VENICE] Endpoint: {endpoint}")
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
             print(f"[VENICE] Sending POST request to Venice API...")
             
             async with session.post(
-                "https://api.venice.ai/api/v1/images/generations",
+                endpoint,
                 headers={
                     "Authorization": f"Bearer {VENICE_API_KEY}",
                     "Content-Type": "application/json"
@@ -2166,7 +2170,7 @@ async def generate_image_venice(prompt: str):
         traceback.print_exc()
         return None
     except asyncio.TimeoutError:
-        print(f"[VENICE ERROR] Request timeout (120s)")
+        print(f"[VENICE ERROR] Request timeout (180s)")
         return None
     except Exception as e:
         print(f"[VENICE ERROR] Unexpected error: {type(e).__name__}: {e}")
@@ -3312,13 +3316,25 @@ async def main():
     flask_thread.start()
     print(f"[MAIN] Flask started")
 
-    # OHITA MIGRAATIO NOPEUTEEN
-    print("[MAIN] Skipping migration for now...")
+    # MIGRAATIO
+    print("[MAIN] Running migration...")
+    try:
+        migrate_database()
+        print("[MAIN] Migration done")
+    except Exception as e:
+        print(f"[MAIN] Migration error: {e}")
+        traceback.print_exc()
+
+    # LATAA STATES
+    print("[MAIN] Loading states...")
+    try:
+        load_states_from_db()
+        print("[MAIN] States loaded")
+    except Exception as e:
+        print(f"[MAIN] Load states error: {e}")
+        traceback.print_exc()
     
-    # OHITA STATE LOADING
-    print("[MAIN] Skipping state loading for now...")
-    
-    # VENICE-TESTI (PAKKO AJAA HETI)
+    # VENICE-TESTI (PAKKO AJAA)
     print("[MAIN] ===== VENICE TEST START =====")
     print(f"[VENICE TEST] ===== STARTING TEST =====")
     
@@ -3344,19 +3360,7 @@ async def main():
         print("[VENICE TEST] ⚠️ No API key set")
     
     print("[VENICE TEST] ===== TEST COMPLETE =====")
-    
-    # NYT AJA MIGRAATIO JA STATE LOADING
-    print("[MAIN] Now running migration...")
-    try:
-        migrate_database()
-    except Exception as e:
-        print(f"[MAIN] Migration error: {e}")
-    
-    print("[MAIN] Now loading states...")
-    try:
-        load_states_from_db()
-    except Exception as e:
-        print(f"[MAIN] Load states error: {e}")
+    print("[MAIN] ===== VENICE TEST DONE =====")
 
     # TELEGRAM BOT
     print("[MAIN] Building Telegram application...")
@@ -3398,4 +3402,4 @@ async def main():
         await application.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())
