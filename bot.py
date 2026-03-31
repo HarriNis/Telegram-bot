@@ -3311,32 +3311,18 @@ async def main():
     global background_task
     
     print("[MAIN] ===== STARTING MAIN FUNCTION =====")
+    print("[MAIN] Step 1: Starting Flask...")
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print(f"[MAIN] Flask started")
+    print("[MAIN] Step 2: Flask started")
 
-    # MIGRAATIO
-    print("[MAIN] Running migration...")
-    try:
-        migrate_database()
-        print("[MAIN] Migration done")
-    except Exception as e:
-        print(f"[MAIN] Migration error: {e}")
-        traceback.print_exc()
-
-    # LATAA STATES
-    print("[MAIN] Loading states...")
-    try:
-        load_states_from_db()
-        print("[MAIN] States loaded")
-    except Exception as e:
-        print(f"[MAIN] Load states error: {e}")
-        traceback.print_exc()
+    print("[MAIN] Step 3: Skipping migration for now...")
+    print("[MAIN] Step 4: Skipping state loading for now...")
     
-    # VENICE-TESTI (PAKKO AJAA)
+    # VENICE-TESTI (PAKKO AJAA HETI)
     print("[MAIN] ===== VENICE TEST START =====")
-    print(f"[VENICE TEST] ===== STARTING TEST =====")
+    print("[VENICE TEST] ===== STARTING TEST =====")
     
     if VENICE_API_KEY:
         print(f"[VENICE TEST] API Key present: {bool(VENICE_API_KEY)}")
@@ -3346,8 +3332,9 @@ async def main():
         test_prompt = "A simple test image of a red apple on a white background"
         
         try:
-            print("[VENICE TEST] Calling generate_image_venice...")
+            print("[VENICE TEST] About to call generate_image_venice...")
             test_result = await generate_image_venice(test_prompt)
+            print("[VENICE TEST] generate_image_venice returned")
             
             if test_result:
                 print(f"[VENICE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
@@ -3360,12 +3347,25 @@ async def main():
         print("[VENICE TEST] ⚠️ No API key set")
     
     print("[VENICE TEST] ===== TEST COMPLETE =====")
-    print("[MAIN] ===== VENICE TEST DONE =====")
+    
+    # NYT AJA MIGRAATIO JA STATE LOADING
+    print("[MAIN] Step 5: Now running migration...")
+    try:
+        migrate_database()
+    except Exception as e:
+        print(f"[MAIN] Migration error: {e}")
+    
+    print("[MAIN] Step 6: Now loading states...")
+    try:
+        load_states_from_db()
+    except Exception as e:
+        print(f"[MAIN] Load states error: {e}")
 
     # TELEGRAM BOT
-    print("[MAIN] Building Telegram application...")
+    print("[MAIN] Step 7: Building Telegram application...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    print("[MAIN] Step 8: Adding handlers...")
     application.add_handler(CommandHandler("newgame", cmd_new_game))
     application.add_handler(CommandHandler("wipe", cmd_wipe))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -3380,15 +3380,15 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("[MAIN] Starting background task...")
+    print("[MAIN] Step 9: Starting background task...")
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
-    print(f"[MAIN] Initializing Telegram bot...")
+    print("[MAIN] Step 10: Initializing Telegram bot...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
-    print(f"[MAIN] ✅ Bot is now running!")
+    print("[MAIN] ✅ Bot is now running!")
 
     try:
         await asyncio.Event().wait()
@@ -3401,5 +3401,7 @@ async def main():
         await application.stop()
         await application.shutdown()
 
+
 if __name__ == "__main__":
+    print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
