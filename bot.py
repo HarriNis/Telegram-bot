@@ -2235,8 +2235,10 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
 
 async def generate_image_venice(prompt: str):
     try:
-        print(f"[VENICE] Starting generation...")
-        print(f"[VENICE] Prompt length: {len(prompt)}")
+        print(f"[VENICE] ===== IMAGE GENERATION START =====")
+        print(f"[VENICE] Prompt: {prompt[:200]}...")
+        print(f"[VENICE] API Key present: {bool(VENICE_API_KEY)}")
+        print(f"[VENICE] API Key length: {len(VENICE_API_KEY) if VENICE_API_KEY else 0}")
 
         if not VENICE_API_KEY:
             print("[VENICE ERROR] VENICE_API_KEY missing!")
@@ -2249,8 +2251,12 @@ async def generate_image_venice(prompt: str):
             "height": 1024,
             "num_images": 1
         }
+        
+        print(f"[VENICE] Payload: {json.dumps(payload, indent=2)}")
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+            print(f"[VENICE] Sending POST request to Venice API...")
+            
             async with session.post(
                 "https://api.venice.ai/api/v1/images/generations",
                 headers={
@@ -2261,30 +2267,58 @@ async def generate_image_venice(prompt: str):
             ) as resp:
                 resp_text = await resp.text()
                 print(f"[VENICE] Response status: {resp.status}")
+                print(f"[VENICE] Response headers: {dict(resp.headers)}")
+                print(f"[VENICE] Response body (first 1000 chars): {resp_text[:1000]}")
 
                 if resp.status != 200:
-                    print(f"[VENICE ERROR] Failed: {resp.status}")
-                    print(f"[VENICE ERROR] Body: {resp_text[:500]}")
+                    print(f"[VENICE ERROR] HTTP {resp.status}")
+                    print(f"[VENICE ERROR] Full response: {resp_text}")
                     return None
 
-                data = json.loads(resp_text)
+                try:
+                    data = json.loads(resp_text)
+                    print(f"[VENICE] Parsed JSON keys: {list(data.keys())}")
+                except json.JSONDecodeError as e:
+                    print(f"[VENICE ERROR] JSON decode failed: {e}")
+                    print(f"[VENICE ERROR] Raw response: {resp_text}")
+                    return None
 
                 items = data.get("data", [])
+                print(f"[VENICE] Data items count: {len(items)}")
+                
                 if not items:
-                    print("[VENICE ERROR] Missing data[]")
+                    print(f"[VENICE ERROR] No items in data[]")
+                    print(f"[VENICE ERROR] Full response: {json.dumps(data, indent=2)}")
                     return None
 
+                print(f"[VENICE] First item keys: {list(items[0].keys())}")
+                
                 b64_image = items[0].get("b64_json")
                 if not b64_image:
-                    print("[VENICE ERROR] Missing b64_json")
+                    print(f"[VENICE ERROR] Missing b64_json")
+                    print(f"[VENICE ERROR] Item content: {json.dumps(items[0], indent=2)[:500]}")
                     return None
 
-                image_bytes = base64.b64decode(b64_image)
-                print(f"[VENICE] ✅ Generated {len(image_bytes)} bytes")
-                return image_bytes
+                print(f"[VENICE] b64_json length: {len(b64_image)}")
+                
+                try:
+                    image_bytes = base64.b64decode(b64_image)
+                    print(f"[VENICE] ✅ Successfully decoded {len(image_bytes)} bytes")
+                    print(f"[VENICE] ===== IMAGE GENERATION SUCCESS =====")
+                    return image_bytes
+                except Exception as e:
+                    print(f"[VENICE ERROR] Base64 decode failed: {e}")
+                    return None
 
+    except aiohttp.ClientError as e:
+        print(f"[VENICE ERROR] Network error: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+    except asyncio.TimeoutError:
+        print(f"[VENICE ERROR] Request timeout (120s)")
+        return None
     except Exception as e:
-        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
+        print(f"[VENICE ERROR] Unexpected error: {type(e).__name__}: {e}")
         traceback.print_exc()
         return None
 
@@ -3441,6 +3475,18 @@ async def main():
 
     load_states_from_db()
     print("✅ Loaded persistent states from database")
+    
+    # UUSI: Testaa Venice API
+    if VENICE_API_KEY:
+        print("[VENICE TEST] Testing API key...")
+        test_prompt = "A simple test image of a red apple on a white background"
+        test_result = await generate_image_venice(test_prompt)
+        if test_result:
+            print(f"[VENICE TEST] ✅ API working! Generated {len(test_result)} bytes")
+        else:
+            print(f"[VENICE TEST] ❌ API test failed - check logs above")
+    else:
+        print("[VENICE TEST] ⚠️ No API key set")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
