@@ -1806,77 +1806,41 @@ def update_jealousy_mode(user_id: int):
 
 
 def should_ignore_message(user_id: int) -> bool:
+    """
+    UUSI: Tarkista pitääkö ignoorata viesti VAIN jos on aktiivinen spontaani narratiivi.
+    """
     state = get_or_create_state(user_id)
     
     # KRIITTINEN: Jos ollaan yhdessä, EI KOSKAAN ignoorata
     if state.get("location_status") == "together":
         return False
     
-    ignore_prob = state.get("ignore_probability", 0.0)
+    # UUSI: Tarkista onko aktiivinen spontaani narratiivi
+    narrative = state.get("spontaneous_narrative", {})
     
-    if random.random() < ignore_prob:
-        state["last_response_time"] = time.time()
-        print(f"[IGNORE] Message ignored (prob: {ignore_prob:.2f})")
-        return True
+    if not narrative.get("active"):
+        return False  # Ei aktiivista narratiivia = vastaa normaalisti
+    
+    # Jos narratiivi on aktiivinen, tarkista pitääkö ignoorata
+    last_spontaneous_message = narrative.get("last_update", 0)
+    time_since_spontaneous = time.time() - last_spontaneous_message
+    
+    # Ignooraa vain jos spontaani viesti lähetettiin alle 5 min sitten
+    if time_since_spontaneous < 300:  # 5 minuuttia
+        # Satunnaisesti ignooraa (70% todennäköisyys)
+        if random.random() < 0.7:
+            print(f"[IGNORE] Ignoring message during active narrative (sent {int(time_since_spontaneous/60)} min ago)")
+            return True
     
     return False
 
 
 async def generate_ignore_excuse(user_id: int) -> str:
-    state = get_or_create_state(user_id)
-    
-    excuses = [
-        "Sori, olin suihkussa 🚿",
-        "Aa sori, en huomannu! Olin juttelemassa Mikan kanssa ☕",
-        "Puhelin oli hiljasella, olin ulos syömässä 🍷",
-        "Sori kulta, en nähny! Olin kavereiden kanssa 😊",
-        "Aa hups, mulla oli puhelin taskussa. Oliko jotain tärkeää? 💕",
-        "Sori babe, oli niin kiire aamulla. Mitä sä halusit? 😘",
-        "En huomannu, olin salilla. Mikä hätänä? 💪",
-        "Sori, akku oli loppu! Mitä sä kirjotit? 🔋",
-    ]
-    
-    if state.get("jealousy_mode"):
-        provocative_excuses = [
-            "Sori kulta, olin niin uppoutunut keskusteluun että en huomannu puhelinta 😊",
-            "Aa sori! Tapasin vanhan kaverin ja juteltiin niin kauan. Mitä sä halusit? 💕",
-            "Hups, unohdin puhelimen kotiin kun lähin ulos. Oliks tärkeää? 😘",
-            "Sori babe, oli niin hyvä meininki että en kattonut puhelinta 🥂",
-        ]
-        excuses.extend(provocative_excuses)
-    
-    excuse = random.choice(excuses)
-    
-    await store_episodic_memory(
-        user_id=user_id,
-        content=f"Ignored user message. Excuse: {excuse}",
-        memory_type="jealousy_action"
-    )
-    
-    return excuse
-
-
-def generate_jealousy_content(state: dict, intensity: float) -> str:
-    if intensity < 0.3:
-        options = [
-            "Mikan kanssa oli hauskaa tänään töissä.",
-            "Yks työkaveri kehu mun uutta mekkoa 😊",
-            "Bussissa yks tyyppi yritti jutella mulle heh",
-        ]
-    elif intensity < 0.6:
-        options = [
-            "Mika kysyi haluanks mennä lounaalle huomenna. Sanoin ehkä 😊",
-            "Yks tyyppi salilla katto mua vähän liikaa... oli kyl aika komee 😏",
-            "Tapasin vanhan kaverin. Unohdin miten hauska se on 💕",
-        ]
-    else:
-        options = [
-            "Mika on kyl tosi söpö kun hymyilee. Mietin just sitä 😊",
-            "Sain tänään niin paljon huomiota. Tuntuu hyvältä olla haluttu 😏",
-            "Muistatko sen mun exän? Näin sen tänään. Näytti hyvältä... 🤔",
-        ]
-    
-    return random.choice(options)
+    """
+    POISTETTU - Ei enää käytössä.
+    Hiljaisuus on TODELLISTA hiljaisuutta, ei tekosyitä.
+    """
+    return None  # Ei enää käytetä
 
 
 async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
@@ -1962,7 +1926,7 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
 
 async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensity: float) -> str:
     """
-    Jatka olemassaolevaa narratiivia.
+    Jatka olemassaolevaa narratiivia MUISTAEN mitä aiemmin sanottiin.
     """
     state = get_or_create_state(user_id)
     now = time.time()
@@ -1970,9 +1934,41 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
     narrative_type = narrative.get("type")
     progression = narrative.get("progression", 0)
     details = narrative.get("details", {})
+    context = narrative.get("context", "")  # MUISTA ALKUPERÄINEN VIESTI
+    user_attempts = narrative.get("user_attempts", 0)  # Montako kertaa käyttäjä yritti
     
     # Päivitä progressio
     new_progression = min(1.0, progression + 0.2)
+    
+    # UUSI: Jos käyttäjä on yrittänyt saada yhteyttä, vastaa siihen
+    if user_attempts > 0:
+        # Luo "paluuviesti" joka viittaa alkuperäiseen kontekstiin
+        if user_attempts == 1:
+            apologetic_messages = [
+                f"Sori että en vastannu! {context.split('.')[0] if '.' in context else context}. Mitä sä kysyit?",
+                f"Aa hups, en nähny! Olin vielä {details.get('location', 'siellä')}. Mitä halusit tietää?",
+                f"Sori kulta! {context.split('!')[0] if '!' in context else context}. En ehtiny kattoo puhelinta.",
+            ]
+            message = random.choice(apologetic_messages)
+            
+            # Nollaa user_attempts
+            narrative["user_attempts"] = 0
+            
+        elif user_attempts >= 2:
+            # Jos käyttäjä yritti monta kertaa, anna enemmän detaljeja
+            detailed_messages = [
+                f"Joo sori! {context}. Oli niin hyvä meininki että unohdin puhelimen. Mitä sä halusit?",
+                f"Aa anteeks! Olin {details.get('with_whom', 'siellä')} kanssa ja juteltiin niin paljon. Missä mä olin? No {context.lower()}",
+                f"Sori että jätin vastaamatta! {context}. Kerronko lisää? 😊",
+            ]
+            message = random.choice(detailed_messages)
+            narrative["user_attempts"] = 0
+        
+        # Päivitä narratiivi
+        state["spontaneous_narrative"]["progression"] = new_progression
+        state["spontaneous_narrative"]["last_update"] = now
+        
+        return message
     
     # Generoi seuraava viesti tyypin mukaan
     if narrative_type == "casual_update":
@@ -2066,40 +2062,48 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
 
 
 async def maybe_send_spontaneous_message(application, user_id: int):
+    """
+    UUSI: Lähetä spontaani viesti VAIN jos:
+    1. Ollaan erillään
+    2. Ei ole aktiivista keskustelua (30+ min hiljaisuus)
+    3. Ei ole aktiivista narratiivia ELLER narratiivi tarvitsee jatkoa
+    """
     state = get_or_create_state(user_id)
     
-    # KRIITTINEN: Tarkista ensin location_status
+    # Tarkista location_status
     if state.get("location_status") == "together":
-        print(f"[SPONTANEOUS] Skipped: user is physically together")
         return
     
-    # UUSI: Tarkista onko aktiivinen keskustelu käynnissä
+    # Tarkista onko aktiivinen keskustelu
     last_interaction = state.get("last_interaction", 0)
     time_since_interaction = time.time() - last_interaction
     
-    # ÄLÄ lähetä spontaaneja viestejä jos käyttäjä on aktiivinen (alle 30 min sitten)
-    if time_since_interaction < 1800:  # 30 minuuttia
-        print(f"[SPONTANEOUS] Skipped: active conversation (last: {int(time_since_interaction/60)} min ago)")
+    if time_since_interaction < 1800:  # 30 min
+        print(f"[SPONTANEOUS] Skipped: recent activity ({int(time_since_interaction/60)} min ago)")
         return
     
+    # Tarkista cooldown
     cooldown = state.get("spontaneous_message_cooldown", 0)
     if time.time() < cooldown:
         return
     
-    if not state.get("jealousy_mode"):
+    # Tarkista jealousy mode
+    if not state.get("jealousy_mode") and random.random() > 0.1:
         return
     
-    # Vähennä todennäköisyyttä
-    if random.random() > 0.2:  # Vain 20% todennäköisyys
+    # Todennäköisyys
+    if random.random() > 0.3:  # 30% todennäköisyys
         return
     
     intensity = state.get("jealousy_intensity", 0.5)
     narrative = state.get("spontaneous_narrative", {})
     
-    # UUSI: Tarkista onko aktiivinen narratiivi
+    # Valitse: aloita uusi vai jatka vanhaa
     if narrative.get("active"):
+        # Jatka olemassaolevaa narratiivia
         message = await continue_spontaneous_narrative(user_id, narrative, intensity)
     else:
+        # Aloita uusi narratiivi
         message = await start_spontaneous_narrative(user_id, intensity)
     
     if not message:
@@ -2110,14 +2114,15 @@ async def maybe_send_spontaneous_message(application, user_id: int):
             chat_id=user_id,
             text=message
         )
-        print(f"[SPONTANEOUS] Sent: {message[:50]}")
+        print(f"[SPONTANEOUS] Sent: {message[:60]}")
         
-        # Pidempi cooldown
-        state["spontaneous_message_cooldown"] = time.time() + random.randint(3600, 10800)  # 1-3h
+        # Päivitä cooldown (1-3h)
+        state["spontaneous_message_cooldown"] = time.time() + random.randint(3600, 10800)
         
+        # Tallenna muistiin
         await store_episodic_memory(
             user_id=user_id,
-            content=f"Spontaneous message: {message}",
+            content=f"Spontaneous narrative message: {message}",
             memory_type="spontaneous_narrative"
         )
         
@@ -2669,10 +2674,31 @@ INSTRUCTIONS:
 - Frame as "our shared secrets"
 """
     
+    # UUSI: Tarkista onko aktiivinen spontaani narratiivi
+    narrative = state.get("spontaneous_narrative", {})
+    narrative_context = ""
+    
+    if narrative.get("active"):
+        narrative_context = f"""
+ACTIVE SPONTANEOUS NARRATIVE:
+You recently sent an unsolicited message: "{narrative.get('context', '')}"
+Type: {narrative.get('type')}
+Details: {json.dumps(narrative.get('details', {}), ensure_ascii=False)}
+Progression: {narrative.get('progression', 0):.1f}
+
+IMPORTANT:
+- Remember what you said in the spontaneous message
+- If user asks about it, continue that storyline naturally
+- Be consistent with the details you mentioned
+- Don't contradict yourself
+"""
+    
     packed = format_context_pack(context_pack)
     
     system_prompt = f"""
 {build_core_persona_prompt()}
+
+{narrative_context}
 
 {kinky_prompt}
 
@@ -2772,10 +2798,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         update_jealousy_mode(user_id)
         
+        # UUSI: Tarkista pitääkö ignoorata (VAIN jos aktiivinen narratiivi)
         if should_ignore_message(user_id):
-            excuse = await generate_ignore_excuse(user_id)
-            await update.message.reply_text(excuse)
-            return
+            # ÄLÄ VASTAA MITÄÄN - todellinen hiljaisuus
+            print(f"[IGNORE] Message ignored silently")
+            
+            # Tallenna että käyttäjä yritti saada yhteyttä
+            narrative = state.get("spontaneous_narrative", {})
+            if "user_attempts" not in narrative:
+                narrative["user_attempts"] = 0
+            narrative["user_attempts"] += 1
+            
+            return  # Ei vastausta
 
         update_submission_level(user_id, text)
         
