@@ -953,8 +953,7 @@ def migrate_database():
     except Exception as e:
         print(f"[MIGRATION ERROR] {e}")
         traceback.print_exc()
-        print("[MIGRATION] ⚠️ Migration failed, but continuing...")
-
+        # ÄLKÄÄ LOPETTAKO - jatka eteenpäin
 
 # ====================== GLOBAL STATE CONTAINERS ======================
 continuity_state = {}
@@ -3471,22 +3470,43 @@ async def main():
     print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
 
     # MIGRAATIO ENNEN KAIKKEA MUUTA
-    migrate_database()
+    try:
+        migrate_database()
+    except Exception as e:
+        print(f"[MIGRATION FATAL ERROR] {e}")
+        traceback.print_exc()
 
-    load_states_from_db()
-    print("✅ Loaded persistent states from database")
+    try:
+        load_states_from_db()
+        print("✅ Loaded persistent states from database")
+    except Exception as e:
+        print(f"[LOAD STATES ERROR] {e}")
+        traceback.print_exc()
     
-    # UUSI: Testaa Venice API
+    # VENICE-TESTI (PAKKO AJAA)
+    print("[VENICE TEST] ===== STARTING TEST =====")
     if VENICE_API_KEY:
-        print("[VENICE TEST] Testing API key...")
+        print(f"[VENICE TEST] API Key present: {bool(VENICE_API_KEY)}")
+        print(f"[VENICE TEST] API Key length: {len(VENICE_API_KEY)}")
+        print(f"[VENICE TEST] API Key starts with: {VENICE_API_KEY[:10]}...")
+        
         test_prompt = "A simple test image of a red apple on a white background"
-        test_result = await generate_image_venice(test_prompt)
-        if test_result:
-            print(f"[VENICE TEST] ✅ API working! Generated {len(test_result)} bytes")
-        else:
-            print(f"[VENICE TEST] ❌ API test failed - check logs above")
+        
+        try:
+            print("[VENICE TEST] Calling generate_image_venice...")
+            test_result = await generate_image_venice(test_prompt)
+            
+            if test_result:
+                print(f"[VENICE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
+            else:
+                print(f"[VENICE TEST] ❌ FAILED - returned None")
+        except Exception as e:
+            print(f"[VENICE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
+            traceback.print_exc()
     else:
         print("[VENICE TEST] ⚠️ No API key set")
+    
+    print("[VENICE TEST] ===== TEST COMPLETE =====")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
