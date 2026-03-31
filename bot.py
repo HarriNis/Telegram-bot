@@ -9,7 +9,6 @@ import base64
 import logging
 import traceback
 import aiohttp
-import replicate
 from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -2097,8 +2096,8 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
 
 async def generate_image_replicate(prompt: str):
     """
-    Generate image using Replicate API (Flux Pro v1.1 Ultra for best quality)
-    Supports NSFW content without censorship.
+    Generate image using Replicate HTTP API (no SDK needed)
+    Uses Flux Pro v1.1 Ultra for best quality + NSFW support
     """
     try:
         print(f"[REPLICATE] ===== IMAGE GENERATION START =====")
@@ -2109,45 +2108,92 @@ async def generate_image_replicate(prompt: str):
             return None
         
         # FLUX PRO v1.1 ULTRA - paras laatu + NSFW-tuki
-        model = "black-forest-labs/flux-1.1-pro-ultra"
+        model_version = "black-forest-labs/flux-1.1-pro-ultra"
         
-        print(f"[REPLICATE] Using model: {model}")
-        print(f"[REPLICATE] Calling Replicate API...")
+        print(f"[REPLICATE] Using model: {model_version}")
         
-        output = await asyncio.to_thread(
-            replicate.run,
-            model,
-            input={
+        # Create prediction via HTTP API
+        create_url = "https://api.replicate.com/v1/predictions"
+        
+        payload = {
+            "version": model_version,
+            "input": {
                 "prompt": prompt,
                 "aspect_ratio": "1:1",
                 "output_format": "png",
                 "output_quality": 100,
-                "safety_tolerance": 6,  # Max NSFW tolerance
+                "safety_tolerance": 6,
                 "prompt_upsampling": True
             }
-        )
+        }
         
-        print(f"[REPLICATE] API call completed")
-        print(f"[REPLICATE] Output type: {type(output)}")
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_API_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "wait"  # Wait for completion
+        }
         
-        # Output on URL tai FileOutput object
-        if isinstance(output, str):
-            image_url = output
-        elif hasattr(output, 'url'):
-            image_url = output.url
-        elif isinstance(output, list) and len(output) > 0:
-            image_url = output[0] if isinstance(output[0], str) else output[0].url
-        else:
-            print(f"[REPLICATE ERROR] Unexpected output format: {output}")
-            return None
+        print(f"[REPLICATE] Creating prediction...")
         
-        print(f"[REPLICATE] Image URL: {image_url[:100]}...")
-        
-        # Lataa kuva URLista
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
+            # Create prediction
+            async with session.post(create_url, json=payload, headers=headers) as resp:
+                if resp.status != 201 and resp.status != 200:
+                    error_text = await resp.text()
+                    print(f"[REPLICATE ERROR] HTTP {resp.status}: {error_text[:500]}")
+                    return None
+                
+                data = await resp.json()
+                print(f"[REPLICATE] Prediction created: {data.get('id')}")
+                print(f"[REPLICATE] Status: {data.get('status')}")
+            
+            # If not completed, poll for result
+            prediction_id = data.get('id')
+            get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+            
+            max_attempts = 60
+            attempt = 0
+            
+            while attempt < max_attempts:
+                if data.get('status') == 'succeeded':
+                    break
+                
+                if data.get('status') in ['failed', 'canceled']:
+                    print(f"[REPLICATE ERROR] Prediction {data.get('status')}: {data.get('error')}")
+                    return None
+                
+                await asyncio.sleep(2)
+                attempt += 1
+                
+                async with session.get(get_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        print(f"[REPLICATE ERROR] Poll failed: HTTP {resp.status}")
+                        return None
+                    
+                    data = await resp.json()
+                    print(f"[REPLICATE] Status: {data.get('status')} (attempt {attempt}/{max_attempts})")
+            
+            if data.get('status') != 'succeeded':
+                print(f"[REPLICATE ERROR] Timeout after {max_attempts} attempts")
+                return None
+            
+            # Get output URL
+            output = data.get('output')
+            
+            if isinstance(output, str):
+                image_url = output
+            elif isinstance(output, list) and len(output) > 0:
+                image_url = output[0]
+            else:
+                print(f"[REPLICATE ERROR] Unexpected output format: {output}")
+                return None
+            
+            print(f"[REPLICATE] Image URL: {image_url[:100]}...")
+            
+            # Download image
             async with session.get(image_url) as resp:
                 if resp.status != 200:
-                    print(f"[REPLICATE ERROR] Failed to download image: HTTP {resp.status}")
+                    print(f"[REPLICATE ERROR] Download failed: HTTP {resp.status}")
                     return None
                 
                 image_bytes = await resp.read()
@@ -2155,13 +2201,16 @@ async def generate_image_replicate(prompt: str):
                 print(f"[REPLICATE] ===== IMAGE GENERATION SUCCESS =====")
                 return image_bytes
         
+    except asyncio.TimeoutError:
+        print(f"[REPLICATE ERROR] Request timeout (180s)")
+        return None
     except Exception as e:
         print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
         traceback.print_exc()
         return None
 
 
-# Fallback: Venice API (jos Replicate ei toimi)
+# Fallback: Venice API
 async def generate_image_venice(prompt: str):
     try:
         print(f"[VENICE] ===== IMAGE GENERATION START (FALLBACK) =====")
@@ -2218,7 +2267,7 @@ async def generate_image_venice(prompt: str):
         return None
 
 
-# Pääfunktio: kokeile ensin Replicate, sitten Venice
+# Main function: Try Replicate first, fallback to Venice
 async def generate_image(prompt: str):
     """
     Try Replicate first (best quality + NSFW support),
@@ -3466,3 +3515,4 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
+
