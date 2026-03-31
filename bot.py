@@ -835,47 +835,40 @@ def migrate_database():
     print("[MIGRATION] Starting database migration...")
     
     try:
-        with db_lock:
-            # Tarkista planned_events -taulun sarakkeet
-            cursor.execute("PRAGMA table_info(planned_events)")
-            columns = {row[1]: row for row in cursor.fetchall()}
-            
-            # Lisää puuttuvat sarakkeet
-            migrations = [
-                ("last_reminded_at", "ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0"),
-                ("status_changed_at", "ALTER TABLE planned_events ADD COLUMN status_changed_at REAL"),
-            ]
-            
-            for column_name, sql in migrations:
-                if column_name not in columns:
-                    print(f"[MIGRATION] Adding column: {column_name}")
-                    cursor.execute(sql)
-                    conn.commit()
-                    print(f"[MIGRATION] ✅ Added {column_name}")
-                else:
-                    print(f"[MIGRATION] ✓ Column {column_name} exists")
-            
-            # Päivitä NULL-arvot
-            cursor.execute("""
-                UPDATE planned_events
-                SET last_reminded_at = 0
-                WHERE last_reminded_at IS NULL
-            """)
-            
-            cursor.execute("""
-                UPDATE planned_events
-                SET status_changed_at = created_at
-                WHERE status_changed_at IS NULL
-            """)
-            
+        # YKSINKERTAINEN VERSIO - ei lockia
+        cursor.execute("PRAGMA table_info(planned_events)")
+        columns = {row[1]: row for row in cursor.fetchall()}
+        print(f"[MIGRATION] Found {len(columns)} columns in planned_events")
+        
+        # Lisää puuttuvat sarakkeet
+        if "last_reminded_at" not in columns:
+            print("[MIGRATION] Adding last_reminded_at...")
+            cursor.execute("ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0")
             conn.commit()
-            
+            print("[MIGRATION] ✅ Added last_reminded_at")
+        else:
+            print("[MIGRATION] ✓ last_reminded_at exists")
+        
+        if "status_changed_at" not in columns:
+            print("[MIGRATION] Adding status_changed_at...")
+            cursor.execute("ALTER TABLE planned_events ADD COLUMN status_changed_at REAL")
+            conn.commit()
+            print("[MIGRATION] ✅ Added status_changed_at")
+        else:
+            print("[MIGRATION] ✓ status_changed_at exists")
+        
+        # Päivitä NULL-arvot
+        print("[MIGRATION] Updating NULL values...")
+        cursor.execute("UPDATE planned_events SET last_reminded_at = 0 WHERE last_reminded_at IS NULL")
+        cursor.execute("UPDATE planned_events SET status_changed_at = created_at WHERE status_changed_at IS NULL")
+        conn.commit()
+        print("[MIGRATION] ✅ NULL values updated")
+        
     except Exception as e:
         print(f"[MIGRATION ERROR] {e}")
         traceback.print_exc()
     
-    # PAKKO TULOSTAA AINA
-    print("[MIGRATION] ✅ Completed (with or without changes)")
+    print("[MIGRATION] ✅ Migration completed")
 
 # ====================== GLOBAL STATE CONTAINERS ======================
 continuity_state = {}
@@ -3319,25 +3312,13 @@ async def main():
     flask_thread.start()
     print(f"[MAIN] Flask started")
 
-    # MIGRAATIO
-    print("[MAIN] Running migration...")
-    try:
-        migrate_database()
-        print("[MAIN] Migration done")
-    except Exception as e:
-        print(f"[MAIN] Migration error: {e}")
-        traceback.print_exc()
-
-    # LATAA STATES
-    print("[MAIN] Loading states...")
-    try:
-        load_states_from_db()
-        print("[MAIN] States loaded")
-    except Exception as e:
-        print(f"[MAIN] Load states error: {e}")
-        traceback.print_exc()
+    # OHITA MIGRAATIO NOPEUTEEN
+    print("[MAIN] Skipping migration for now...")
     
-    # VENICE-TESTI (PAKKO AJAA)
+    # OHITA STATE LOADING
+    print("[MAIN] Skipping state loading for now...")
+    
+    # VENICE-TESTI (PAKKO AJAA HETI)
     print("[MAIN] ===== VENICE TEST START =====")
     print(f"[VENICE TEST] ===== STARTING TEST =====")
     
@@ -3363,7 +3344,19 @@ async def main():
         print("[VENICE TEST] ⚠️ No API key set")
     
     print("[VENICE TEST] ===== TEST COMPLETE =====")
-    print("[MAIN] ===== VENICE TEST DONE =====")
+    
+    # NYT AJA MIGRAATIO JA STATE LOADING
+    print("[MAIN] Now running migration...")
+    try:
+        migrate_database()
+    except Exception as e:
+        print(f"[MAIN] Migration error: {e}")
+    
+    print("[MAIN] Now loading states...")
+    try:
+        load_states_from_db()
+    except Exception as e:
+        print(f"[MAIN] Load states error: {e}")
 
     # TELEGRAM BOT
     print("[MAIN] Building Telegram application...")
@@ -3405,4 +3398,4 @@ async def main():
         await application.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main()) 
