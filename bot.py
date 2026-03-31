@@ -47,6 +47,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_TOKEN")
 
 # Pakolliset avaimet
 if not TELEGRAM_TOKEN:
@@ -70,6 +71,11 @@ if not VENICE_API_KEY:
     print("⚠️ WARNING: VENICE_API_KEY missing! Image generation will not work.")
 else:
     print("✅ Venice API key found")
+
+if not REPLICATE_API_KEY:
+    print("⚠️ WARNING: REPLICATE_API_TOKEN missing! Image generation will use Venice fallback.")
+else:
+    print("✅ Replicate API key found")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -2064,7 +2070,7 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
 """
     
     try:
-        image_bytes = await generate_image_venice(prompt)
+        image_bytes = await generate_image(prompt)
         
         if image_bytes:
             await application.bot.send_photo(
@@ -2088,13 +2094,80 @@ Ultra-realistic photography, high detail, seductive, provocative, 8K quality
 
 # ====================== IMAGE GENERATION ======================
 
+async def generate_image_replicate(prompt: str):
+    """
+    Generate image using Replicate API (Flux Pro v1.1 Ultra for best quality)
+    Supports NSFW content without censorship.
+    """
+    try:
+        print(f"[REPLICATE] ===== IMAGE GENERATION START =====")
+        print(f"[REPLICATE] Prompt: {prompt[:200]}...")
+        
+        if not REPLICATE_API_KEY:
+            print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
+            return None
+        
+        import replicate
+        
+        # FLUX PRO v1.1 ULTRA - paras laatu + NSFW-tuki
+        model = "black-forest-labs/flux-1.1-pro-ultra"
+        
+        print(f"[REPLICATE] Using model: {model}")
+        print(f"[REPLICATE] Calling Replicate API...")
+        
+        output = await asyncio.to_thread(
+            replicate.run,
+            model,
+            input={
+                "prompt": prompt,
+                "aspect_ratio": "1:1",
+                "output_format": "png",
+                "output_quality": 100,
+                "safety_tolerance": 6,  # Max NSFW tolerance
+                "prompt_upsampling": True
+            }
+        )
+        
+        print(f"[REPLICATE] API call completed")
+        print(f"[REPLICATE] Output type: {type(output)}")
+        
+        # Output on URL tai FileOutput object
+        if isinstance(output, str):
+            image_url = output
+        elif hasattr(output, 'url'):
+            image_url = output.url
+        elif isinstance(output, list) and len(output) > 0:
+            image_url = output[0] if isinstance(output[0], str) else output[0].url
+        else:
+            print(f"[REPLICATE ERROR] Unexpected output format: {output}")
+            return None
+        
+        print(f"[REPLICATE] Image URL: {image_url[:100]}...")
+        
+        # Lataa kuva URLista
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as resp:
+                if resp.status != 200:
+                    print(f"[REPLICATE ERROR] Failed to download image: HTTP {resp.status}")
+                    return None
+                
+                image_bytes = await resp.read()
+                print(f"[REPLICATE] ✅ Downloaded {len(image_bytes)} bytes")
+                print(f"[REPLICATE] ===== IMAGE GENERATION SUCCESS =====")
+                return image_bytes
+        
+    except Exception as e:
+        print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+
+
+# Fallback: Venice API (jos Replicate ei toimi)
 async def generate_image_venice(prompt: str):
     try:
-        print(f"[VENICE] ===== IMAGE GENERATION START =====")
+        print(f"[VENICE] ===== IMAGE GENERATION START (FALLBACK) =====")
         print(f"[VENICE] Prompt: {prompt[:200]}...")
-        print(f"[VENICE] API Key present: {bool(VENICE_API_KEY)}")
-        print(f"[VENICE] API Key length: {len(VENICE_API_KEY) if VENICE_API_KEY else 0}")
-
+        
         if not VENICE_API_KEY:
             print("[VENICE ERROR] VENICE_API_KEY missing!")
             return None
@@ -2107,15 +2180,9 @@ async def generate_image_venice(prompt: str):
             "num_images": 1
         }
         
-        print(f"[VENICE] Payload: {json.dumps(payload, indent=2)}")
-
-        # MUUTETTU: Kokeile ilman /api
         endpoint = "https://api.venice.ai/v1/images/generations"
-        print(f"[VENICE] Endpoint: {endpoint}")
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
-            print(f"[VENICE] Sending POST request to Venice API...")
-            
             async with session.post(
                 endpoint,
                 headers={
@@ -2126,60 +2193,51 @@ async def generate_image_venice(prompt: str):
             ) as resp:
                 resp_text = await resp.text()
                 print(f"[VENICE] Response status: {resp.status}")
-                print(f"[VENICE] Response headers: {dict(resp.headers)}")
-                print(f"[VENICE] Response body (first 1000 chars): {resp_text[:1000]}")
 
                 if resp.status != 200:
-                    print(f"[VENICE ERROR] HTTP {resp.status}")
-                    print(f"[VENICE ERROR] Full response: {resp_text}")
+                    print(f"[VENICE ERROR] HTTP {resp.status}: {resp_text[:500]}")
                     return None
 
-                try:
-                    data = json.loads(resp_text)
-                    print(f"[VENICE] Parsed JSON keys: {list(data.keys())}")
-                except json.JSONDecodeError as e:
-                    print(f"[VENICE ERROR] JSON decode failed: {e}")
-                    print(f"[VENICE ERROR] Raw response: {resp_text}")
-                    return None
-
+                data = json.loads(resp_text)
                 items = data.get("data", [])
-                print(f"[VENICE] Data items count: {len(items)}")
                 
                 if not items:
-                    print(f"[VENICE ERROR] No items in data[]")
-                    print(f"[VENICE ERROR] Full response: {json.dumps(data, indent=2)}")
+                    print(f"[VENICE ERROR] No items in response")
                     return None
 
-                print(f"[VENICE] First item keys: {list(items[0].keys())}")
-                
                 b64_image = items[0].get("b64_json")
                 if not b64_image:
                     print(f"[VENICE ERROR] Missing b64_json")
-                    print(f"[VENICE ERROR] Item content: {json.dumps(items[0], indent=2)[:500]}")
                     return None
 
-                print(f"[VENICE] b64_json length: {len(b64_image)}")
-                
-                try:
-                    image_bytes = base64.b64decode(b64_image)
-                    print(f"[VENICE] ✅ Successfully decoded {len(image_bytes)} bytes")
-                    print(f"[VENICE] ===== IMAGE GENERATION SUCCESS =====")
-                    return image_bytes
-                except Exception as e:
-                    print(f"[VENICE ERROR] Base64 decode failed: {e}")
-                    return None
+                image_bytes = base64.b64decode(b64_image)
+                print(f"[VENICE] ✅ Generated {len(image_bytes)} bytes")
+                return image_bytes
 
-    except aiohttp.ClientError as e:
-        print(f"[VENICE ERROR] Network error: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        return None
-    except asyncio.TimeoutError:
-        print(f"[VENICE ERROR] Request timeout (180s)")
-        return None
     except Exception as e:
-        print(f"[VENICE ERROR] Unexpected error: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
         return None
+
+
+# Pääfunktio: kokeile ensin Replicate, sitten Venice
+async def generate_image(prompt: str):
+    """
+    Try Replicate first (best quality + NSFW support),
+    fallback to Venice if Replicate fails.
+    """
+    if REPLICATE_API_KEY:
+        print("[IMAGE] Trying Replicate API...")
+        result = await generate_image_replicate(prompt)
+        if result:
+            return result
+        print("[IMAGE] Replicate failed, trying Venice fallback...")
+    
+    if VENICE_API_KEY:
+        print("[IMAGE] Using Venice API...")
+        return await generate_image_venice(prompt)
+    
+    print("[IMAGE ERROR] No image generation API available!")
+    return None
 
 
 async def handle_image_request(update: Update, user_id: int, text: str):
@@ -2189,11 +2247,11 @@ async def handle_image_request(update: Update, user_id: int, text: str):
     scene_desc = state.get("micro_context") or state.get("scene") or "kotona"
 
     base_prompt = f"""
-A highly realistic, provocative and seductive photograph of a beautiful Finnish woman in her mid-20s.
+A highly realistic, seductive photograph of a beautiful Finnish woman in her mid-20s.
 
 Physical features:
 - Natural blonde hair, shoulder-length, slightly wavy
-- Blue-green eyes, expressive and seductive
+- Blue-green eyes, expressive and seductive gaze
 - Athletic yet feminine build, toned curves with perfect proportions
 - Fair Nordic skin tone with natural freckles
 - Natural makeup with smoky eyes and glossy lips
@@ -2205,15 +2263,15 @@ Setting:
 {scene_desc}, dramatic cinematic lighting, intimate and sensual atmosphere
 
 Style:
-Ultra-realistic professional photography, high detail, sharp focus, 8K quality
+Ultra-realistic professional photography, high detail, sharp focus, 8K quality, provocative, seductive
 """
 
     await update.message.reply_text("Hetki, otan kuvan... 📸")
 
-    print(f"[IMAGE] Starting Venice generation for user {user_id}")
+    print(f"[IMAGE] Starting generation for user {user_id}")
 
     try:
-        image_bytes = await generate_image_venice(base_prompt)
+        image_bytes = await generate_image(base_prompt)  # MUUTETTU: käytä uutta funktiota
 
         if not image_bytes:
             await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
@@ -3324,33 +3382,33 @@ async def main():
     print("[MAIN] Step 3: Skipping migration for now...")
     print("[MAIN] Step 4: Skipping state loading for now...")
     
-    # VENICE-TESTI (PAKKO AJAA HETI)
-    print("[MAIN] ===== VENICE TEST START =====")
-    print("[VENICE TEST] ===== STARTING TEST =====")
-    
-    if VENICE_API_KEY:
-        print(f"[VENICE TEST] API Key present: {bool(VENICE_API_KEY)}")
-        print(f"[VENICE TEST] API Key length: {len(VENICE_API_KEY)}")
-        print(f"[VENICE TEST] API Key first 10 chars: {VENICE_API_KEY[:10]}...")
+    # REPLICATE-TESTI
+    print("[MAIN] ===== REPLICATE TEST START =====")
+    print("[REPLICATE TEST] ===== STARTING TEST =====")
+
+    if REPLICATE_API_KEY:
+        print(f"[REPLICATE TEST] API Key present: {bool(REPLICATE_API_KEY)}")
+        print(f"[REPLICATE TEST] API Key length: {len(REPLICATE_API_KEY)}")
+        print(f"[REPLICATE TEST] API Key first 10 chars: {REPLICATE_API_KEY[:10]}...")
         
-        test_prompt = "A simple test image of a red apple on a white background"
+        test_prompt = "A photorealistic red apple on a white background, 8K quality"
         
         try:
-            print("[VENICE TEST] About to call generate_image_venice...")
-            test_result = await generate_image_venice(test_prompt)
-            print("[VENICE TEST] generate_image_venice returned")
+            print("[REPLICATE TEST] About to call generate_image...")
+            test_result = await generate_image(test_prompt)
+            print("[REPLICATE TEST] generate_image returned")
             
             if test_result:
-                print(f"[VENICE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
+                print(f"[REPLICATE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
             else:
-                print(f"[VENICE TEST] ❌ FAILED - returned None")
+                print(f"[REPLICATE TEST] ❌ FAILED - returned None")
         except Exception as e:
-            print(f"[VENICE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
+            print(f"[REPLICATE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
             traceback.print_exc()
     else:
-        print("[VENICE TEST] ⚠️ No API key set")
-    
-    print("[VENICE TEST] ===== TEST COMPLETE =====")
+        print("[REPLICATE TEST] ⚠️ No API key set")
+
+    print("[REPLICATE TEST] ===== TEST COMPLETE =====")
     
     # NYT AJA MIGRAATIO JA STATE LOADING
     print("[MAIN] Step 5: Now running migration...")
