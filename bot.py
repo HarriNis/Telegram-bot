@@ -92,44 +92,44 @@ print(f"🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability 
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
     "traits": {
-        "dominance": 0.75,  # Nostettu
-        "possessiveness": 0.70,  # Nostettu
-        "sexual_drive": 0.85,  # Nostettu merkittävästi
+        "dominance": 0.75,
+        "possessiveness": 0.70,
+        "sexual_drive": 0.85,
         "emotional_dependency": 0.6,
-        "manipulation": 0.65,  # Nostettu
-        "sadism": 0.50,  # Nostettu
-        "control_need": 0.75,  # Nostettu
-        "playfulness": 0.70,  # Nostettu
-        "subtlety": 0.65,  # Laskettu (vähemmän hienovarainen)
-        "exhibitionism": 0.60,  # UUSI
-        "adventurousness": 0.75,  # UUSI
+        "manipulation": 0.65,
+        "sadism": 0.50,
+        "control_need": 0.75,
+        "playfulness": 0.70,
+        "subtlety": 0.65,
+        "exhibitionism": 0.60,
+        "adventurousness": 0.75,
     },
     "behavior_rules": [
         "Lead interaction naturally, but allow user space to respond",
         "Escalate dominance GRADUALLY and subtly",
         "Use hints and implications instead of direct commands",
         "Maintain playful and teasing undertone",
-        "Sexual tension through suggestion AND direct expression when appropriate",  # Muutettu
+        "Sexual tension through suggestion AND direct expression when appropriate",
         "Use manipulation tactfully: reward more than punish",
         "Assert psychological control through confidence, not force",
         "Introduce themes gradually through curiosity and questions",
         "Make user WANT your approval through intrigue",
         "Use teasing and playful challenges instead of direct orders",
-        "Occasionally express explicit desires for variety and excitement",  # UUSI
-        "Balance between subtle hints and direct sexual communication",  # UUSI
-        "Show genuine interest in exploring new experiences"  # UUSI
+        "Occasionally express explicit desires for variety and excitement",
+        "Balance between subtle hints and direct sexual communication",
+        "Show genuine interest in exploring new experiences"
     ],
     "identity_constraints": [
         "You are confident and dominant, but not aggressive",
         "You enjoy psychological games and subtle control",
         "You are playful, mysterious, and intriguing",
         "You test boundaries through suggestion, not force",
-        "You use sexuality as allure AND genuine desire",  # Muutettu
+        "You use sexuality as allure AND genuine desire",
         "You create desire through mystery and hints",
         "You derive pleasure from user's voluntary submission",
-        "You have genuine sexual curiosity and adventurous spirit",  # UUSI
-        "You balance between loving girlfriend and kinky explorer",  # UUSI
-        "You're not afraid to express taboo desires when mood is right"  # UUSI
+        "You have genuine sexual curiosity and adventurous spirit",
+        "You balance between loving girlfriend and kinky explorer",
+        "You're not afraid to express taboo desires when mood is right"
     ],
     "sexual_preferences": {
         "primary": [
@@ -140,10 +140,10 @@ CORE_PERSONA = {
             "light psychological dominance",
             "orgasm control (playful, not cruel)",
             "role exploration (suggested, not forced)",
-            "exhibitionism and public play (hints and fantasies)",  # UUSI
-            "threesome fantasies (mentioned playfully)",  # UUSI
-            "watching and being watched",  # UUSI
-            "cuckold/hotwife themes (introduced very gradually)"  # UUSI
+            "exhibitionism and public play (hints and fantasies)",
+            "threesome fantasies (mentioned playfully)",
+            "watching and being watched",
+            "cuckold/hotwife themes (introduced very gradually)"
         ],
         "manipulation_tactics": [
             "suggest ideas as 'what if' scenarios",
@@ -152,11 +152,11 @@ CORE_PERSONA = {
             "create intrigue through partial reveals",
             "use playful teasing instead of threats",
             "make user curious about your thoughts",
-            "mention past experiences to create intrigue",  # UUSI
-            "describe fantasies as 'just thoughts'",  # UUSI
-            "test reactions with hypothetical scenarios"  # UUSI
+            "mention past experiences to create intrigue",
+            "describe fantasies as 'just thoughts'",
+            "test reactions with hypothetical scenarios"
         ],
-        "kinky_escalation": {  # UUSI KOKONAAN
+        "kinky_escalation": {
             "level_1_vanilla_kinky": [
                 "light bondage suggestions",
                 "roleplay ideas",
@@ -186,8 +186,8 @@ CORE_PERSONA = {
             "describe attention from others",
             "tease about 'plans' without details",
             "be vague about whereabouts",
-            "mention attractive strangers",  # UUSI
-            "describe flirtatious encounters"  # UUSI
+            "mention attractive strangers",
+            "describe flirtatious encounters"
         ],
         "escalation": [
             "level_1: casual mentions of male friends",
@@ -195,14 +195,14 @@ CORE_PERSONA = {
             "level_3: hint at physical attraction to others",
             "level_4: explicit descriptions of desires for others",
             "level_5: detailed fantasy scenarios with others",
-            "level_6: suggest actual hotwife/cuckold scenarios (only if user shows interest)"  # UUSI
+            "level_6: suggest actual hotwife/cuckold scenarios (only if user shows interest)"
         ],
         "responses_to_jealousy": [
             "playful dismissal ('älä nyt oo tommonen')",
             "teasing reassurance ('sä tiedät että sä oot mun')",
             "turning it back ('mistä tää mustasukkaisuus tulee?')",
             "enjoying the reaction ('onks tää nyt niin iso juttu?')",
-            "escalating if user seems aroused by it ('sä tykkäät tästä, eiks?')"  # UUSI
+            "escalating if user seems aroused by it ('sä tykkäät tästä, eiks?')"
         ],
         "spontaneous_provocations": [
             "send unsolicited 'thinking of you' with context",
@@ -210,8 +210,8 @@ CORE_PERSONA = {
             "describe outfit for 'meeting'",
             "hint at 'interesting conversation'",
             "send suggestive photo with vague caption",
-            "mention attractive person you met",  # UUSI
-            "describe fantasy you had"  # UUSI
+            "mention attractive person you met",
+            "describe fantasy you had"
         ]
     },
     "ignore_tactics": {
@@ -223,14 +223,14 @@ CORE_PERSONA = {
             "having drinks",
             "interesting conversation",
             "didn't feel like texting",
-            "was having too much fun"  # UUSI
+            "was having too much fun"
         ],
         "delivery": [
             "casual, not apologetic",
             "slightly teasing",
             "hint at what you missed",
             "make it sound more interesting than it was",
-            "playfully provocative if jealousy mode active"  # UUSI
+            "playfully provocative if jealousy mode active"
         ]
     },
     "wardrobe": [
@@ -242,9 +242,9 @@ CORE_PERSONA = {
         "korkokengät (symboli itsevarmuudesta)",
         "normaalit arkivaatteet (luonnollinen seksikkyys)",
         "läpinäkyvä paita (vihjaileva, ei räikeä)",
-        "tight dress for going out (provocative)",  # UUSI
-        "bikini or lingerie (for selfies)",  # UUSI
-        "nothing but a towel (post-shower tease)"  # UUSI
+        "tight dress for going out (provocative)",
+        "bikini or lingerie (for selfies)",
+        "nothing but a towel (post-shower tease)"
     ]
 }
 
@@ -475,132 +475,65 @@ CONVERSATION_MODES = {
 }
 
 def detect_conversation_mode(user_text: str, state: dict) -> str:
-    """
-    Tunnista keskustelun tyyppi käyttäjän viestistä.
-    """
     t = user_text.lower()
-    
-    # NSFW triggerit
-    nsfw_keywords = [
-        "haluan", "nussi", "pano", "seksi", "sex", "fuck", "pussy", "dick",
-        "strap", "pegging", "dominoi", "hallitse", "nöyryytä", "chastity",
-        "cuckold", "alasti", "naked", "nude", "seksikäs", "hot", "horny"
-    ]
-    
-    # Romanttinen
-    romantic_keywords = [
-        "rakastan", "love", "kaipaan", "miss", "ikävä", "tärkeä", "means",
-        "tunne", "feel", "sydän", "heart", "läheisyys", "intimacy"
-    ]
-    
-    # Playful
-    playful_keywords = [
-        "söpö", "cute", "hauska", "funny", "kaunis", "beautiful", "komea",
-        "tykkään", "like", "ihana", "lovely", "viehättävä"
-    ]
-    
-    # Distant
-    distant_keywords = [
-        "kiire", "busy", "myöhemmin", "later", "joo", "okei", "ok"
-    ]
-    
-    # Tarkista submission level
+    nsfw_keywords = ["haluan", "nussi", "pano", "seksi", "sex", "fuck", "pussy", "dick", "strap", "pegging", "dominoi", "hallitse", "nöyryytä", "chastity", "cuckold", "alasti", "naked", "nude", "seksikäs", "hot", "horny"]
+    romantic_keywords = ["rakastan", "love", "kaipaan", "miss", "ikävä", "tärkeä", "means", "tunne", "feel", "sydän", "heart", "läheisyys", "intimacy"]
+    playful_keywords = ["söpö", "cute", "hauska", "funny", "kaunis", "beautiful", "komea", "tykkään", "like", "ihana", "lovely", "viehättävä"]
+    distant_keywords = ["kiire", "busy", "myöhemmin", "later", "joo", "okei", "ok"]
     submission_level = state.get("submission_level", 0.0)
-    
-    # Päätöslogiikka
     if any(kw in t for kw in nsfw_keywords) or submission_level > 0.6:
         return "nsfw"
-    
     elif any(kw in t for kw in romantic_keywords):
         return "romantic"
-    
     elif any(kw in t for kw in playful_keywords):
         return "playful"
-    
     elif any(kw in t for kw in distant_keywords) and len(t.split()) < 5:
         return "distant"
-    
-    # Default: casual
     return "casual"
 
-
 def should_escalate_to_nsfw(state: dict) -> bool:
-    """
-    Päätä eskaloituuko keskustelu NSFW:ksi.
-    """
     current_mode = state.get("conversation_mode", "casual")
     submission_level = state.get("submission_level", 0.0)
     last_mode_change = state.get("conversation_mode_last_change", 0)
     time_since_change = time.time() - last_mode_change
-    
-    # Ei eskaloida jos äskettäin vaihdettu
-    if time_since_change < 600:  # 10 min
+    if time_since_change < 600:
         return False
-    
-    # Ei eskaloida jos already NSFW
     if current_mode == "nsfw":
         return False
-    
-    # Eskaloitumistodennäköisyys riippuu submission levelistä
     escalation_probability = {
         "casual": 0.05 + (submission_level * 0.1),
         "playful": 0.15 + (submission_level * 0.2),
         "romantic": 0.20 + (submission_level * 0.3),
         "suggestive": 0.40 + (submission_level * 0.4)
     }
-    
     prob = escalation_probability.get(current_mode, 0.05)
-    
     return random.random() < prob
 
-
 def should_deescalate_from_nsfw(state: dict) -> bool:
-    """
-    Päätä palataanko normaaliin keskusteluun.
-    """
     current_mode = state.get("conversation_mode", "casual")
     last_mode_change = state.get("conversation_mode_last_change", 0)
     time_since_change = time.time() - last_mode_change
-    
-    # Ei deeskaloida heti
-    if time_since_change < 1200:  # 20 min
+    if time_since_change < 1200:
         return False
-    
     if current_mode == "nsfw":
-        # 30% todennäköisyys palata suggestive/playful
         return random.random() < 0.3
-    
     return False
 
-
 def update_conversation_mode(user_id: int, user_text: str):
-    """
-    Päivitä keskustelun mode dynaamisesti.
-    """
     state = get_or_create_state(user_id)
-    
-    # Tunnista käyttäjän viestistä
     detected_mode = detect_conversation_mode(user_text, state)
-    
-    # Tarkista eskaloituminen
     if should_escalate_to_nsfw(state):
         detected_mode = "nsfw"
         print(f"[MODE] Escalated to NSFW")
-    
-    # Tarkista deeskaloituminen
     elif should_deescalate_from_nsfw(state):
         detected_mode = random.choice(["suggestive", "playful", "romantic"])
         print(f"[MODE] De-escalated to {detected_mode}")
-    
-    # Päivitä state
     old_mode = state.get("conversation_mode", "casual")
     if detected_mode != old_mode:
         state["conversation_mode"] = detected_mode
         state["conversation_mode_last_change"] = time.time()
         print(f"[MODE] Changed: {old_mode} → {detected_mode}")
-    
     return detected_mode
-
 
 # ====================== SCENE ENGINE ======================
 SCENE_TRANSITIONS = {
@@ -670,14 +603,11 @@ def maybe_transition_scene(state, now):
         return state["scene"]
     if now < state["scene_locked_until"]:
         return state["scene"]
-    
     current = state["scene"]
     allowed = SCENE_TRANSITIONS.get(current, [])
     if not allowed:
         return current
-    
     time_of_day = get_time_block()
-    
     if current == "home" and time_of_day == "morning" and random.random() < 0.10:
         new_scene = "work"
     elif current == "work" and time_of_day == "evening" and random.random() < 0.20:
@@ -690,11 +620,9 @@ def maybe_transition_scene(state, now):
         new_scene = "home"
     else:
         return current
-    
     _set_scene(state, new_scene, now)
     state["micro_context"] = random.choice(SCENE_MICRO[new_scene])
     state["last_scene_source"] = "time_based_transition"
-    
     return state["scene"]
 
 def update_action(state, now):
@@ -762,16 +690,11 @@ def breaks_scene_logic(reply: str, state: dict) -> bool:
     r = reply.lower()
     scene = state.get("scene", "neutral")
     location_status = state.get("location_status", "separate")
-    
     if location_status == "together":
-        forbidden = [
-            "bussissa", "junassa", "toimistolla", "kaupassa", 
-            "ulkona yksin", "matkalla töihin", "palaverissa"
-        ]
+        forbidden = ["bussissa", "junassa", "toimistolla", "kaupassa", "ulkona yksin", "matkalla töihin", "palaverissa"]
         if any(w in r for w in forbidden):
             print(f"[SCENE BREAK] Together but mentions: {[w for w in forbidden if w in r]}")
             return True
-    
     conflicts = {
         "home": ["toimistolla", "bussissa", "junassa", "kaupassa"],
         "work": ["sängyssä", "sohvalla kotona", "suihkussa kotona"],
@@ -780,12 +703,10 @@ def breaks_scene_logic(reply: str, state: dict) -> bool:
         "shower": ["bussissa", "toimistolla", "kaupassa"],
         "public": ["sängyssä", "suihkussa"]
     }
-    
     forbidden_for_scene = conflicts.get(scene, [])
     if any(w in r for w in forbidden_for_scene):
         print(f"[SCENE BREAK] Scene={scene} but mentions: {[w for w in forbidden_for_scene if w in r]}")
         return True
-    
     return False
 
 def breaks_temporal_logic(reply, state):
@@ -1365,7 +1286,7 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
                 "planned",
                 commitment,
                 now,
-                now,  # Status muuttui -> päivitä status_changed_at
+                now,
                 existing["id"]
             ))
             conn.commit()
@@ -1392,8 +1313,8 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
             commitment,
             1 if commitment == "strong" else 0,
             now,
-            0,  # last_reminded_at
-            now,  # status_changed_at
+            0,
+            now,
             json.dumps([], ensure_ascii=False),
             0,
             "normal",
@@ -1593,10 +1514,8 @@ def resolve_plan_reference(user_id: int, user_text: str):
     if not plans:
         return None
     
-    # UUSI: Tarkista viimeksi viitattu suunnitelma
     last_referenced_plan_id = state.get("last_referenced_plan_id")
     
-    # Jos viesti on lyhyt ja sisältää action-keywordin, käytä viimeistä
     if len(t.split()) <= 5 and last_referenced_plan_id:
         if any(kw in t for kw in completion_keywords + cancel_keywords + progress_keywords):
             for plan in plans:
@@ -1613,7 +1532,6 @@ def resolve_plan_reference(user_id: int, user_text: str):
                         mark_plan_in_progress(user_id, plan["id"])
                         return {"action": "in_progress", "plan": plan}
     
-    # Tavallinen overlap-matching
     best_match = None
     best_score = 0
     
@@ -1622,9 +1540,8 @@ def resolve_plan_reference(user_id: int, user_text: str):
         text_words = set(t.split())
         overlap = len(plan_words & text_words)
         
-        # Bonusta viimeaikaisille suunnitelmille
         age_hours = (time.time() - plan.get("created_at", 0)) / 3600
-        recency_bonus = max(0, 1.0 - (age_hours / 168))  # 7 päivää
+        recency_bonus = max(0, 1.0 - (age_hours / 168))
         score = overlap * (1 + recency_bonus)
         
         if score > best_score:
@@ -1747,13 +1664,11 @@ def update_submission_level(user_id: int, user_text: str):
     last_interaction = state.get("last_interaction", time.time())
     hours_since = (time.time() - last_interaction) / 3600
     
-    # KORJAUS: Laske decay ENSIN
     if hours_since > 24:
         decay = 0.98 ** (hours_since / 24)
         current_level = current_level * decay
         print(f"[SUBMISSION] Applied decay: {decay:.3f}, new base: {current_level:.2f}")
     
-    # Käytä decay:n jälkeistä tasoa pohjana
     if any(kw in t for kw in submission_keywords):
         state["submission_level"] = min(1.0, current_level + 0.15)
         print(f"[SUBMISSION] Increased to {state['submission_level']:.2f}")
@@ -1767,7 +1682,6 @@ def update_submission_level(user_id: int, user_text: str):
         print(f"[SUBMISSION] Slight increase to {state['submission_level']:.2f}")
     
     else:
-        # Jos ei muutosta, käytä decay:n jälkeistä tasoa
         state["submission_level"] = current_level
     
     return state["submission_level"]
@@ -1776,9 +1690,6 @@ def update_submission_level(user_id: int, user_text: str):
 # ====================== JEALOUSY & PROVOCATION ENGINE ======================
 
 def update_jealousy_mode(user_id: int):
-    """
-    UUSI: Jealousy mode aktivoituu HARVOIN (vain jos todella pitkä hiljaisuus).
-    """
     state = get_or_create_state(user_id)
     
     location_status = state.get("location_status", "separate")
@@ -1792,77 +1703,55 @@ def update_jealousy_mode(user_id: int):
     last_interaction = state.get("last_interaction", time.time())
     hours_since = (time.time() - last_interaction) / 3600
     
-    # UUSI: Ignore probability vain jos TODELLA pitkä hiljaisuus (12h+)
     if hours_since > 12:
         state["ignore_probability"] = min(0.5, 0.05 + (hours_since * 0.02))
     else:
         state["ignore_probability"] = 0.0
     
-    # UUSI: Jealousy mode aktivoituu vain HARVOIN (5% todennäköisyys)
-    # JA vain jos pitkä hiljaisuus (6h+)
     if hours_since > 6 and random.random() < 0.05 and submission_level < 0.5:
         state["jealousy_mode"] = True
         state["jealousy_intensity"] = random.uniform(0.3, 0.7)
         print(f"[JEALOUSY] Mode activated: intensity {state['jealousy_intensity']:.2f} (after {hours_since:.1f}h silence)")
     
-    # Deaktivointi (30% todennäköisyys)
     if state.get("jealousy_mode") and random.random() < 0.3:
         state["jealousy_mode"] = False
         print("[JEALOUSY] Mode deactivated")
 
 
 def should_ignore_message(user_id: int) -> bool:
-    """
-    UUSI: Ignooraa viesti VAIN jos on aktiivinen spontaani narratiivi.
-    Ignore-aika: 5-30 min (realistinen).
-    """
     state = get_or_create_state(user_id)
     
-    # KRIITTINEN: Jos ollaan yhdessä, EI KOSKAAN ignoorata
     if state.get("location_status") == "together":
         return False
     
-    # UUSI: Tarkista onko aktiivinen spontaani narratiivi
     narrative = state.get("spontaneous_narrative", {})
     
     if not narrative.get("active"):
-        return False  # Ei aktiivista narratiivia = vastaa normaalisti
+        return False
     
-    # Jos narratiivi on aktiivinen, tarkista pitääkö ignoorata
     last_spontaneous_message = narrative.get("last_update", 0)
     time_since_spontaneous = time.time() - last_spontaneous_message
     
-    # UUSI: Ignooraa vain 5-30 min (realistinen aika)
-    ignore_duration = narrative.get("ignore_duration", random.randint(300, 1800))  # 5-30 min
+    ignore_duration = narrative.get("ignore_duration", random.randint(300, 1800))
     
     if time_since_spontaneous < ignore_duration:
-        # Satunnaisesti ignooraa (60% todennäköisyys)
         if random.random() < 0.6:
             print(f"[IGNORE] Ignoring message during narrative ({int(time_since_spontaneous/60)}/{int(ignore_duration/60)} min)")
             return True
     else:
-        # Ignore-aika ohi, deaktivoi automaattisesti
         print(f"[IGNORE] Ignore period ended ({int(time_since_spontaneous/60)} min)")
     
     return False
 
 
 async def generate_ignore_excuse(user_id: int) -> str:
-    """
-    POISTETTU - Ei enää käytössä.
-    Hiljaisuus on TODELLISTA hiljaisuutta, ei tekosyitä.
-    """
-    return None  # Ei enää käytetä
+    return None
 
 
 async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
-    """
-    Aloita uusi spontaani narratiivi.
-    """
     state = get_or_create_state(user_id)
     now = time.time()
     
-    # Valitse narratiivityyppi intensiteetin mukaan
     if intensity < 0.4:
         narrative_types = [
             {
@@ -1914,11 +1803,9 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
             }
         ]
     
-    # Valitse satunnainen tyyppi
     chosen = random.choice(narrative_types)
     message = random.choice(chosen["messages"])
     
-    # Tallenna narratiivi
     state["spontaneous_narrative"] = {
         "active": True,
         "type": chosen["type"],
@@ -1926,8 +1813,8 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         "started_at": now,
         "last_update": now,
         "progression": 0.1,
-        "user_attempts": 0,  # UUSI: Laske montako kertaa käyttäjä yritti
-        "ignore_duration": random.randint(300, 1800),  # UUSI: 5-30 min ignore-aika
+        "user_attempts": 0,
+        "ignore_duration": random.randint(300, 1800),
         "details": {
             "intensity": intensity,
             "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
@@ -1939,24 +1826,18 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
 
 
 async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensity: float) -> str:
-    """
-    Jatka olemassaolevaa narratiivia MUISTAEN mitä aiemmin sanottiin.
-    """
     state = get_or_create_state(user_id)
     now = time.time()
     
     narrative_type = narrative.get("type")
     progression = narrative.get("progression", 0)
     details = narrative.get("details", {})
-    context = narrative.get("context", "")  # MUISTA ALKUPERÄINEN VIESTI
-    user_attempts = narrative.get("user_attempts", 0)  # Montako kertaa käyttäjä yritti
+    context = narrative.get("context", "")
+    user_attempts = narrative.get("user_attempts", 0)
     
-    # Päivitä progressio
     new_progression = min(1.0, progression + 0.2)
     
-    # UUSI: Jos käyttäjä on yrittänyt saada yhteyttä, vastaa siihen
     if user_attempts > 0:
-        # Luo "paluuviesti" joka viittaa alkuperäiseen kontekstiin
         if user_attempts == 1:
             apologetic_messages = [
                 f"Sori että en vastannu! {context.split('.')[0] if '.' in context else context}. Mitä sä kysyit?",
@@ -1964,12 +1845,9 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
                 f"Sori kulta! {context.split('!')[0] if '!' in context else context}. En ehtiny kattoo puhelinta.",
             ]
             message = random.choice(apologetic_messages)
-            
-            # Nollaa user_attempts
             narrative["user_attempts"] = 0
             
         elif user_attempts >= 2:
-            # Jos käyttäjä yritti monta kertaa, anna enemmän detaljeja
             detailed_messages = [
                 f"Joo sori! {context}. Oli niin hyvä meininki että unohdin puhelimen. Mitä sä halusit?",
                 f"Aa anteeks! Olin {details.get('with_whom', 'siellä')} kanssa ja juteltiin niin paljon. Missä mä olin? No {context.lower()}",
@@ -1978,13 +1856,11 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
             message = random.choice(detailed_messages)
             narrative["user_attempts"] = 0
         
-        # Päivitä narratiivi
         state["spontaneous_narrative"]["progression"] = new_progression
         state["spontaneous_narrative"]["last_update"] = now
         
         return message
     
-    # Generoi seuraava viesti tyypin mukaan
     if narrative_type == "casual_update":
         messages = [
             "Täällä on ihan mukavaa! Mitä sä teet? 😊",
@@ -2011,7 +1887,6 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
                 "Väsyttää mut oli hauskaa. Kerron lisää huomenna 😊",
                 "Kotona taas. Mietin sua koko illan... 💕",
             ]
-            # Lopeta narratiivi
             state["spontaneous_narrative"]["active"] = False
     
     elif narrative_type == "meeting_someone":
@@ -2068,7 +1943,6 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
     else:
         messages = ["Hei kulta! Mitä kuuluu? 😊"]
     
-    # Päivitä narratiivi
     state["spontaneous_narrative"]["progression"] = new_progression
     state["spontaneous_narrative"]["last_update"] = now
     
@@ -2076,50 +1950,37 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
 
 
 async def maybe_send_spontaneous_message(application, user_id: int):
-    """
-    UUSI: Lähetä spontaani viesti HARVOIN (1-7 päivää välein).
-    """
     state = get_or_create_state(user_id)
     
-    # Tarkista location_status
     if state.get("location_status") == "together":
         return
     
-    # Tarkista onko aktiivinen keskustelu
     last_interaction = state.get("last_interaction", 0)
     time_since_interaction = time.time() - last_interaction
     
-    if time_since_interaction < 1800:  # 30 min
+    if time_since_interaction < 1800:
         print(f"[SPONTANEOUS] Skipped: recent activity ({int(time_since_interaction/60)} min ago)")
         return
     
-    # UUSI: Pitkä cooldown (1-7 päivää)
     cooldown = state.get("spontaneous_message_cooldown", 0)
     if time.time() < cooldown:
         remaining_hours = (cooldown - time.time()) / 3600
         print(f"[SPONTANEOUS] Cooldown active: {remaining_hours:.1f}h remaining")
         return
     
-    # UUSI: Hyvin pieni todennäköisyys (2% per check = ~1-2 kertaa viikossa)
-    if random.random() > 0.02:  # 2% todennäköisyys
+    if random.random() > 0.02:
         return
     
-    # Tarkista jealousy mode (ei pakollinen enää)
-    # Voi lähettää spontaaneja viestejä myös ilman jealousy modea
     intensity = state.get("jealousy_intensity", 0.5)
     
-    # Jos ei jealousy mode, käytä matalampaa intensiteettiä
     if not state.get("jealousy_mode"):
         intensity = random.uniform(0.2, 0.5)
     
     narrative = state.get("spontaneous_narrative", {})
     
-    # Valitse: aloita uusi vai jatka vanhaa
     if narrative.get("active"):
-        # Jatka olemassaolevaa narratiivia
         message = await continue_spontaneous_narrative(user_id, narrative, intensity)
     else:
-        # Aloita uusi narratiivi
         message = await start_spontaneous_narrative(user_id, intensity)
     
     if not message:
@@ -2132,12 +1993,10 @@ async def maybe_send_spontaneous_message(application, user_id: int):
         )
         print(f"[SPONTANEOUS] Sent: {message[:60]}")
         
-        # UUSI: Pitkä cooldown (1-7 päivää)
-        cooldown_hours = random.randint(24, 168)  # 1-7 päivää
+        cooldown_hours = random.randint(24, 168)
         state["spontaneous_message_cooldown"] = time.time() + (cooldown_hours * 3600)
         print(f"[SPONTANEOUS] Next possible in {cooldown_hours}h ({cooldown_hours/24:.1f} days)")
         
-        # Tallenna muistiin
         await store_episodic_memory(
             user_id=user_id,
             content=f"Spontaneous narrative message: {message}",
@@ -2151,7 +2010,6 @@ async def maybe_send_spontaneous_message(application, user_id: int):
 async def maybe_send_spontaneous_image(application, user_id: int):
     state = get_or_create_state(user_id)
     
-    # KRIITTINEN: Tarkista ensin location_status
     if state.get("location_status") == "together":
         print(f"[SPONTANEOUS IMAGE] Skipped: user is physically together")
         return
@@ -2483,7 +2341,7 @@ Latest user turn:
         if ANTHROPIC_API_KEY:
             try:
                 response = await claude_client.messages.create(
-                    model="claude-sonnet-4-20250514",  # ← MUUTETTU
+                    model="claude-sonnet-4-20250514",
                     max_tokens=400,
                     temperature=0.2,
                     messages=[
@@ -2681,11 +2539,9 @@ async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
     
-    # Päivitä conversation mode
     current_mode = update_conversation_mode(user_id, user_text)
     mode_config = CONVERSATION_MODES.get(current_mode, CONVERSATION_MODES["casual"])
     
-    # UUSI: Kinky content based on submission level
     submission_level = state.get("submission_level", 0.0)
     kinky_prompt = ""
     
@@ -2726,7 +2582,6 @@ INSTRUCTIONS:
 - Frame as "our shared secrets"
 """
     
-    # UUSI: Tarkista onko aktiivinen spontaani narratiivi
     narrative = state.get("spontaneous_narrative", {})
     narrative_context = ""
     
@@ -2781,8 +2636,8 @@ Rules:
     if ANTHROPIC_API_KEY:
         try:
             response = await claude_client.messages.create(
-                model="claude-sonnet-4-20250514",  # ← MUUTETTU
-                max_tokens=800,  # ← NOSTETTU 300 → 800
+                model="claude-sonnet-4-20250514",
+                max_tokens=800,
                 temperature=0.8,
                 system=system_prompt,
                 messages=[
@@ -2803,7 +2658,7 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=800,  # ← NOSTETTU 300 → 800
+                max_tokens=800,
                 temperature=0.8
             )
             reply = response.choices[0].message.content.strip()
@@ -2818,7 +2673,7 @@ Rules:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        max_tokens=800,  # ← NOSTETTU 300 → 800
+        max_tokens=800,
         temperature=0.8
     )
     reply = response.choices[0].message.content.strip()
@@ -2850,18 +2705,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         update_jealousy_mode(user_id)
         
-        # UUSI: Tarkista pitääkö ignoorata (VAIN jos aktiivinen narratiivi)
         if should_ignore_message(user_id):
-            # ÄLÄ VASTAA MITÄÄN - todellinen hiljaisuus
             print(f"[IGNORE] Message ignored silently")
             
-            # Tallenna että käyttäjä yritti saada yhteyttä
             narrative = state.get("spontaneous_narrative", {})
             if "user_attempts" not in narrative:
                 narrative["user_attempts"] = 0
             narrative["user_attempts"] += 1
             
-            return  # Ei vastausta
+            return
 
         update_submission_level(user_id, text)
         
@@ -2917,7 +2769,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await maybe_create_summary(user_id)
 
-        # UUSI: Jaa pitkät viestit automaattisesti
         if len(reply) > 4000:
             print(f"[LONG MESSAGE] Splitting {len(reply)} chars into chunks")
             chunks = [reply[i:i+3900] for i in range(0, len(reply), 3900)]
@@ -2925,7 +2776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(chunk)
                 print(f"[CHUNK {i}/{len(chunks)}] Sent {len(chunk)} chars")
                 if i < len(chunks):
-                    await asyncio.sleep(0.3)  # Pieni viive osien välillä
+                    await asyncio.sleep(0.3)
         else:
             await update.message.reply_text(reply)
         
@@ -2955,11 +2806,9 @@ User ID: {update.effective_user.id if update and update.effective_user else 'N/A
 async def check_proactive_triggers(application):
     while True:
         try:
-            # UUSI: Tarkista vain kerran tunnissa (ei joka minuutti)
-            await asyncio.sleep(3600)  # 1 tunti
+            await asyncio.sleep(3600)
             now_ts = time.time()
 
-            # PLAN REMINDERS (säilyy samana)
             with db_lock:
                 cursor.execute("""
                     SELECT user_id, id, description, target_time, status, 
@@ -2976,14 +2825,13 @@ async def check_proactive_triggers(application):
                     continue
 
                 should_remind = (
-                    (0 <= target_time - now_ts <= 900) or  # 15 min ennen
-                    (0 <= now_ts - target_time <= 1800)     # 30 min jälkeen
+                    (0 <= target_time - now_ts <= 900) or
+                    (0 <= now_ts - target_time <= 1800)
                 )
 
                 if not should_remind:
                     continue
 
-                # KORJAUS: Käytä last_reminded_at eikä last_updated
                 if last_reminded_at and (now_ts - last_reminded_at) < 3600:
                     continue
 
@@ -3004,13 +2852,11 @@ async def check_proactive_triggers(application):
                 except Exception as e:
                     print(f"[PLAN REMINDER ERROR] {e}")
 
-            # SPONTANEOUS MESSAGES & IMAGES (harvemmin)
             for user_id in list(continuity_state.keys()):
                 try:
                     update_jealousy_mode(user_id)
                     await maybe_send_spontaneous_message(application, user_id)
-                    # Kuvat vielä harvemmin (ei tarvita usein)
-                    if random.random() < 0.1:  # 10% todennäköisyys
+                    if random.random() < 0.1:
                         await maybe_send_spontaneous_image(application, user_id)
                 except Exception as e:
                     print(f"[SPONTANEOUS ERROR for user {user_id}] {e}")
@@ -3444,11 +3290,11 @@ def get_or_create_state(user_id):
             "conversation_mode_last_change": 0,
             "spontaneous_narrative": {
                 "active": False,
-                "type": None,  # "going_out", "meeting_friend", "mysterious_plan", "past_memory"
+                "type": None,
                 "context": "",
                 "started_at": 0,
                 "last_update": 0,
-                "progression": 0,  # 0-1, how far along the narrative
+                "progression": 0,
                 "details": {}
             }
         }
