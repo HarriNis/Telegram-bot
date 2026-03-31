@@ -2963,8 +2963,16 @@ Based on the context above, respond as Megan. Remember:
 # ====================== HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        # LISÄÄ DEBUG
+        print(f"[DEBUG] handle_message called")
+        print(f"[DEBUG] update: {update}")
+        print(f"[DEBUG] update.effective_user: {update.effective_user}")
+        
         user_id = update.effective_user.id
+        print(f"[DEBUG] user_id: {user_id}")
+        
         text = (update.message.text or "").strip()
+        print(f"[DEBUG] text: {text}")
 
         if not text:
             return
@@ -2980,7 +2988,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_image_request(update, user_id, text)
             return
 
+        print(f"[DEBUG] Getting state for user {user_id}")
         state = get_or_create_state(user_id)
+        print(f"[DEBUG] State retrieved: {type(state)}")
         
         update_jealousy_mode(user_id)
         
@@ -3435,6 +3445,7 @@ def update_topic_state(user_id, frame):
 
 def get_or_create_state(user_id):
     if user_id not in continuity_state:
+        print(f"[STATE] Creating new state for user {user_id}")
         continuity_state[user_id] = {
             "energy": "normal",
             "availability": "free",
@@ -3600,9 +3611,13 @@ def get_or_create_state(user_id):
             }
         }
 
+        # LISÄÄ SCENE STATE
         continuity_state[user_id].update(init_scene_state())
+        
+        # LATAA PLANS
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
 
+        # LATAA TOPIC STATE
         topic_state = load_topic_state_from_db(user_id)
         if topic_state:
             continuity_state[user_id]["topic_state"] = topic_state
