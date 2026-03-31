@@ -2963,16 +2963,8 @@ Based on the context above, respond as Megan. Remember:
 # ====================== HANDLE_MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # LISÄÄ DEBUG
-        print(f"[DEBUG] handle_message called")
-        print(f"[DEBUG] update: {update}")
-        print(f"[DEBUG] update.effective_user: {update.effective_user}")
-        
         user_id = update.effective_user.id
-        print(f"[DEBUG] user_id: {user_id}")
-        
         text = (update.message.text or "").strip()
-        print(f"[DEBUG] text: {text}")
 
         if not text:
             return
@@ -2988,9 +2980,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_image_request(update, user_id, text)
             return
 
-        print(f"[DEBUG] Getting state for user {user_id}")
+        # TURVALLISET STATE-HAUT
         state = get_or_create_state(user_id)
-        print(f"[DEBUG] State retrieved: {type(state)}")
+        
+        # VARMISTA ETTÄ KAIKKI AVAIMET ON OLEMASSA
+        if "jealousy_mode" not in state:
+            state["jealousy_mode"] = False
+        if "jealousy_intensity" not in state:
+            state["jealousy_intensity"] = 0.0
+        if "location_status" not in state:
+            state["location_status"] = "separate"
+        if "spontaneous_narrative" not in state:
+            state["spontaneous_narrative"] = {
+                "active": False,
+                "type": None,
+                "context": "",
+                "started_at": 0,
+                "last_update": 0,
+                "progression": 0,
+                "details": {}
+            }
+        if "submission_level" not in state:
+            state["submission_level"] = 0.0
+        if "last_interaction" not in state:
+            state["last_interaction"] = 0
+        if "conversation_mode" not in state:
+            state["conversation_mode"] = "casual"
+        if "conversation_mode_last_change" not in state:
+            state["conversation_mode_last_change"] = 0
+        
+        print(f"[DEBUG] State keys: {list(state.keys())[:20]}")  # Näytä ensimmäiset 20 avainta
         
         update_jealousy_mode(user_id)
         
@@ -3093,6 +3112,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_persistent_state_to_db(user_id)
 
+    except KeyError as e:
+        # TARKKA KEYERROR-VIRHEILMOITUS
+        error_msg = f"""
+🔴 KEYERROR in handle_message
+
+Missing key: {str(e)}
+
+State keys available: {list(state.keys()) if 'state' in locals() else 'State not created'}
+
+User ID: {user_id if 'user_id' in locals() else 'N/A'}
+Text: {text if 'text' in locals() else 'N/A'}
+
+Traceback:
+{traceback.format_exc()}
+"""
+        print(error_msg)
+        
+        await update.message.reply_text(
+            f"⚠️ Puuttuva avain: {str(e)}\n"
+            f"Käytä /status tarkistaaksesi tilan"
+        )
+        
     except Exception as e:
         error_msg = f"""
 🔴 VIRHE HANDLE_MESSAGE:SSA
