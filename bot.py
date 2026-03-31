@@ -869,12 +869,13 @@ def migrate_database():
             """)
             
             conn.commit()
-            print("[MIGRATION] ✅ Database migration completed successfully")
             
     except Exception as e:
         print(f"[MIGRATION ERROR] {e}")
         traceback.print_exc()
-        # ÄLKÄÄ LOPETTAKO - jatka eteenpäin
+    
+    # PAKKO TULOSTAA AINA
+    print("[MIGRATION] ✅ Completed (with or without changes)")
 
 # ====================== GLOBAL STATE CONTAINERS ======================
 continuity_state = {}
@@ -3311,30 +3312,39 @@ def get_or_create_state(user_id):
 # ====================== MAIN ======================
 async def main():
     global background_task
+    
+    print("[MAIN] ===== STARTING MAIN FUNCTION =====")
+    
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
+    print(f"[MAIN] Flask started")
 
-    # MIGRAATIO ENNEN KAIKKEA MUUTA
+    # MIGRAATIO
+    print("[MAIN] Running migration...")
     try:
         migrate_database()
+        print("[MAIN] Migration done")
     except Exception as e:
-        print(f"[MIGRATION FATAL ERROR] {e}")
+        print(f"[MAIN] Migration error: {e}")
         traceback.print_exc()
 
+    # LATAA STATES
+    print("[MAIN] Loading states...")
     try:
         load_states_from_db()
-        print("✅ Loaded persistent states from database")
+        print("[MAIN] States loaded")
     except Exception as e:
-        print(f"[LOAD STATES ERROR] {e}")
+        print(f"[MAIN] Load states error: {e}")
         traceback.print_exc()
     
     # VENICE-TESTI (PAKKO AJAA)
-    print("[VENICE TEST] ===== STARTING TEST =====")
+    print("[MAIN] ===== VENICE TEST START =====")
+    print(f"[VENICE TEST] ===== STARTING TEST =====")
+    
     if VENICE_API_KEY:
         print(f"[VENICE TEST] API Key present: {bool(VENICE_API_KEY)}")
         print(f"[VENICE TEST] API Key length: {len(VENICE_API_KEY)}")
-        print(f"[VENICE TEST] API Key starts with: {VENICE_API_KEY[:10]}...")
+        print(f"[VENICE TEST] API Key first 10 chars: {VENICE_API_KEY[:10]}...")
         
         test_prompt = "A simple test image of a red apple on a white background"
         
@@ -3353,7 +3363,10 @@ async def main():
         print("[VENICE TEST] ⚠️ No API key set")
     
     print("[VENICE TEST] ===== TEST COMPLETE =====")
+    print("[MAIN] ===== VENICE TEST DONE =====")
 
+    # TELEGRAM BOT
+    print("[MAIN] Building Telegram application...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("newgame", cmd_new_game))
@@ -3370,12 +3383,15 @@ async def main():
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    print("[MAIN] Starting background task...")
     background_task = asyncio.create_task(check_proactive_triggers(application))
 
-    print(f"✅ Megan {BOT_VERSION} käynnistyy... (GitHub → Render + Telegram valmis)")
+    print(f"[MAIN] Initializing Telegram bot...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
+    
+    print(f"[MAIN] ✅ Bot is now running!")
 
     try:
         await asyncio.Event().wait()
