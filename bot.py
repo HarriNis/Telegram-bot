@@ -1807,18 +1807,34 @@ def update_temporal_state(user_id: int, current_time: float):
     Päivittää ajallisen tilan ja laskee kuinka kauan viimeisestä viestistä
     """
     state = get_or_create_state(user_id)
-    temporal = state.setdefault("temporal_state", {
-        "last_message_timestamp": 0,
-        "last_message_time_str": "",
-        "time_since_last_message_hours": 0.0,
-        "time_since_last_message_minutes": 0,
-        "current_activity_started_at": 0,
-        "current_activity_duration_planned": 0,
-        "current_activity_end_time": 0,
-        "activity_type": None,
-        "should_ignore_until": 0,
-        "ignore_reason": None
-    })
+    
+    # ✅ VARMISTA ETTÄ temporal_state ON OLEMASSA JA TÄYTETTY
+    if "temporal_state" not in state:
+        state["temporal_state"] = {}
+    
+    temporal = state["temporal_state"]
+    
+    # ✅ VARMISTA ETTÄ KAIKKI AVAIMET ON OLEMASSA
+    if "last_message_timestamp" not in temporal:
+        temporal["last_message_timestamp"] = 0
+    if "last_message_time_str" not in temporal:
+        temporal["last_message_time_str"] = ""
+    if "time_since_last_message_hours" not in temporal:
+        temporal["time_since_last_message_hours"] = 0.0
+    if "time_since_last_message_minutes" not in temporal:
+        temporal["time_since_last_message_minutes"] = 0
+    if "current_activity_started_at" not in temporal:
+        temporal["current_activity_started_at"] = 0
+    if "current_activity_duration_planned" not in temporal:
+        temporal["current_activity_duration_planned"] = 0
+    if "current_activity_end_time" not in temporal:
+        temporal["current_activity_end_time"] = 0
+    if "activity_type" not in temporal:
+        temporal["activity_type"] = None
+    if "should_ignore_until" not in temporal:
+        temporal["should_ignore_until"] = 0
+    if "ignore_reason" not in temporal:
+        temporal["ignore_reason"] = None
     
     # Laske aika edellisestä viestistä
     if temporal["last_message_timestamp"] > 0:
