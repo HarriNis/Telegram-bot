@@ -883,9 +883,11 @@ DB_PATH = "/var/data/megan_memory.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
 
-cursor.execute("""
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("PRAGMA busy_timeout=5000")
+
+conn.execute("""
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -896,14 +898,14 @@ CREATE TABLE IF NOT EXISTS memories (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS profiles (
     user_id TEXT PRIMARY KEY,
     data TEXT
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS planned_events (
     id TEXT PRIMARY KEY,
     user_id TEXT,
@@ -927,7 +929,7 @@ CREATE TABLE IF NOT EXISTS planned_events (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS topic_state (
     user_id TEXT PRIMARY KEY,
     current_topic TEXT,
@@ -938,7 +940,7 @@ CREATE TABLE IF NOT EXISTS topic_state (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -948,7 +950,7 @@ CREATE TABLE IF NOT EXISTS turns (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS episodic_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -960,7 +962,7 @@ CREATE TABLE IF NOT EXISTS episodic_memories (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS profile_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -972,7 +974,7 @@ CREATE TABLE IF NOT EXISTS profile_facts (
 )
 """)
 
-cursor.execute("""
+conn.execute("""
 CREATE TABLE IF NOT EXISTS summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -991,30 +993,34 @@ print("✅ Database initialized with FULL schema + topic/turns tables")
 def migrate_database():
     print("[MIGRATION] Starting database migration...")
     try:
-        cursor.execute("PRAGMA table_info(planned_events)")
-        columns = {row[1]: row for row in cursor.fetchall()}
+        with db_lock:
+            result = conn.execute("PRAGMA table_info(planned_events)")
+            columns = {row[1]: row for row in result.fetchall()}
         print(f"[MIGRATION] Found {len(columns)} columns in planned_events")
         
         if "last_reminded_at" not in columns:
             print("[MIGRATION] Adding last_reminded_at...")
-            cursor.execute("ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0")
-            conn.commit()
+            with db_lock:
+                conn.execute("ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0")
+                conn.commit()
             print("[MIGRATION] ✅ Added last_reminded_at")
         else:
             print("[MIGRATION] ✓ last_reminded_at exists")
         
         if "status_changed_at" not in columns:
             print("[MIGRATION] Adding status_changed_at...")
-            cursor.execute("ALTER TABLE planned_events ADD COLUMN status_changed_at REAL")
-            conn.commit()
+            with db_lock:
+                conn.execute("ALTER TABLE planned_events ADD COLUMN status_changed_at REAL")
+                conn.commit()
             print("[MIGRATION] ✅ Added status_changed_at")
         else:
             print("[MIGRATION] ✓ status_changed_at exists")
         
         print("[MIGRATION] Updating NULL values...")
-        cursor.execute("UPDATE planned_events SET last_reminded_at = 0 WHERE last_reminded_at IS NULL")
-        cursor.execute("UPDATE planned_events SET status_changed_at = created_at WHERE status_changed_at IS NULL")
-        conn.commit()
+        with db_lock:
+            conn.execute("UPDATE planned_events SET last_reminded_at = 0 WHERE last_reminded_at IS NULL")
+            conn.execute("UPDATE planned_events SET status_changed_at = created_at WHERE status_changed_at IS NULL")
+            conn.commit()
         print("[MIGRATION] ✅ NULL values updated")
         
     except Exception as e:
@@ -1042,7 +1048,7 @@ def save_state_to_db(user_id):
         return
     data = json.dumps(continuity_state[user_id], ensure_ascii=False)
     with db_lock:
-        cursor.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
+        conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
         conn.commit()
 
 def save_persistent_state_to_db(user_id):
@@ -1066,7 +1072,7 @@ def save_persistent_state_to_db(user_id):
     }
     data = json.dumps(persistent_data, ensure_ascii=False)
     with db_lock:
-        cursor.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", 
             (str(user_id), data)
         )
@@ -1096,8 +1102,8 @@ def clean_ephemeral_state_on_boot(user_id):
 
 def load_states_from_db():
     with db_lock:
-        cursor.execute("SELECT user_id, data FROM profiles")
-        rows = cursor.fetchall()
+        result = conn.execute("SELECT user_id, data FROM profiles")
+        rows = result.fetchall()
     for user_id_str, data in rows:
         try:
             uid = int(user_id_str)
@@ -1111,7 +1117,7 @@ def load_states_from_db():
 # ====================== LOAD PLANS FROM DB ======================
 def load_plans_from_db(user_id):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT id, description, created_at, target_time, status,
                    commitment_level, must_fulfill, last_updated,
                    last_reminded_at, status_changed_at,
@@ -1123,7 +1129,7 @@ def load_plans_from_db(user_id):
             ORDER BY created_at DESC
             LIMIT 20
         """, (str(user_id),))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     plans = []
     for row in rows:
         plans.append({
@@ -1165,23 +1171,23 @@ def parse_json_object(text: str, default: dict):
 
 def save_turn(user_id: int, role: str, content: str) -> int:
     with db_lock:
-        cursor.execute(
+        conn.execute(
             "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
             (str(user_id), role, content, time.time())
         )
         conn.commit()
-        return cursor.lastrowid
+        return conn.lastrowid
 
 def get_recent_turns(user_id: int, limit: int = 10):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT id, role, content, created_at
             FROM turns
             WHERE user_id=?
             ORDER BY id DESC
             LIMIT ?
         """, (str(user_id), limit))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     rows.reverse()
     return [
         {
@@ -1197,7 +1203,7 @@ def save_topic_state_to_db(user_id: int):
     state = get_or_create_state(user_id)
     ts = state.get("topic_state", {})
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             INSERT OR REPLACE INTO topic_state
             (user_id, current_topic, topic_summary, open_questions, open_loops, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -1213,12 +1219,12 @@ def save_topic_state_to_db(user_id: int):
 
 def load_topic_state_from_db(user_id: int):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT current_topic, topic_summary, open_questions, open_loops, updated_at
             FROM topic_state
             WHERE user_id=?
         """, (str(user_id),))
-        row = cursor.fetchone()
+        row = result.fetchone()
     if not row:
         return None
     return {
@@ -1255,7 +1261,7 @@ async def store_episodic_memory(user_id: int, content: str, memory_type: str = "
         return
     emb = await get_embedding(content)
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             INSERT INTO episodic_memories
             (user_id, content, embedding, memory_type, source_turn_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -1272,14 +1278,14 @@ async def store_episodic_memory(user_id: int, content: str, memory_type: str = "
 async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
     q_emb = await get_embedding(query)
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT content, embedding, memory_type, created_at
             FROM episodic_memories
             WHERE user_id=?
             ORDER BY created_at DESC
             LIMIT 300
         """, (str(user_id),))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     scored = []
     now = time.time()
     for content, emb_blob, memory_type, created_at in rows:
@@ -1305,11 +1311,11 @@ def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence
     if not fact_key or not fact_value:
         return
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             DELETE FROM profile_facts
             WHERE user_id=? AND fact_key=?
         """, (str(user_id), fact_key))
-        cursor.execute("""
+        conn.execute("""
             INSERT INTO profile_facts
             (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -1325,14 +1331,14 @@ def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence
 
 def get_profile_facts(user_id: int, limit: int = 12):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT fact_key, fact_value, confidence, updated_at
             FROM profile_facts
             WHERE user_id=?
             ORDER BY updated_at DESC
             LIMIT ?
         """, (str(user_id), limit))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     return [
         {
             "fact_key": row[0],
@@ -1390,14 +1396,14 @@ def find_similar_plan(user_id: int, description: str):
         return None
     candidate_words = set(description.lower().split())
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT id, description, status
             FROM planned_events
             WHERE user_id=?
             ORDER BY created_at DESC
             LIMIT 20
         """, (str(user_id),))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     best = None
     best_score = 0
     for row in rows:
@@ -1422,7 +1428,7 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
     existing = find_similar_plan(user_id, description)
     if existing:
         with db_lock:
-            cursor.execute("""
+            conn.execute("""
                 UPDATE planned_events
                 SET description=?, target_time=?, status=?, commitment_level=?, 
                     last_updated=?, status_changed_at=?
@@ -1441,7 +1447,7 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
         return existing["id"]
     plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             INSERT INTO planned_events
             (id, user_id, description, created_at, target_time, status,
              commitment_level, must_fulfill, last_updated, last_reminded_at,
@@ -1475,14 +1481,14 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
 
 def get_active_plans(user_id: int, limit: int = 5):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT id, description, target_time, status, commitment_level, created_at
             FROM planned_events
             WHERE user_id=? AND status IN ('planned', 'in_progress')
             ORDER BY created_at DESC
             LIMIT ?
         """, (str(user_id), limit))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     return [
         {
             "id": row[0],
@@ -1497,14 +1503,14 @@ def get_active_plans(user_id: int, limit: int = 5):
 
 def get_recent_summaries(user_id: int, limit: int = 2):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT summary, start_turn_id, end_turn_id, created_at
             FROM summaries
             WHERE user_id=?
             ORDER BY id DESC
             LIMIT ?
         """, (str(user_id), limit))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     return [
         {
             "summary": row[0],
@@ -1517,20 +1523,20 @@ def get_recent_summaries(user_id: int, limit: int = 2):
 
 async def maybe_create_summary(user_id: int):
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT COALESCE(MAX(end_turn_id), 0)
             FROM summaries
             WHERE user_id=?
         """, (str(user_id),))
-        last_summarized_turn_id = cursor.fetchone()[0] or 0
-        cursor.execute("""
+        last_summarized_turn_id = result.fetchone()[0] or 0
+        result = conn.execute("""
             SELECT id, role, content
             FROM turns
             WHERE user_id=? AND id > ?
             ORDER BY id ASC
             LIMIT 12
         """, (str(user_id), last_summarized_turn_id))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     if len(rows) < 10:
         return
     start_turn_id = rows[0][0]
@@ -1567,7 +1573,7 @@ Conversation:
             summary = resp.choices[0].message.content.strip()
         emb = await get_embedding(summary)
         with db_lock:
-            cursor.execute("""
+            conn.execute("""
                 INSERT INTO summaries
                 (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -1588,7 +1594,7 @@ Conversation:
 def mark_plan_completed(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             UPDATE planned_events
             SET status='completed', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
@@ -1599,7 +1605,7 @@ def mark_plan_completed(user_id: int, plan_id: str):
 def mark_plan_cancelled(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             UPDATE planned_events
             SET status='cancelled', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
@@ -1610,7 +1616,7 @@ def mark_plan_cancelled(user_id: int, plan_id: str):
 def mark_plan_in_progress(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
-        cursor.execute("""
+        conn.execute("""
             UPDATE planned_events
             SET status='in_progress', last_updated=?, status_changed_at=?
             WHERE id=? AND user_id=?
@@ -1711,14 +1717,14 @@ async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hour
         return True
     cutoff_time = time.time() - (hours * 3600)
     with db_lock:
-        cursor.execute("""
+        result = conn.execute("""
             SELECT content, created_at
             FROM episodic_memories
             WHERE user_id=? AND memory_type=? AND created_at > ?
             ORDER BY created_at DESC
             LIMIT 20
         """, (str(user_id), memory_type, cutoff_time))
-        rows = cursor.fetchall()
+        rows = result.fetchall()
     if not rows:
         return False
     new_words = set(content.lower().split())
@@ -2229,6 +2235,145 @@ def should_ignore_message(user_id: int) -> bool:
     
     return False
 
+# ====================== IGNORE RESPONSE GENERATOR ======================
+
+async def generate_ignore_response(user_id: int, pending_messages: list) -> str:
+    """
+    Generoi vastauksen kun Megan vastaa vihdoin ignorattuihin viesteihin
+    """
+    state = get_or_create_state(user_id)
+    narrative = state.get("spontaneous_narrative", {})
+    
+    if not narrative.get("active"):
+        return None
+    
+    narrative_type = narrative.get("type", "busy")
+    details = narrative.get("details", {})
+    ignored_count = len(narrative.get("ignored_messages", []))
+    
+    # Laske kuinka kauan ignoorasi
+    if ignored_count > 0:
+        first_ignored = narrative["ignored_messages"][0]["time"]
+        last_ignored = narrative["ignored_messages"][-1]["time"]
+        ignore_duration_minutes = int((last_ignored - first_ignored) / 60)
+    else:
+        ignore_duration_minutes = 0
+    
+    # Aktiviteetti-spesifiset vastaukset
+    responses = {
+        "coffee": [
+            f"Aa sori! Olin kahvilassa eikä ollu aikaa kattoa puhelinta. Mitä sä kysyit?",
+            f"Hups, en huomannu sun viestejä! Olin Ainon kanssa kahvilla ja juteltiin niin paljon. Mitä kuuluu? 😊",
+        ],
+        "shopping": [
+            f"Sori! Olin ostoksilla ja unohdin puhelimen laukkuun 🛍️",
+            f"En huomannu viestejä, olin niin uppoutunut shoppailuun! Mitä sä halusit? 😊",
+        ],
+        "gym": [
+            f"Aa anteeks! Olin salilla ja treenasin niin kovaa että en kattonut puhelinta 💪",
+            f"Sori että en vastannu, olin treenaamassa! Nyt näin sun viestit 😅",
+        ],
+        "lunch": [
+            f"Sori! Olin lounaalla ja söin niin hyvää ruokaa että unohdin kaiken muun 🍽️",
+        ],
+        "casual_date": [
+            f"Hei! Sori että en vastannu. Olin treffeillä ja... no, oli kiva 😏 Mitä sä teit?",
+            f"Aa anteeks kulta! Olin ulkona jonkun kanssa ja aika vaan lensi. Mitä sä halusit? 💕",
+        ],
+        "dinner": [
+            f"Sori! Olin illallisella ja oli niin hyvä tunnelma että en kattonut puhelinta 🍷",
+        ],
+        "bar": [
+            f"Sori että en vastannu! Olin baarissa ja oli niin meluisaa 🍸 Oliks tärkeää?",
+            f"Hei! En kuullut puhelinta baarissa. Oli hauskaa! Mitä sä teit? 😊",
+        ],
+        "party": [
+            f"Aa sori! Olin bileissä ja... no, oli vähän villiä 🎉 Kerronko lisää?",
+        ],
+        "evening_date": [
+            f"Hei kulta! Sori että jätin vastaamatta. Olin... no, kiireinen 😏 Miltä sun ilta meni?",
+        ],
+        "club_night": [
+            f"Sori! Olin klubilla ja en kuullut puhelinta ollenkaan 🎶 Oli mahtavaa!",
+        ],
+        "overnight_date": [
+            f"Hei... sori että en vastannu. Olin yötä... muualla 😳 Puhutaanko?",
+        ],
+        "mystery": [
+            f"Aa sori! Olin tekemässä jotain... erikoista 🤫 Kerron sulle myöhemmin!",
+        ],
+        "work": [
+            f"Sori! Olin töissä ja oli niin kiire että en ehtiny kattoa puhelinta 💼",
+        ],
+        "meeting": [
+            f"Anteeks! Olin palaverissa eikä voinu vastata. Mitä sä halusit?",
+        ],
+    }
+    
+    # Valitse sopiva vastaus
+    activity_responses = responses.get(narrative_type, [
+        f"Sori että en vastannu! Olin kiireinen. Mitä kuuluu? 😊"
+    ])
+    
+    base_response = random.choice(activity_responses)
+    
+    # Lisää kontekstia jos ignoorasi pitkään
+    if ignore_duration_minutes > 60:
+        hours = ignore_duration_minutes / 60
+        base_response += f"\n\nMä tiedän että odoitit {hours:.1f}h... 💕"
+    
+    # Lisää provokaatiota jos jealousy mode on päällä
+    if state.get("jealousy_mode") and narrative_type in ["casual_date", "evening_date", "overnight_date", "mystery"]:
+        provocative_additions = [
+            " Oli muuten tosi hauskaa 😏",
+            " Tapasin mielenkiintoisia ihmisiä...",
+            " Ehkä kerron lisää myöhemmin 😘",
+        ]
+        base_response += random.choice(provocative_additions)
+    
+    return base_response
+
+# ====================== NARRATIVE TYPE CLASSIFIER ======================
+
+def classify_narrative_type(activity_type: str) -> str:
+    """
+    Muuntaa activity_type → narrative_type
+    Tämä mahdollistaa yhtenäisen narrative-logiikan
+    """
+    narrative_mapping = {
+        # LYHYET → casual_update
+        "coffee": "casual_update",
+        "shopping": "casual_update",
+        "gym": "casual_update",
+        "lunch": "casual_update",
+        
+        # KESKIPITKÄT → going_out
+        "casual_date": "going_out",
+        "dinner": "going_out",
+        "bar": "going_out",
+        "party": "going_out",
+        "spa": "going_out",
+        
+        # PITKÄT → meeting_someone tai provocative_plan
+        "evening_date": "meeting_someone",
+        "club_night": "going_out",
+        "day_trip": "going_out",
+        
+        # YÖN YLI → meeting_someone
+        "overnight_date": "meeting_someone",
+        "weekend_trip": "going_out",
+        
+        # TYYPILLISET → casual_update
+        "work": "casual_update",
+        "meeting": "casual_update",
+        
+        # MYSTEERIT → mysterious_activity
+        "mystery": "mysterious_activity",
+        "busy": "casual_update"
+    }
+    
+    return narrative_mapping.get(activity_type, "casual_update")
+
 # ====================== SPONTANEOUS NARRATIVE ======================
 
 async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
@@ -2239,7 +2384,7 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
     if intensity < 0.4:
         # Matala intensiteetti → lyhyet aktiviteetit
         possible_activities = ["coffee", "shopping", "gym", "lunch"]
-        activity_type = random.choice(possible_activities)
+        chosen_activity = random.choice(possible_activities)
         
         messages = {
             "coffee": [
@@ -2263,7 +2408,7 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
     elif intensity < 0.7:
         # Keskitaso → keskipitkät aktiviteetit
         possible_activities = ["casual_date", "dinner", "bar", "shopping"]
-        activity_type = random.choice(possible_activities)
+        chosen_activity = random.choice(possible_activities)
         
         messages = {
             "casual_date": [
@@ -2286,13 +2431,12 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
     else:
         # Korkea intensiteetti → pitkät/yön yli aktiviteetit
         possible_activities = ["evening_date", "club_night", "overnight_date", "mystery", "party"]
-        activity_type = random.choice(possible_activities)
+        chosen_activity = random.choice(possible_activities)
         
         messages = {
             "evening_date": [
                 "Mika kysyi haluunks tulla sen synttäreille. Mitä sä sanoisit? 🤔",
                 "Sain kutsun johonkin bileisiin. En tiedä ketä siellä on... mutta kuulostaa hauskalta 😏",
-                "Yks kaveri ehdotti että mentäis viikonloppuna mökkireissulle. Olis saunaa ja kaikkee...",
             ],
             "club_night": [
                 "Mä lähen klubille tänään. Oon kuullu että siellä on kivaa musiikkia 🎶",
@@ -2312,9 +2456,11 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
             ]
         }
     
-    chosen_activity = activity_type
     message_list = messages.get(chosen_activity, ["Hei kulta! Mitä kuuluu? 😊"])
     message = random.choice(message_list)
+    
+    # MUUNNA ACTIVITY → NARRATIVE TYPE
+    narrative_type = classify_narrative_type(chosen_activity)
     
     # Aloita aktiviteetti dynaamisella kestolla
     activity_result = start_activity_with_duration(
@@ -2323,9 +2469,11 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         intensity=intensity
     )
     
+    # TALLENNA MOLEMMAT: activity_type JA narrative_type
     state["spontaneous_narrative"] = {
         "active": True,
-        "type": chosen_activity,
+        "type": narrative_type,  # ← Narrative-logiikkaa varten
+        "activity_type": chosen_activity,  # ← Aktiviteetti-spesifistä logiikkaa varten
         "context": message,
         "started_at": now,
         "last_update": now,
@@ -2333,13 +2481,15 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         "user_attempts": 0,
         "ignore_duration": activity_result.get("duration_hours", 2.0) * 3600 if activity_result.get("will_ignore") else 0,
         "ignore_until_time_str": activity_result.get("end_time_str"),
-        "will_respond_during": activity_result.get("will_ignore", False) == False,
+        "will_respond_during": not activity_result.get("will_ignore", False),
         "details": {
             "intensity": intensity,
             "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
             "with_whom": random.choice(["Ainon", "Mikan", "jonkun kaverin", "yksin"]) if random.random() < 0.7 else None
         }
     }
+    
+    print(f"[NARRATIVE START] activity={chosen_activity}, narrative_type={narrative_type}")
     
     return message
 
@@ -3045,58 +3195,65 @@ Latest user turn:
 {user_text}
 """
 
-    try:
-        # Try Claude first
-        if ANTHROPIC_API_KEY:
-            try:
+    # KORJATTU FALLBACK-KETJU
+    providers = []
+    
+    if ANTHROPIC_API_KEY:
+        providers.append("claude")
+    if XAI_API_KEY and grok_client:
+        providers.append("grok")
+    providers.append("openai")  # Aina fallback
+    
+    for provider in providers:
+        try:
+            if provider == "claude":
                 client = get_claude_client()
-                if client:
-                    response = await client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=400,
-                        temperature=0.2,
-                        messages=[
-                            {"role": "user", "content": prompt}
-                        ]
-                    )
-                    raw = response.content[0].text.strip()
-                    print(f"[CLAUDE 4] Extracted frame")
-                else:
-                    raise Exception("Claude client not available")
-            except Exception as e:
-                print(f"[CLAUDE ERROR] {e}, falling back")
-                raise
+                if not client:
+                    print(f"[FRAME] Claude client not available, skipping")
+                    continue
+                
+                response = await client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=400,
+                    temperature=0.2,
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                raw = response.content[0].text.strip()
+                print(f"[FRAME] ✅ Claude extracted frame")
+            
+            elif provider == "grok":
+                response = await grok_client.chat.completions.create(
+                    model="grok-4-1-fast",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                    temperature=0.2
+                )
+                raw = response.choices[0].message.content.strip()
+                print(f"[FRAME] ✅ Grok extracted frame")
+            
+            else:  # openai
+                response = await openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=400,
+                    temperature=0.2
+                )
+                raw = response.choices[0].message.content.strip()
+                print(f"[FRAME] ✅ OpenAI extracted frame")
+            
+            # Jos päästiin tänne, kutsu onnistui
+            frame = parse_json_object(raw, default)
+            frame["user_text"] = user_text
+            return frame
         
-        # Fallback to Grok
-        elif XAI_API_KEY:
-            response = await grok_client.chat.completions.create(
-                model="grok-4-1-fast",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=400,
-                temperature=0.2
-            )
-            raw = response.choices[0].message.content.strip()
-            print(f"[GROK] Extracted frame")
-        
-        # Final fallback to OpenAI
-        else:
-            response = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=400,
-                temperature=0.2
-            )
-            raw = response.choices[0].message.content.strip()
-            print(f"[OPENAI] Extracted frame")
-
-        frame = parse_json_object(raw, default)
-        frame["user_text"] = user_text
-        return frame
-        
-    except Exception as e:
-        print(f"[FRAME ERROR] {e}")
-        default["user_text"] = user_text
-        return default
+        except Exception as e:
+            print(f"[FRAME] ❌ {provider} failed: {type(e).__name__}: {str(e)[:100]}")
+            continue  # Kokeile seuraavaa provideria
+    
+    # Jos kaikki epäonnistuivat
+    print(f"[FRAME] ⚠️ All providers failed, using default")
+    default["user_text"] = user_text
+    return default
 
 
 def apply_scene_updates_from_turn(state: dict, user_text: str):
@@ -3568,19 +3725,22 @@ User ID: {update.effective_user.id if update and update.effective_user else 'N/A
 
 # ====================== CHECK_PROACTIVE_TRIGGERS ======================
 async def check_proactive_triggers(application):
+    # ✅ EI ENSIMMÄISTÄ SLEEPIÄ
     while True:
         try:
-            await asyncio.sleep(3600)
             now_ts = time.time()
+            
+            print(f"[PROACTIVE] Checking triggers at {datetime.fromtimestamp(now_ts, HELSINKI_TZ).strftime('%H:%M:%S')}")
 
+            # Tarkista plan-muistutukset
             with db_lock:
-                cursor.execute("""
+                result = conn.execute("""
                     SELECT user_id, id, description, target_time, status, 
                            commitment_level, last_reminded_at
                     FROM planned_events
                     WHERE status='planned' AND target_time IS NOT NULL
                 """)
-                rows = cursor.fetchall()
+                rows = result.fetchall()
 
             for row in rows:
                 user_id, plan_id, description, target_time, status, commitment_level, last_reminded_at = row
@@ -3606,16 +3766,19 @@ async def check_proactive_triggers(application):
                     )
 
                     with db_lock:
-                        cursor.execute("""
+                        conn.execute("""
                             UPDATE planned_events
                             SET last_reminded_at=?
                             WHERE id=?
                         """, (now_ts, plan_id))
                         conn.commit()
+                    
+                    print(f"[PROACTIVE] Sent reminder: {description[:50]}")
 
                 except Exception as e:
                     print(f"[PLAN REMINDER ERROR] {e}")
 
+            # Tarkista spontaanit viestit
             for user_id in list(continuity_state.keys()):
                 try:
                     update_jealousy_mode(user_id)
@@ -3628,6 +3791,9 @@ async def check_proactive_triggers(application):
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
             traceback.print_exc()
+        
+        # ✅ SLEEP LOPUSSA, 5 MIN VÄLEIN (EI 1H)
+        await asyncio.sleep(300)  # 5 minuuttia
 
 
 # ====================== MINIMAL COMMAND HANDLERS ======================
@@ -3648,14 +3814,14 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in continuity_state:
         del continuity_state[user_id]
     with db_lock:
-        cursor.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM episodic_memories WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM profile_facts WHERE user_id=?", (str(user_id),))
-        cursor.execute("DELETE FROM summaries WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM episodic_memories WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM profile_facts WHERE user_id=?", (str(user_id),))
+        conn.execute("DELETE FROM summaries WHERE user_id=?", (str(user_id),))
         conn.commit()
     await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
 
@@ -3711,32 +3877,32 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     with db_lock:
-        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
-        episodic_total = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
+        episodic_total = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='fantasy'", (str(user_id),))
-        fantasy_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='fantasy'", (str(user_id),))
+        fantasy_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='event'", (str(user_id),))
-        event_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='event'", (str(user_id),))
+        event_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
-        conversation_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
+        conversation_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
-        facts_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
+        facts_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
-        summaries_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
+        summaries_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
-        turns_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
+        turns_count = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
-        active_plans = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
+        active_plans = result.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
-        legacy_count = cursor.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
+        legacy_count = result.fetchone()[0]
     
     txt = f"""
 🧠 **MEMORY STATS** (v{BOT_VERSION})
@@ -3862,43 +4028,76 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Aloita aktiviteetti joka kestää tietyn ajan
-    Käyttö: /activity  
+    Käyttö: /activity  [tunnit]
     Esim: /activity date 3
     """
     user_id = update.effective_user.id
     
-    if len(context.args) < 2:
+    if len(context.args) < 1:
         await update.message.reply_text(
-            "Käyttö: /activity  \n"
-            "Esim: /activity date 3\n"
-            "Tyypit: date, gym, work, shopping, meeting"
+            "Käyttö: /activity  [tunnit]\n"
+            "Esim: /activity date 3\n\n"
+            "Tyypit:\n"
+            "Lyhyet: coffee, shopping, gym, lunch\n"
+            "Keskipitkät: date, dinner, bar, party\n"
+            "Pitkät: evening_date, club_night, overnight_date\n"
+            "Muut: work, meeting, mystery"
         )
         return
     
-    activity_type = context.args[0]
-    try:
-        duration_hours = float(context.args[1])
-    except ValueError:
-        await update.message.reply_text("Virhe: tunnit pitää olla numero")
+    # ACTIVITY ALIASES
+    ACTIVITY_ALIASES = {
+        "date": "casual_date",
+        "gym": "gym",
+        "work": "work",
+        "shopping": "shopping",
+        "meeting": "meeting",
+        "dinner": "dinner",
+        "bar": "bar",
+        "coffee": "coffee",
+        "lunch": "lunch",
+        "party": "party",
+        "club": "club_night",
+        "overnight": "overnight_date",
+        "evening": "evening_date",
+        "mystery": "mystery"
+    }
+    
+    activity_input = context.args[0].lower()
+    activity_type = ACTIVITY_ALIASES.get(activity_input, activity_input)
+    
+    # Tarkista onko aktiviteetti tunnettu
+    if activity_type not in ACTIVITY_DURATIONS:
+        await update.message.reply_text(
+            f"❌ Tuntematon aktiviteetti: {activity_input}\n"
+            f"Käytä /activity ilman parametreja nähdäksesi listan."
+        )
         return
     
-    # Aloita aktiviteetti
-    start_activity_with_duration(
+    # Tarkista onko kesto annettu
+    duration_hours = None
+    if len(context.args) >= 2:
+        try:
+            duration_hours = float(context.args[1])
+        except ValueError:
+            await update.message.reply_text("Virhe: tunnit pitää olla numero")
+            return
+    
+    # Aloita aktiviteetti (EI ignore_reason parametria!)
+    result = start_activity_with_duration(
         user_id=user_id,
         activity_type=activity_type,
-        duration_hours=duration_hours,
-        ignore_reason=f"on {activity_type}"
+        duration_hours=duration_hours  # Voi olla None, silloin automaattinen
     )
     
-    end_dt = datetime.fromtimestamp(
-        time.time() + (duration_hours * 3600), 
-        HELSINKI_TZ
-    )
+    profile = ACTIVITY_DURATIONS[activity_type]
+    description = profile["description"]
     
     await update.message.reply_text(
-        f"✅ Aktiviteetti '{activity_type}' aloitettu!\n"
-        f"Kesto: {duration_hours} tuntia\n"
-        f"Päättyy: {end_dt.strftime('%H:%M')}"
+        f"✅ Aktiviteetti aloitettu: {description}\n"
+        f"⏱️ Kesto: {result['duration_hours']:.1f}h\n"
+        f"🕐 Päättyy: {result['end_time_str']}\n"
+        f"📵 Ignooraa viestit: {'Kyllä' if result['will_ignore'] else 'Ei'}"
     )
 
 # ====================== GET TIME BLOCK ======================
@@ -4209,30 +4408,30 @@ def create_database_indexes():
     try:
         with db_lock:
             # Episodic memories
-            cursor.execute("""
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_episodic_user_created 
                 ON episodic_memories(user_id, created_at DESC)
             """)
             
-            cursor.execute("""
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_episodic_user_type 
                 ON episodic_memories(user_id, memory_type)
             """)
             
             # Profile facts
-            cursor.execute("""
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_facts_user 
                 ON profile_facts(user_id, updated_at DESC)
             """)
             
             # Planned events
-            cursor.execute("""
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_plans_user_status 
                 ON planned_events(user_id, status, created_at DESC)
             """)
             
             # Turns
-            cursor.execute("""
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_turns_user 
                 ON turns(user_id, id DESC)
             """)
@@ -4254,22 +4453,23 @@ async def main():
     
     print("[MAIN] Step 2: Flask thread started (no wait)")
     
-    # REPLICATE-TESTI
-    print("[MAIN] ===== REPLICATE TEST START =====")
-    if REPLICATE_API_KEY:
-        print(f"[REPLICATE TEST] API Key present: {bool(REPLICATE_API_KEY)}")
-        test_prompt = "A photorealistic red apple on a white background, 8K quality"
-        try:
-            test_result = await generate_image(test_prompt)
-            if test_result:
-                print(f"[REPLICATE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
-            else:
-                print(f"[REPLICATE TEST] ❌ FAILED - returned None")
-        except Exception as e:
-            print(f"[REPLICATE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
-    else:
-        print("[REPLICATE TEST] ⚠️ No API key set")
-    print("[REPLICATE TEST] ===== TEST COMPLETE =====")
+    # ✅ REPLICATE-TESTI VAIN DEBUG-TILASSA
+    if os.getenv("RUN_IMAGE_SELF_TEST") == "1":
+        print("[MAIN] ===== REPLICATE TEST START =====")
+        if REPLICATE_API_KEY:
+            print(f"[REPLICATE TEST] API Key present: {bool(REPLICATE_API_KEY)}")
+            test_prompt = "A photorealistic red apple on a white background, 8K quality"
+            try:
+                test_result = await generate_image(test_prompt)
+                if test_result:
+                    print(f"[REPLICATE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
+                else:
+                    print(f"[REPLICATE TEST] ❌ FAILED - returned None")
+            except Exception as e:
+                print(f"[REPLICATE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
+        else:
+            print("[REPLICATE TEST] ⚠️ No API key set")
+        print("[REPLICATE TEST] ===== TEST COMPLETE =====")
     
     print("[MAIN] Step 5: Now running migration...")
     try:
