@@ -1079,6 +1079,8 @@ def save_persistent_state_to_db(user_id):
     if user_id not in continuity_state:
         return
     state = continuity_state[user_id]
+    
+    # ✅ TALLENNA MYÖS TEMPORAL_STATE
     persistent_data = {
         "submission_level": state.get("submission_level", 0.0),
         "humiliation_tolerance": state.get("humiliation_tolerance", 0.0),
@@ -1093,7 +1095,22 @@ def save_persistent_state_to_db(user_id):
         "manipulation_history": state.get("manipulation_history", {}),
         "user_model": state.get("user_model", {}),
         "location_status": state.get("location_status", "separate"),
+        
+        # ✅ LISÄÄ TÄMÄ
+        "temporal_state": state.get("temporal_state", {
+            "last_message_timestamp": 0,
+            "last_message_time_str": "",
+            "time_since_last_message_hours": 0.0,
+            "time_since_last_message_minutes": 0,
+            "current_activity_started_at": 0,
+            "current_activity_duration_planned": 0,
+            "current_activity_end_time": 0,
+            "activity_type": None,
+            "should_ignore_until": 0,
+            "ignore_reason": None
+        }),
     }
+    
     data = json.dumps(persistent_data, ensure_ascii=False)
     with db_lock:
         conn.execute(
@@ -1105,38 +1122,80 @@ def save_persistent_state_to_db(user_id):
 
 def clean_ephemeral_state_on_boot(user_id):
     state = get_or_create_state(user_id)
+    
     state["current_action"] = None
     state["action_end"] = 0
     state["action_started"] = 0
     state["action_duration"] = 0
     state["scene_locked_until"] = 0
     state["ignore_probability"] = 0.0
-    narrative = state.get("spontaneous_narrative", {})
-    if narrative.get("active"):
-        last_update = narrative.get("last_update", 0)
-        if time.time() - last_update > 3600:
-            narrative["active"] = False
-            print(f"[BOOT] Cleared old narrative for user {user_id}")
+    
+    # ✅ SAFE ACCESS
+    narrative = state.get("spontaneous_narrative")
+    if narrative and isinstance(narrative, dict):
+        if narrative.get("active"):
+            last_update = narrative.get("last_update", 0)
+            if time.time() - last_update > 3600:
+                narrative["active"] = False
+                print(f"[BOOT] Cleared old narrative for user {user_id}")
+    
+    # ✅ VARMISTA TEMPORAL_STATE
+    if "temporal_state" not in state or not isinstance(state.get("temporal_state"), dict):
+        state["temporal_state"] = {
+            "last_message_timestamp": 0,
+            "last_message_time_str": "",
+            "time_since_last_message_hours": 0.0,
+            "time_since_last_message_minutes": 0,
+            "current_activity_started_at": 0,
+            "current_activity_duration_planned": 0,
+            "current_activity_end_time": 0,
+            "activity_type": None,
+            "should_ignore_until": 0,
+            "ignore_reason": None
+        }
+    
     now = time.time()
     if state.get("spontaneous_message_cooldown", 0) < now:
         state["spontaneous_message_cooldown"] = 0
     if state.get("spontaneous_image_cooldown", 0) < now:
         state["spontaneous_image_cooldown"] = 0
+    
     print(f"[BOOT] Cleaned ephemeral state for user {user_id}")
 
 def load_states_from_db():
     with db_lock:
         result = conn.execute("SELECT user_id, data FROM profiles")
         rows = result.fetchall()
+    
     for user_id_str, data in rows:
         try:
             uid = int(user_id_str)
-            continuity_state[uid] = json.loads(data)
+            loaded_state = json.loads(data)
+            
+            # ✅ VARMISTA TEMPORAL_STATE
+            if "temporal_state" not in loaded_state or not isinstance(loaded_state.get("temporal_state"), dict):
+                loaded_state["temporal_state"] = {
+                    "last_message_timestamp": 0,
+                    "last_message_time_str": "",
+                    "time_since_last_message_hours": 0.0,
+                    "time_since_last_message_minutes": 0,
+                    "current_activity_started_at": 0,
+                    "current_activity_duration_planned": 0,
+                    "current_activity_end_time": 0,
+                    "activity_type": None,
+                    "should_ignore_until": 0,
+                    "ignore_reason": None
+                }
+            
+            continuity_state[uid] = loaded_state
+            
             topic_state = load_topic_state_from_db(uid)
             if topic_state:
                 continuity_state[uid]["topic_state"] = topic_state
-        except Exception:
-            pass
+                
+        except Exception as e:
+            print(f"[LOAD ERROR] Failed to load state for user {user_id_str}: {e}")
+            continue
 
 # ====================== LOAD PLANS FROM DB ======================
 def load_plans_from_db(user_id):
@@ -2526,11 +2585,18 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         intensity=intensity
     )
     
+    # ✅ VARMISTA DETAILS ON DICT
+    details = {
+        "intensity": intensity,
+        "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
+        "with_whom": random.choice(["Ainon", "Mikan", "jonkun kaverin", "yksin"]) if random.random() < 0.7 else None
+    }
+    
     # TALLENNA MOLEMMAT: activity_type JA narrative_type
     state["spontaneous_narrative"] = {
         "active": True,
-        "type": narrative_type,  # ← Narrative-logiikkaa varten
-        "activity_type": chosen_activity,  # ← Aktiviteetti-spesifistä logiikkaa varten
+        "type": narrative_type,
+        "activity_type": chosen_activity,
         "context": message,
         "started_at": now,
         "last_update": now,
@@ -2539,11 +2605,9 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
         "ignore_duration": activity_result.get("duration_hours", 2.0) * 3600 if activity_result.get("will_ignore") else 0,
         "ignore_until_time_str": activity_result.get("end_time_str"),
         "will_respond_during": not activity_result.get("will_ignore", False),
-        "details": {
-            "intensity": intensity,
-            "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
-            "with_whom": random.choice(["Ainon", "Mikan", "jonkun kaverin", "yksin"]) if random.random() < 0.7 else None
-        }
+        "details": details,
+        "ignored_messages": [],
+        "pending_user_messages": []
     }
     
     print(f"[NARRATIVE START] activity={chosen_activity}, narrative_type={narrative_type}")
@@ -2557,7 +2621,12 @@ async def continue_spontaneous_narrative(user_id: int, narrative: dict, intensit
     
     narrative_type = narrative.get("type")
     progression = narrative.get("progression", 0)
-    details = narrative.get("details", {})
+    
+    # ✅ SAFE ACCESS
+    details = narrative.get("details")
+    if not details or not isinstance(details, dict):
+        details = {}
+    
     user_attempts = narrative.get("user_attempts", 0)
     pending_messages = narrative.get("pending_user_messages", [])
     
