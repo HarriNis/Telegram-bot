@@ -103,11 +103,17 @@ def get_claude_client():
     global claude_client
     if claude_client is None and ANTHROPIC_API_KEY:
         try:
+            # ✅ IMPORT VASTA TÄÄLLÄ
+            from anthropic import AsyncAnthropic
+            
             claude_client = AsyncAnthropic(
                 api_key=ANTHROPIC_API_KEY,
                 default_headers={"anthropic-version": "2023-06-01"}
             )
             print("✅ Claude client initialized")
+        except ImportError as e:
+            print(f"⚠️ Anthropic package not available: {e}")
+            return None
         except Exception as e:
             print(f"⚠️ Claude client failed to initialize: {e}")
             return None
@@ -1254,12 +1260,13 @@ def parse_json_object(text: str, default: dict):
 
 def save_turn(user_id: int, role: str, content: str) -> int:
     with db_lock:
-        conn.execute(
+        cursor = conn.cursor()  # ✅ LUO CURSOR
+        cursor.execute(
             "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
             (str(user_id), role, content, time.time())
         )
         conn.commit()
-        return conn.lastrowid
+        return cursor.lastrowid  # ✅ KÄYTÄ cursor.lastrowid
 
 def get_recent_turns(user_id: int, limit: int = 10):
     with db_lock:
@@ -1645,15 +1652,26 @@ Conversation:
                 max_tokens=300,
                 temperature=0.3
             )
-            summary = resp.choices[0].message.content.strip()
+            # ✅ SAFE ACCESS
+            summary = resp.choices[0].message.content
+            if summary:
+                summary = summary.strip()
+            else:
+                summary = "Summary unavailable"
         else:
             resp = await openai_client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300,
                 temperature=0.3
             )
-            summary = resp.choices[0].message.content.strip()
+            # ✅ SAFE ACCESS
+            summary = resp.choices[0].message.content
+            if summary:
+                summary = summary.strip()
+            else:
+                summary = "Summary unavailable"
+        
         emb = await get_embedding(summary)
         with db_lock:
             conn.execute("""
@@ -3344,7 +3362,15 @@ Latest user turn:
                     temperature=0.2,
                     messages=[{"role": "user", "content": prompt}]
                 )
-                raw = response.content[0].text.strip()
+                # ✅ SAFE ACCESS
+                if response.content and len(response.content) > 0:
+                    raw = response.content[0].text
+                    if raw:
+                        raw = raw.strip()
+                    else:
+                        raw = "{}"
+                else:
+                    raw = "{}"
                 print(f"[FRAME] ✅ Claude extracted frame")
             
             elif provider == "grok":
@@ -3354,7 +3380,12 @@ Latest user turn:
                     max_tokens=400,
                     temperature=0.2
                 )
-                raw = response.choices[0].message.content.strip()
+                # ✅ SAFE ACCESS
+                raw = response.choices[0].message.content
+                if raw:
+                    raw = raw.strip()
+                else:
+                    raw = "{}"
                 print(f"[FRAME] ✅ Grok extracted frame")
             
             else:  # openai
@@ -3364,7 +3395,12 @@ Latest user turn:
                     max_tokens=400,
                     temperature=0.2
                 )
-                raw = response.choices[0].message.content.strip()
+                # ✅ SAFE ACCESS
+                raw = response.choices[0].message.content
+                if raw:
+                    raw = raw.strip()
+                else:
+                    raw = "{}"
                 print(f"[FRAME] ✅ OpenAI extracted frame")
             
             # Jos päästiin tänne, kutsu onnistui
@@ -3607,7 +3643,16 @@ Based on the context above, respond as Megan. Remember:
                             {"role": "user", "content": user_prompt}
                         ]
                     )
-                    reply = response.content[0].text.strip()
+                    # ✅ SAFE ACCESS
+                    if response.content and len(response.content) > 0:
+                        reply = response.content[0].text
+                        if reply:
+                            reply = reply.strip()
+                        else:
+                            raise ValueError("Empty response from Claude")
+                    else:
+                        raise ValueError("No content in Claude response")
+                    
                     print(f"[CLAUDE] Generated reply ({len(reply)} chars)")
                     return reply
             except Exception as e:
@@ -3625,7 +3670,11 @@ Based on the context above, respond as Megan. Remember:
                     max_tokens=800,
                     temperature=0.8
                 )
-                reply = response.choices[0].message.content.strip()
+                # ✅ SAFE ACCESS
+                reply = response.choices[0].message.content
+                if not reply:
+                    raise ValueError("Empty response from Grok")
+                reply = reply.strip()
                 print(f"[GROK] Generated reply ({len(reply)} chars)")
                 return reply
             except Exception as e:
@@ -3641,7 +3690,11 @@ Based on the context above, respond as Megan. Remember:
             max_tokens=800,
             temperature=0.8
         )
-        reply = response.choices[0].message.content.strip()
+        # ✅ SAFE ACCESS
+        reply = response.choices[0].message.content
+        if not reply:
+            raise ValueError("Empty response from OpenAI")
+        reply = reply.strip()
         print(f"[OPENAI] Generated reply ({len(reply)} chars)")
         return reply
         
@@ -3825,14 +3878,15 @@ Traceback:
 """
         print(error_msg)
         
-        if update and update.message:
-            try:
+        # ✅ SAFE TELEGRAM RESPONSE
+        try:
+            if update and update.message:
                 await update.message.reply_text(
                     f"⚠️ Puuttuva avain: {str(e)}\n"
                     f"Käytä /status tarkistaaksesi tilan"
                 )
-            except:
-                pass  # Telegram error, ignore
+        except Exception as telegram_error:
+            print(f"[TELEGRAM ERROR] Failed to send error message: {telegram_error}")
         
     except Exception as e:
         # ✅ SAFE ERROR HANDLING
@@ -3850,14 +3904,15 @@ Text: {text[:100] if text else 'N/A'}
 """
         print(error_msg)
         
-        if update and update.message:
-            try:
+        # ✅ SAFE TELEGRAM RESPONSE
+        try:
+            if update and update.message:
                 await update.message.reply_text(
                     f"⚠️ Virhe: {type(e).__name__}\n"
                     f"Yritä uudelleen tai käytä /help"
                 )
-            except:
-                pass  # Telegram error, ignore
+        except Exception as telegram_error:
+            print(f"[TELEGRAM ERROR] Failed to send error message: {telegram_error}")
 
 
 # ====================== CHECK_PROACTIVE_TRIGGERS ======================
@@ -4646,13 +4701,18 @@ async def main():
     application.add_handler(CommandHandler("activity", cmd_activity))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("[MAIN] Step 10: Starting background task...")
-    background_task = asyncio.create_task(check_proactive_triggers(application))
-
-    print("[MAIN] Step 11: Initializing Telegram bot...")
+    print("[MAIN] Step 10: Initializing Telegram bot...")
     await application.initialize()
+    
+    print("[MAIN] Step 11: Starting Telegram bot...")
     await application.start()
+    
+    print("[MAIN] Step 12: Starting polling...")
     await application.updater.start_polling()
+    
+    # ✅ VASTA NYT KÄYNNISTÄ BACKGROUND TASK
+    print("[MAIN] Step 13: Starting background task...")
+    background_task = asyncio.create_task(check_proactive_triggers(application))
     
     print("[MAIN] ✅ Bot is now running!")
 
