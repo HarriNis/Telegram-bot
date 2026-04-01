@@ -823,16 +823,40 @@ def get_action_progress(state, now):
         return "finished"
 
 def build_temporal_context(state):
+    """
+    Rakentaa temporaalisen kontekstin action-progressille
+    """
     now = time.time()
-    progress = get_action_progress(state, now)
-    if not state["current_action"]:
+    
+    # ✅ SAFE ACCESS
+    current_action = state.get("current_action")
+    if not current_action:
         return "No ongoing action."
+    
+    action_started = state.get("action_started", 0)
+    action_duration = state.get("action_duration", 0)
+    
+    if action_duration <= 0:
+        return f"Action: {current_action} (just started)"
+    
+    elapsed = now - action_started
+    ratio = elapsed / action_duration
+    
+    if ratio < 0.25:
+        progress = "starting"
+    elif ratio < 0.75:
+        progress = "ongoing"
+    elif ratio < 1.0:
+        progress = "ending"
+    else:
+        progress = "finished"
+    
     return f"""
 Temporal state:
-- Current action: {state['current_action']}
+- Current action: {current_action}
 - Action phase: {progress}
-- Started: {int(now - state['action_started'])} seconds ago
-- Expected duration: {state['action_duration']} seconds
+- Started: {int(elapsed)} seconds ago
+- Expected duration: {action_duration} seconds
 
 The action is ongoing and MUST be reflected naturally.
 """
@@ -1965,7 +1989,11 @@ def get_temporal_context_for_llm(user_id: int) -> str:
     Rakentaa temporaalisen kontekstin LLM:lle
     """
     state = get_or_create_state(user_id)
-    temporal = state.get("temporal_state", {})
+    
+    # ✅ VARMISTA ETTÄ temporal ON DICT
+    temporal = state.get("temporal_state")
+    if not temporal or not isinstance(temporal, dict):
+        temporal = {}
     
     now = time.time()
     current_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
@@ -1977,26 +2005,30 @@ def get_temporal_context_for_llm(user_id: int) -> str:
         f"CURRENT DATE: {current_date_str}"
     ]
     
-    # Aika edellisestä viestistä
-    if temporal.get("time_since_last_message_minutes", 0) > 0:
+    # Aika edellisestä viestistä (SAFE ACCESS)
+    time_since_minutes = temporal.get("time_since_last_message_minutes", 0)
+    if time_since_minutes > 0:
         last_time = temporal.get("last_message_time_str", "")
-        minutes = temporal["time_since_last_message_minutes"]
         hours = temporal.get("time_since_last_message_hours", 0)
         
         if hours >= 1:
             context_parts.append(f"TIME SINCE LAST MESSAGE: {hours:.1f} hours (last at {last_time})")
         else:
-            context_parts.append(f"TIME SINCE LAST MESSAGE: {minutes} minutes (last at {last_time})")
+            context_parts.append(f"TIME SINCE LAST MESSAGE: {time_since_minutes} minutes (last at {last_time})")
     
-    # Aktiivinen aktiviteetti
-    if temporal.get("current_activity_started_at", 0) > 0:
+    # Aktiivinen aktiviteetti (SAFE ACCESS)
+    activity_started = temporal.get("current_activity_started_at", 0)
+    if activity_started > 0:
         activity = temporal.get("activity_type", "unknown")
-        started_dt = datetime.fromtimestamp(temporal["current_activity_started_at"], HELSINKI_TZ)
-        end_dt = datetime.fromtimestamp(temporal.get("current_activity_end_time", 0), HELSINKI_TZ)
+        started_dt = datetime.fromtimestamp(activity_started, HELSINKI_TZ)
         
-        context_parts.append(f"CURRENT ACTIVITY: {activity}")
-        context_parts.append(f"Started at: {started_dt.strftime('%H:%M')}")
-        context_parts.append(f"Will end at: {end_dt.strftime('%H:%M')}")
+        activity_end = temporal.get("current_activity_end_time", 0)
+        if activity_end > 0:
+            end_dt = datetime.fromtimestamp(activity_end, HELSINKI_TZ)
+            
+            context_parts.append(f"CURRENT ACTIVITY: {activity}")
+            context_parts.append(f"Started at: {started_dt.strftime('%H:%M')}")
+            context_parts.append(f"Will end at: {end_dt.strftime('%H:%M')}")
     
     return "\n".join(context_parts)
 
@@ -4550,3 +4582,4 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
+```yötä
