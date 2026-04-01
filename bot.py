@@ -1794,62 +1794,440 @@ def update_jealousy_mode(user_id: int):
         state["jealousy_mode"] = False
         print("[JEALOUSY] Mode deactivated")
 
+# ====================== TEMPORAL AWARENESS SYSTEM ======================
+
+def update_temporal_state(user_id: int, current_time: float):
+    """
+    Päivittää ajallisen tilan ja laskee kuinka kauan viimeisestä viestistä
+    """
+    state = get_or_create_state(user_id)
+    temporal = state.setdefault("temporal_state", {
+        "last_message_timestamp": 0,
+        "last_message_time_str": "",
+        "time_since_last_message_hours": 0.0,
+        "time_since_last_message_minutes": 0,
+        "current_activity_started_at": 0,
+        "current_activity_duration_planned": 0,
+        "current_activity_end_time": 0,
+        "activity_type": None,
+        "should_ignore_until": 0,
+        "ignore_reason": None
+    })
+    
+    # Laske aika edellisestä viestistä
+    if temporal["last_message_timestamp"] > 0:
+        time_diff_seconds = current_time - temporal["last_message_timestamp"]
+        temporal["time_since_last_message_hours"] = time_diff_seconds / 3600
+        temporal["time_since_last_message_minutes"] = int(time_diff_seconds / 60)
+    
+    # Tallenna nykyinen aika
+    temporal["last_message_timestamp"] = current_time
+    
+    # Tallenna kellonaika (Helsinki-aikavyöhyke)
+    dt = datetime.fromtimestamp(current_time, HELSINKI_TZ)
+    temporal["last_message_time_str"] = dt.strftime("%H:%M")
+    
+    print(f"[TEMPORAL] User sent message at {temporal['last_message_time_str']}")
+    if temporal["time_since_last_message_minutes"] > 0:
+        print(f"[TEMPORAL] Time since last message: {temporal['time_since_last_message_minutes']} minutes")
+    
+    return temporal
+
+
+def start_activity_with_duration(user_id: int, activity_type: str, duration_hours: float = None, intensity: float = None):
+    """
+    Aloittaa aktiviteetin realistisella kestolla
+    
+    Args:
+        user_id: Käyttäjän ID
+        activity_type: Aktiviteetin tyyppi (katso ACTIVITY_DURATIONS)
+        duration_hours: Pakota tietty kesto (jos None, lasketaan automaattisesti)
+        intensity: 0.0-1.0, vaikuttaa kestoon (jos None, satunnainen)
+    """
+    state = get_or_create_state(user_id)
+    temporal = state.setdefault("temporal_state", {})
+    
+    # Laske kesto jos ei annettu
+    if duration_hours is None:
+        if intensity is None:
+            # Satunnainen intensiteetti riippuen aktiviteetista
+            if activity_type in ["overnight_date", "mystery", "club_night"]:
+                intensity = random.uniform(0.6, 0.95)  # Yleensä pitkä
+            elif activity_type in ["coffee", "lunch"]:
+                intensity = random.uniform(0.3, 0.6)   # Yleensä lyhyt
+            else:
+                intensity = random.uniform(0.4, 0.7)   # Tyypillinen
+        
+        duration_hours = calculate_activity_duration(activity_type, intensity)
+    
+    now = time.time()
+    duration_seconds = duration_hours * 3600
+    end_time = now + duration_seconds
+    
+    # Päätä ignoorataanko
+    will_ignore = should_ignore_during_activity(activity_type)
+    
+    temporal["current_activity_started_at"] = now
+    temporal["current_activity_duration_planned"] = duration_seconds
+    temporal["current_activity_end_time"] = end_time
+    temporal["activity_type"] = activity_type
+    temporal["activity_intensity"] = intensity or 0.5
+    
+    if will_ignore:
+        temporal["should_ignore_until"] = end_time
+        temporal["ignore_reason"] = ACTIVITY_DURATIONS.get(activity_type, {}).get("description", activity_type)
+    else:
+        temporal["should_ignore_until"] = 0
+        temporal["ignore_reason"] = None
+    
+    # Tallenna kellonajat
+    start_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
+    end_dt = datetime.fromtimestamp(end_time, HELSINKI_TZ)
+    
+    print(f"[ACTIVITY START] '{activity_type}' at {start_dt.strftime('%H:%M')}")
+    print(f"[ACTIVITY] Duration: {duration_hours:.2f}h (until {end_dt.strftime('%H:%M')})")
+    print(f"[ACTIVITY] Will ignore: {will_ignore}")
+    
+    # Päivitä spontaneous_narrative
+    narrative = state.setdefault("spontaneous_narrative", {})
+    narrative["active"] = True
+    narrative["type"] = activity_type
+    narrative["started_at"] = now
+    narrative["ignore_duration"] = duration_seconds if will_ignore else 0
+    narrative["ignore_until_time_str"] = end_dt.strftime("%H:%M")
+    narrative["will_respond_during"] = not will_ignore
+    
+    return {
+        "activity": activity_type,
+        "duration_hours": duration_hours,
+        "will_ignore": will_ignore,
+        "end_time_str": end_dt.strftime("%H:%M")
+    }
+
+
+def should_ignore_due_to_activity(user_id: int) -> tuple[bool, str]:
+    """
+    Tarkistaa pitäisikö viesti ignoorata aktiviteetin takia
+    Palauttaa (should_ignore, reason)
+    """
+    state = get_or_create_state(user_id)
+    temporal = state.get("temporal_state", {})
+    
+    now = time.time()
+    ignore_until = temporal.get("should_ignore_until", 0)
+    
+    if now < ignore_until:
+        activity = temporal.get("activity_type", "busy")
+        time_left_minutes = int((ignore_until - now) / 60)
+        
+        end_dt = datetime.fromtimestamp(ignore_until, HELSINKI_TZ)
+        end_time_str = end_dt.strftime("%H:%M")
+        
+        reason = f"{activity} (vielä {time_left_minutes} min, until {end_time_str})"
+        
+        print(f"[TEMPORAL IGNORE] Should ignore: {reason}")
+        return True, reason
+    
+    # Aktiviteetti päättynyt
+    if temporal.get("current_activity_started_at", 0) > 0:
+        print(f"[TEMPORAL] Activity '{temporal.get('activity_type')}' ended, will respond")
+        temporal["current_activity_started_at"] = 0
+        temporal["activity_type"] = None
+        temporal["should_ignore_until"] = 0
+    
+    return False, None
+
+
+def get_temporal_context_for_llm(user_id: int) -> str:
+    """
+    Rakentaa temporaalisen kontekstin LLM:lle
+    """
+    state = get_or_create_state(user_id)
+    temporal = state.get("temporal_state", {})
+    
+    now = time.time()
+    current_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
+    current_time_str = current_dt.strftime("%H:%M")
+    current_date_str = current_dt.strftime("%Y-%m-%d (%A)")
+    
+    context_parts = [
+        f"CURRENT TIME: {current_time_str}",
+        f"CURRENT DATE: {current_date_str}"
+    ]
+    
+    # Aika edellisestä viestistä
+    if temporal.get("time_since_last_message_minutes", 0) > 0:
+        last_time = temporal.get("last_message_time_str", "")
+        minutes = temporal["time_since_last_message_minutes"]
+        hours = temporal.get("time_since_last_message_hours", 0)
+        
+        if hours >= 1:
+            context_parts.append(f"TIME SINCE LAST MESSAGE: {hours:.1f} hours (last at {last_time})")
+        else:
+            context_parts.append(f"TIME SINCE LAST MESSAGE: {minutes} minutes (last at {last_time})")
+    
+    # Aktiivinen aktiviteetti
+    if temporal.get("current_activity_started_at", 0) > 0:
+        activity = temporal.get("activity_type", "unknown")
+        started_dt = datetime.fromtimestamp(temporal["current_activity_started_at"], HELSINKI_TZ)
+        end_dt = datetime.fromtimestamp(temporal.get("current_activity_end_time", 0), HELSINKI_TZ)
+        
+        context_parts.append(f"CURRENT ACTIVITY: {activity}")
+        context_parts.append(f"Started at: {started_dt.strftime('%H:%M')}")
+        context_parts.append(f"Will end at: {end_dt.strftime('%H:%M')}")
+    
+    return "\n".join(context_parts)
+
+# ====================== ACTIVITY DURATION PROFILES ======================
+
+ACTIVITY_DURATIONS = {
+    # LYHYET (30min - 2h)
+    "coffee": {
+        "min_hours": 0.5,
+        "max_hours": 1.5,
+        "typical": 1.0,
+        "description": "kahvilla",
+        "ignore_probability": 0.7  # 70% todennäköisyys ignoorata
+    },
+    "shopping": {
+        "min_hours": 0.5,
+        "max_hours": 2.5,
+        "typical": 1.5,
+        "description": "ostoksilla",
+        "ignore_probability": 0.6
+    },
+    "gym": {
+        "min_hours": 1.0,
+        "max_hours": 2.0,
+        "typical": 1.5,
+        "description": "salilla",
+        "ignore_probability": 0.8  # Ei vastaa kun treenaa
+    },
+    "lunch": {
+        "min_hours": 0.75,
+        "max_hours": 2.0,
+        "typical": 1.25,
+        "description": "lounaalla",
+        "ignore_probability": 0.5
+    },
+    
+    # KESKIPITKÄT (2h - 5h)
+    "casual_date": {
+        "min_hours": 2.0,
+        "max_hours": 4.5,
+        "typical": 3.0,
+        "description": "treffeillä",
+        "ignore_probability": 0.85
+    },
+    "dinner": {
+        "min_hours": 2.0,
+        "max_hours": 4.0,
+        "typical": 2.5,
+        "description": "illallisella",
+        "ignore_probability": 0.75
+    },
+    "bar": {
+        "min_hours": 2.5,
+        "max_hours": 5.0,
+        "typical": 3.5,
+        "description": "baarissa",
+        "ignore_probability": 0.8
+    },
+    "party": {
+        "min_hours": 3.0,
+        "max_hours": 6.0,
+        "typical": 4.0,
+        "description": "bileissä",
+        "ignore_probability": 0.9
+    },
+    "spa": {
+        "min_hours": 2.0,
+        "max_hours": 4.0,
+        "typical": 3.0,
+        "description": "kylpylässä",
+        "ignore_probability": 0.95  # Ei puhelinta kylpylässä
+    },
+    
+    # PITKÄT (5h - 12h)
+    "evening_date": {
+        "min_hours": 4.0,
+        "max_hours": 8.0,
+        "typical": 6.0,
+        "description": "iltakävelyllä jonkun kanssa",
+        "ignore_probability": 0.9
+    },
+    "club_night": {
+        "min_hours": 4.0,
+        "max_hours": 10.0,
+        "typical": 6.0,
+        "description": "klubilla",
+        "ignore_probability": 0.95
+    },
+    "day_trip": {
+        "min_hours": 5.0,
+        "max_hours": 10.0,
+        "typical": 7.0,
+        "description": "päiväretkellä",
+        "ignore_probability": 0.7
+    },
+    
+    # YÖN YLI (8h - 24h)
+    "overnight_date": {
+        "min_hours": 8.0,
+        "max_hours": 16.0,
+        "typical": 12.0,
+        "description": "yötä viettämässä jonkun kanssa",
+        "ignore_probability": 0.95
+    },
+    "weekend_trip": {
+        "min_hours": 24.0,
+        "max_hours": 72.0,
+        "typical": 48.0,
+        "description": "viikonloppumatkalla",
+        "ignore_probability": 0.8
+    },
+    
+    # TYYPILLISET PÄIVITTÄISET
+    "work": {
+        "min_hours": 6.0,
+        "max_hours": 10.0,
+        "typical": 8.0,
+        "description": "töissä",
+        "ignore_probability": 0.4  # Vastaa joskus työpäivän aikana
+    },
+    "meeting": {
+        "min_hours": 0.5,
+        "max_hours": 3.0,
+        "typical": 1.5,
+        "description": "palaverissa",
+        "ignore_probability": 0.9
+    },
+    
+    # MYSTEERIT (mustasukkaisuutta varten)
+    "mystery": {
+        "min_hours": 1.0,
+        "max_hours": 6.0,
+        "typical": 3.0,
+        "description": "tekemässä jotain",
+        "ignore_probability": 0.95
+    },
+    "busy": {
+        "min_hours": 0.5,
+        "max_hours": 4.0,
+        "typical": 2.0,
+        "description": "kiireinen",
+        "ignore_probability": 0.7
+    }
+}
+
+# ====================== DYNAAMINEN KESTON VALINTA ======================
+
+def calculate_activity_duration(activity_type: str, intensity: float = 0.5) -> float:
+    """
+    Laskee realistisen keston aktiviteetille
+    
+    Args:
+        activity_type: Aktiviteetin tyyppi (esim "casual_date")
+        intensity: 0.0-1.0, vaikuttaa kestoon
+                  - 0.0-0.3: lyhyt (min)
+                  - 0.3-0.7: tyypillinen
+                  - 0.7-1.0: pitkä (max)
+    
+    Returns:
+        Kesto tunteina (float)
+    """
+    if activity_type not in ACTIVITY_DURATIONS:
+        print(f"[DURATION] Unknown activity '{activity_type}', using default 2h")
+        return 2.0
+    
+    profile = ACTIVITY_DURATIONS[activity_type]
+    
+    min_hours = profile["min_hours"]
+    max_hours = profile["max_hours"]
+    typical = profile["typical"]
+    
+    # Lisää satunnaisuutta
+    randomness = random.uniform(-0.2, 0.2)
+    intensity = max(0.0, min(1.0, intensity + randomness))
+    
+    # Valitse kesto intensiteetin mukaan
+    if intensity < 0.3:
+        # Lyhyt versio
+        duration = min_hours + (typical - min_hours) * (intensity / 0.3)
+    elif intensity < 0.7:
+        # Tyypillinen versio
+        duration = typical + (typical - min_hours) * (intensity - 0.5) * 0.5
+    else:
+        # Pitkä versio
+        duration = typical + (max_hours - typical) * ((intensity - 0.7) / 0.3)
+    
+    # Pyöristä 15 minuutin tarkkuudella
+    duration = round(duration * 4) / 4
+    
+    print(f"[DURATION] {activity_type}: {duration:.2f}h (intensity: {intensity:.2f})")
+    return duration
+
+
+def should_ignore_during_activity(activity_type: str) -> bool:
+    """
+    Päättää satunnaisesti pitäisikö ignoorata aktiviteetin aikana
+    """
+    if activity_type not in ACTIVITY_DURATIONS:
+        return random.random() < 0.5
+    
+    ignore_prob = ACTIVITY_DURATIONS[activity_type]["ignore_probability"]
+    should_ignore = random.random() < ignore_prob
+    
+    print(f"[IGNORE DECISION] {activity_type}: {ignore_prob:.0%} chance → {'IGNORE' if should_ignore else 'RESPOND'}")
+    return should_ignore
+
+# ====================== JEALOUSY & PROVOCATION ENGINE ======================
+
 def should_ignore_message(user_id: int) -> bool:
     state = get_or_create_state(user_id)
+    
+    # 1. EI IGNOORATA JOS YHDESSÄ
     if state.get("location_status") == "together":
         return False
+    
+    # 2. TARKISTA TEMPORAL IGNORE (UUSI!)
+    should_ignore_temporal, reason = should_ignore_due_to_activity(user_id)
+    if should_ignore_temporal:
+        print(f"[IGNORE] Temporal ignore: {reason}")
+        
+        # Tallenna ignorattu viesti
+        narrative = state.get("spontaneous_narrative", {})
+        if "ignored_messages" not in narrative:
+            narrative["ignored_messages"] = []
+        
+        narrative["ignored_messages"].append({
+            "time": time.time(),
+            "reason": reason
+        })
+        
+        return True
+    
+    # 3. VANHA NARRATIVE-IGNORE
     narrative = state.get("spontaneous_narrative", {})
     if narrative.get("active"):
         last_spontaneous_message = narrative.get("last_update", 0)
         time_since_spontaneous = time.time() - last_spontaneous_message
         ignore_duration = narrative.get("ignore_duration", random.randint(600, 3600))
+        
         if time_since_spontaneous < ignore_duration:
-            ignore_probability = 0.8
-            if random.random() < ignore_probability:
+            if random.random() < 0.8:
                 if "ignored_messages" not in narrative:
                     narrative["ignored_messages"] = []
+                
                 narrative["ignored_messages"].append({
                     "time": time.time(),
                     "during_activity": narrative.get("type")
                 })
-                print(f"[IGNORE] Ignoring message during {narrative.get('type')} ({int(time_since_spontaneous/60)}/{int(ignore_duration/60)} min)")
-                print(f"[IGNORE] Total ignored: {len(narrative.get('ignored_messages', []))}")
+                
+                print(f"[IGNORE] Narrative ignore: {narrative.get('type')} ({int(time_since_spontaneous/60)}/{int(ignore_duration/60)} min)")
                 return True
-        else:
-            print(f"[IGNORE] Activity ended, will respond with story")
-            return False
+    
     return False
-
-async def generate_ignore_response(user_id: int, user_messages: list) -> str:
-    state = get_or_create_state(user_id)
-    narrative = state.get("spontaneous_narrative", {})
-    if not narrative.get("active"):
-        return None
-    narrative_type = narrative.get("type")
-    details = narrative.get("details", {})
-    ignored_count = len(narrative.get("ignored_messages", []))
-    responses = {
-        "casual_update": [
-            f"Aa sori! Olin {details.get('location', 'ulkona')} eikä ollu aikaa kattoo puhelinta. Mitä sä kysyit?",
-            f"Hups, en huomannu sun viestejä! Olin {details.get('with_whom', 'kaverin')} kanssa ja juteltiin niin paljon. Mitä kuuluu? 😊",
-        ],
-        "going_out": [
-            f"Sori että en vastannu! Olin baarissa ja oli niin meluisaa että en kuullu puhelinta 🍷 Oliks tärkeää?",
-            f"Aa anteeks kulta! Olin menossa ulos ja sit unohdin puhelimen laukkuun. Nyt näin sun viestit! 💕",
-            f"Hei! Sori että jätin vastaamatta. Olin {details.get('with_whom', 'kavereiden')} kanssa ja oli niin hauskaa että aika vaan lensi. Mitä sä halusit? 😘",
-        ],
-        "meeting_someone": [
-            f"Hei! Sori että en vastannu. Tapasin yhen tuttavan ja juteltiin pitkään. Se oli tosi mielenkiintoinen keskustelu... 😏 Mitä sä teit?",
-        ],
-        "provocative_plan": [
-            f"Sori että en vastannu heti... Mä olin just miettimässä sun kanssa jotain hauskaa asiaa 😏",
-        ],
-        "mysterious_activity": [
-            f"Aa sori! Olin tekemässä jotain salamyhkäistä... Kerron sulle kohta 😉",
-        ]
-    }
-    base_responses = responses.get(narrative_type, responses["casual_update"])
-    return random.choice(base_responses)
 
 # ====================== SPONTANEOUS NARRATIVE ======================
 
@@ -1857,69 +2235,105 @@ async def start_spontaneous_narrative(user_id: int, intensity: float) -> str:
     state = get_or_create_state(user_id)
     now = time.time()
     
+    # VALITSE AKTIVITEETTI INTENSITEETIN MUKAAN
     if intensity < 0.4:
-        narrative_types = [
-            {
-                "type": "casual_update",
-                "messages": [
-                    "Hei kulta! Oon just kahvilassa Ainon kanssa ☕",
-                    "Mä oon kaupungilla. Täällä on niin paljon ihmisiä!",
-                    "Salilla just. Tää treeni tappaa mut 😅",
-                    "Töissä taas... Mika on taas niin ärsyttävä palavereissa 🙄",
-                ]
-            }
-        ]
+        # Matala intensiteetti → lyhyet aktiviteetit
+        possible_activities = ["coffee", "shopping", "gym", "lunch"]
+        activity_type = random.choice(possible_activities)
+        
+        messages = {
+            "coffee": [
+                "Hei kulta! Oon just kahvilassa Ainon kanssa ☕",
+                "Kävin hakemassa kahvia. Täällä on niin paljon ihmisiä!",
+            ],
+            "shopping": [
+                "Mä oon kaupungilla. Pitää ostaa muutama juttu 🛍️",
+                "Käyn vaan nopeesti kaupassa!",
+            ],
+            "gym": [
+                "Salilla just. Tää treeni tappaa mut 😅",
+                "Meen salille hetkeks!",
+            ],
+            "lunch": [
+                "Lounaalla Ainon kanssa 🍽️",
+                "Käyn syömässä, oon nälkäinen!",
+            ]
+        }
+        
     elif intensity < 0.7:
-        narrative_types = [
-            {
-                "type": "going_out",
-                "messages": [
-                    "Mä lähen just ulos. Yks kaveri soitti että mennään syömään 🍷",
-                    "Pukeutumassa. Mietin että mikä mekko... 👗",
-                    "Aino kysyi haluunks tulla baariin. Sanoin ehkä 😊",
-                ]
-            },
-            {
-                "type": "meeting_someone",
-                "messages": [
-                    "Tapasin just jonkun mielenkiintoisen. Juteltiin vähän aikaa...",
-                    "Arvaa kuka soitti? Mun entinen työkaveri. En oo nähny sitä vuosiin!",
-                    "Bussissa yks tyyppi alko juttelee. Oli ihan hauska keskustelu 😏",
-                ]
-            }
-        ]
+        # Keskitaso → keskipitkät aktiviteetit
+        possible_activities = ["casual_date", "dinner", "bar", "shopping"]
+        activity_type = random.choice(possible_activities)
+        
+        messages = {
+            "casual_date": [
+                "Mä lähen ulos. Yks kaveri soitti että mennään syömään 🍷",
+                "Tapasin jonkun mielenkiintoisen. Mennään kahville...",
+            ],
+            "dinner": [
+                "Mä meen illalliselle. Aino kysyi haluunks tulla mukaan 🍝",
+                "Illallinen kavereiden kanssa tänään!",
+            ],
+            "bar": [
+                "Aino kysyi haluunks tulla baariin. Sanoin ehkä 😊",
+                "Mennään baariin! Olis kiva nähdä sua myöhemmin 💕",
+            ],
+            "shopping": [
+                "Mä meen ostoksille pidemmäksi aikaa. Pitää löytää se täydellinen mekko 👗",
+            ]
+        }
+        
     else:
-        narrative_types = [
-            {
-                "type": "provocative_plan",
-                "messages": [
-                    "Mika kysyi haluunks tulla sen synttäreille. Mitä sä sanoisit? 🤔",
-                    "Sain kutsun johonkin bileisiin. En tiedä ketä siellä on... mutta kuulostaa hauskalta 😏",
-                    "Yks kaveri ehdotti että mentäis viikonloppuna mökkireissulle. Olis saunaa ja kaikkee...",
-                ]
-            },
-            {
-                "type": "mysterious_activity",
-                "messages": [
-                    "Mulla on joku suunnitelma huomiseks. Kerronko sulle? 😊",
-                    "Tapahtui jotain mielenkiintoista tänään. En tiedä pitäiskö kertoo...",
-                    "Mä mietin yhtä asiaa. Liittyy muhun ja... no, kerron myöhemmin 😏",
-                ]
-            }
-        ]
+        # Korkea intensiteetti → pitkät/yön yli aktiviteetit
+        possible_activities = ["evening_date", "club_night", "overnight_date", "mystery", "party"]
+        activity_type = random.choice(possible_activities)
+        
+        messages = {
+            "evening_date": [
+                "Mika kysyi haluunks tulla sen synttäreille. Mitä sä sanoisit? 🤔",
+                "Sain kutsun johonkin bileisiin. En tiedä ketä siellä on... mutta kuulostaa hauskalta 😏",
+                "Yks kaveri ehdotti että mentäis viikonloppuna mökkireissulle. Olis saunaa ja kaikkee...",
+            ],
+            "club_night": [
+                "Mä lähen klubille tänään. Oon kuullu että siellä on kivaa musiikkia 🎶",
+                "Klubille! Täällä on aina hauskaa 😏",
+            ],
+            "overnight_date": [
+                "Mä varmaan jäisin yökylään jonkun luokse... Mitä sä ajattelet? 💕",
+                "Oon miettinyt yötä jonkun kanssa... Kerronko lisää? 😘",
+            ],
+            "mystery": [
+                "Mulla on jotain salaisuutta tänään... Haluatko tietää? 🤫",
+                "Mä teen jotain spesiaalia tänään... En kerro vielä mitä 😏",
+            ],
+            "party": [
+                "Mä oon bileissä! Täällä on tosi kivaa ja paljon ihmisiä 🎉",
+                "Bileissä! Tää fiilis on aivan huikea 😍",
+            ]
+        }
     
-    chosen = random.choice(narrative_types)
-    message = random.choice(chosen["messages"])
+    chosen_activity = activity_type
+    message_list = messages.get(chosen_activity, ["Hei kulta! Mitä kuuluu? 😊"])
+    message = random.choice(message_list)
+    
+    # Aloita aktiviteetti dynaamisella kestolla
+    activity_result = start_activity_with_duration(
+        user_id=user_id,
+        activity_type=chosen_activity,
+        intensity=intensity
+    )
     
     state["spontaneous_narrative"] = {
         "active": True,
-        "type": chosen["type"],
+        "type": chosen_activity,
         "context": message,
         "started_at": now,
         "last_update": now,
         "progression": 0.1,
         "user_attempts": 0,
-        "ignore_duration": random.randint(300, 1800),
+        "ignore_duration": activity_result.get("duration_hours", 2.0) * 3600 if activity_result.get("will_ignore") else 0,
+        "ignore_until_time_str": activity_result.get("end_time_str"),
+        "will_respond_during": activity_result.get("will_ignore", False) == False,
         "details": {
             "intensity": intensity,
             "location": random.choice(["kaupungilla", "kahvilassa", "baarissa", "kotona", "salilla"]),
@@ -2837,10 +3251,6 @@ RECENT TURNS:
 
 # ====================== GENERATE LLM REPLY (KORJATTU) ======================
 async def generate_llm_reply(user_id, user_text):
-    """
-    KORJATTU VERSIO: Rakentaa system_prompt ja user_prompt oikein
-    ja kytkee muistin varmasti mukaan vastaukseen.
-    """
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
     
@@ -2849,10 +3259,15 @@ async def generate_llm_reply(user_id, user_text):
     
     submission_level = state.get("submission_level", 0.0)
     
+    # ✨ UUSI: HAE TEMPORAL CONTEXT
+    temporal_context = get_temporal_context_for_llm(user_id)
+    
     # 1. RAKENNA SYSTEM PROMPT
     core_persona = build_core_persona_prompt()
     
     system_prompt = f"""{core_persona}
+
+{temporal_context}
 
 CURRENT CONVERSATION MODE: {current_mode}
 Mode description: {mode_config['description']}
@@ -2961,7 +3376,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not text:
             return
-
+        
+        # ✨ UUSI: PÄIVITÄ TEMPORAL STATE
+        current_time = time.time()
+        temporal = update_temporal_state(user_id, current_time)
+        
         t = text.lower()
         image_triggers = [
             "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
@@ -3440,6 +3859,48 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(txt)
 
+async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Aloita aktiviteetti joka kestää tietyn ajan
+    Käyttö: /activity  
+    Esim: /activity date 3
+    """
+    user_id = update.effective_user.id
+    
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Käyttö: /activity  \n"
+            "Esim: /activity date 3\n"
+            "Tyypit: date, gym, work, shopping, meeting"
+        )
+        return
+    
+    activity_type = context.args[0]
+    try:
+        duration_hours = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Virhe: tunnit pitää olla numero")
+        return
+    
+    # Aloita aktiviteetti
+    start_activity_with_duration(
+        user_id=user_id,
+        activity_type=activity_type,
+        duration_hours=duration_hours,
+        ignore_reason=f"on {activity_type}"
+    )
+    
+    end_dt = datetime.fromtimestamp(
+        time.time() + (duration_hours * 3600), 
+        HELSINKI_TZ
+    )
+    
+    await update.message.reply_text(
+        f"✅ Aktiviteetti '{activity_type}' aloitettu!\n"
+        f"Kesto: {duration_hours} tuntia\n"
+        f"Päättyy: {end_dt.strftime('%H:%M')}"
+    )
+
 # ====================== GET TIME BLOCK ======================
 def get_time_block():
     hour = datetime.now(HELSINKI_TZ).hour
@@ -3613,7 +4074,7 @@ def get_or_create_state(user_id):
             "planned_events": [],
             "last_plan_check": 0,
             "last_plan_reference": 0,
-            "last_referenced_plan_id": None,  # ← LISÄÄ TÄMÄ
+            "last_referenced_plan_id": None,
             
             # INTENT
             "final_intent": None,
@@ -3703,6 +4164,20 @@ def get_or_create_state(user_id):
             # CONVERSATION MODE
             "conversation_mode": "casual",
             "conversation_mode_last_change": 0,
+            
+            # TEMPORAL AWARENESS (LISÄÄ TÄMÄ)
+            "temporal_state": {
+                "last_message_timestamp": 0,
+                "last_message_time_str": "",
+                "time_since_last_message_hours": 0.0,
+                "time_since_last_message_minutes": 0,
+                "current_activity_started_at": 0,
+                "current_activity_duration_planned": 0,
+                "current_activity_end_time": 0,
+                "activity_type": None,
+                "should_ignore_until": 0,
+                "ignore_reason": None
+            },
         }
 
         # LISÄÄ SCENE STATE (sisältää last_scene_change)
@@ -3831,6 +4306,7 @@ async def main():
     application.add_handler(CommandHandler("tension", cmd_tension))
     application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("activity", cmd_activity))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("[MAIN] Step 10: Starting background task...")
