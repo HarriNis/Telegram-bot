@@ -1883,26 +1883,24 @@ def update_temporal_state(user_id: int, current_time: float):
 def start_activity_with_duration(user_id: int, activity_type: str, duration_hours: float = None, intensity: float = None):
     """
     Aloittaa aktiviteetin realistisella kestolla
-    
-    Args:
-        user_id: Käyttäjän ID
-        activity_type: Aktiviteetin tyyppi (katso ACTIVITY_DURATIONS)
-        duration_hours: Pakota tietty kesto (jos None, lasketaan automaattisesti)
-        intensity: 0.0-1.0, vaikuttaa kestoon (jos None, satunnainen)
     """
     state = get_or_create_state(user_id)
-    temporal = state.setdefault("temporal_state", {})
+    
+    # ✅ VARMISTA ETTÄ temporal_state ON DICT
+    if "temporal_state" not in state or not isinstance(state.get("temporal_state"), dict):
+        state["temporal_state"] = {}
+    
+    temporal = state["temporal_state"]
     
     # Laske kesto jos ei annettu
     if duration_hours is None:
         if intensity is None:
-            # Satunnainen intensiteetti riippuen aktiviteetista
             if activity_type in ["overnight_date", "mystery", "club_night"]:
-                intensity = random.uniform(0.6, 0.95)  # Yleensä pitkä
+                intensity = random.uniform(0.6, 0.95)
             elif activity_type in ["coffee", "lunch"]:
-                intensity = random.uniform(0.3, 0.6)   # Yleensä lyhyt
+                intensity = random.uniform(0.3, 0.6)
             else:
-                intensity = random.uniform(0.4, 0.7)   # Tyypillinen
+                intensity = random.uniform(0.4, 0.7)
         
         duration_hours = calculate_activity_duration(activity_type, intensity)
     
@@ -1957,7 +1955,11 @@ def should_ignore_due_to_activity(user_id: int) -> tuple[bool, str]:
     Palauttaa (should_ignore, reason)
     """
     state = get_or_create_state(user_id)
-    temporal = state.get("temporal_state", {})
+    
+    # ✅ SAFE ACCESS
+    temporal = state.get("temporal_state")
+    if not temporal or not isinstance(temporal, dict):
+        return False, None
     
     now = time.time()
     ignore_until = temporal.get("should_ignore_until", 0)
@@ -2292,17 +2294,24 @@ async def generate_ignore_response(user_id: int, pending_messages: list) -> str:
     state = get_or_create_state(user_id)
     narrative = state.get("spontaneous_narrative", {})
     
-    if not narrative.get("active"):
+    # ✅ TYPE CHECK
+    if not isinstance(narrative, dict) or not narrative.get("active"):
         return None
     
     narrative_type = narrative.get("type", "busy")
     details = narrative.get("details", {})
-    ignored_count = len(narrative.get("ignored_messages", []))
+    ignored_messages = narrative.get("ignored_messages", [])
+    
+    # ✅ SAFE ACCESS
+    if not isinstance(ignored_messages, list):
+        ignored_messages = []
+    
+    ignored_count = len(ignored_messages)
     
     # Laske kuinka kauan ignoorasi
     if ignored_count > 0:
-        first_ignored = narrative["ignored_messages"][0]["time"]
-        last_ignored = narrative["ignored_messages"][-1]["time"]
+        first_ignored = ignored_messages[0]["time"]
+        last_ignored = ignored_messages[-1]["time"]
         ignore_duration_minutes = int((last_ignored - first_ignored) / 60)
     else:
         ignore_duration_minutes = 0
@@ -4582,4 +4591,3 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
-```yötä
