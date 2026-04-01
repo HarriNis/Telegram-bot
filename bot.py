@@ -3651,8 +3651,12 @@ Based on the context above, respond as Megan. Remember:
         return "Anteeksi, minulla on tekninen ongelma. Yritä hetken kuluttua uudelleen."
 
 
-# ====================== HANDLE_MESSAGE ======================
+# ====================== HANDLE_MESSAGE (KORJATTU ERROR HANDLING) ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = None  # ✅ Alusta muuttujat
+    text = None
+    state = None
+    
     try:
         user_id = update.effective_user.id
         text = (update.message.text or "").strip()
@@ -3660,7 +3664,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             return
         
-        # ✨ UUSI: PÄIVITÄ TEMPORAL STATE
+        # ✨ PÄIVITÄ TEMPORAL STATE
         current_time = time.time()
         temporal = update_temporal_state(user_id, current_time)
         
@@ -3703,8 +3707,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state["conversation_mode"] = "casual"
         if "conversation_mode_last_change" not in state:
             state["conversation_mode_last_change"] = 0
-        
-        print(f"[DEBUG] State keys: {list(state.keys())[:20]}")  # Näytä ensimmäiset 20 avainta
         
         update_jealousy_mode(user_id)
         
@@ -3808,28 +3810,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_persistent_state_to_db(user_id)
 
     except KeyError as e:
-        # TARKKA KEYERROR-VIRHEILMOITUS
+        # ✅ SAFE ERROR HANDLING
         error_msg = f"""
 🔴 KEYERROR in handle_message
 
 Missing key: {str(e)}
 
-State keys available: {list(state.keys()) if 'state' in locals() else 'State not created'}
-
-User ID: {user_id if 'user_id' in locals() else 'N/A'}
-Text: {text if 'text' in locals() else 'N/A'}
+State keys: {list(state.keys()) if state is not None else 'State not created'}
+User ID: {user_id if user_id is not None else 'N/A'}
+Text: {text[:100] if text else 'N/A'}
 
 Traceback:
 {traceback.format_exc()}
 """
         print(error_msg)
         
-        await update.message.reply_text(
-            f"⚠️ Puuttuva avain: {str(e)}\n"
-            f"Käytä /status tarkistaaksesi tilan"
-        )
+        if update and update.message:
+            try:
+                await update.message.reply_text(
+                    f"⚠️ Puuttuva avain: {str(e)}\n"
+                    f"Käytä /status tarkistaaksesi tilan"
+                )
+            except:
+                pass  # Telegram error, ignore
         
     except Exception as e:
+        # ✅ SAFE ERROR HANDLING
         error_msg = f"""
 🔴 VIRHE HANDLE_MESSAGE:SSA
 
@@ -3839,14 +3845,19 @@ Viesti: {str(e)[:500]}
 Traceback:
 {traceback.format_exc()[:800]}
 
-User ID: {update.effective_user.id if update and update.effective_user else 'N/A'}
+User ID: {user_id if user_id is not None else 'N/A'}
+Text: {text[:100] if text else 'N/A'}
 """
         print(error_msg)
         
-        await update.message.reply_text(
-            f"⚠️ Virhe: {type(e).__name__}\n"
-            f"Yritä uudelleen tai käytä /help"
-        )
+        if update and update.message:
+            try:
+                await update.message.reply_text(
+                    f"⚠️ Virhe: {type(e).__name__}\n"
+                    f"Yritä uudelleen tai käytä /help"
+                )
+            except:
+                pass  # Telegram error, ignore
 
 
 # ====================== CHECK_PROACTIVE_TRIGGERS ======================
