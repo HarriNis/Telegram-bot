@@ -16,7 +16,6 @@ from flask import Flask
 from telegram import Update, InputFile
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
 import sqlite3
 import numpy as np
 from io import BytesIO
@@ -4328,268 +4327,303 @@ def update_topic_state(user_id, frame):
 
     ts["updated_at"] = time.time()
 
+# ====================== STATE NORMALIZATION ======================
+
+def build_default_state() -> dict:
+    """
+    Rakentaa täydellisen default-staten.
+    Käytetään sekä uusille käyttäjille että vanhojen normalisointiin.
+    """
+    return {
+        # BASIC STATE
+        "energy": "normal",
+        "availability": "free",
+        "last_interaction": 0,
+        "persona_mode": "warm",
+        "last_mode_change": 0,
+        "intent": "casual",
+        "summary": "",
+        
+        # DESIRES & GOALS
+        "desire": None,
+        "desire_intensity": 0.0,
+        "desire_last_update": 0,
+        "tension": 0.0,
+        "last_direction": None,
+        "core_desires": [],
+        "desire_profile_updated": 0,
+        
+        # PHASE & ARCS
+        "phase": "neutral",
+        "phase_last_change": 0,
+        "relationship_arcs": [],
+        "active_arc": None,
+        "arc_last_update": 0,
+        "current_goal": None,
+        "goal_updated": 0,
+        
+        # EMOTIONAL STATE
+        "emotional_state": {
+            "valence": 0.0,
+            "arousal": 0.5,
+            "attachment": 0.5
+        },
+        "persona_vector": {
+            "dominance": 0.7,
+            "warmth": 0.5,
+            "playfulness": 0.4
+        },
+        "personality_evolution": {
+            "curiosity": 0.5,
+            "patience": 0.5,
+            "expressiveness": 0.5,
+            "initiative": 0.5,
+            "stability": 0.7,
+            "last_evolved": 0
+        },
+        
+        # PREDICTION
+        "prediction": {
+            "next_user_intent": None,
+            "next_user_mood": None,
+            "confidence": 0.0,
+            "updated_at": 0
+        },
+        
+        # SIDE CHARACTERS
+        "side_characters": {
+            "friend": {"name": "Aino"},
+            "coworker": {"name": "Mika"}
+        },
+        "active_side_character": None,
+        
+        # IMAGE HISTORY
+        "last_image": None,
+        "image_history": [],
+        
+        # JEALOUSY & IGNORE
+        "ignore_until": 0,
+        "pending_narrative": None,
+        "jealousy_stage": 0,
+        "jealousy_started": 0,
+        "jealousy_context": None,
+        "last_jealousy_event": None,
+        "jealousy_mode": False,
+        "jealousy_intensity": 0.0,
+        "last_jealousy_action": 0,
+        "ignore_probability": 0.0,
+        "last_response_time": 0,
+        
+        # SPONTANEOUS
+        "spontaneous_message_cooldown": 0,
+        "spontaneous_image_cooldown": 0,
+        "spontaneous_narrative": {
+            "active": False,
+            "type": None,
+            "context": "",
+            "started_at": 0,
+            "last_update": 0,
+            "progression": 0,
+            "details": {},
+            "user_attempts": 0,
+            "pending_user_messages": [],
+            "ignored_messages": [],
+            "ignore_duration": 0
+        },
+        
+        # EMOTIONAL MODE
+        "emotional_mode": "calm",
+        "emotional_mode_last_change": 0,
+        
+        # LOCATION
+        "location_status": "separate",
+        "with_user_physically": False,
+        "shared_scene": False,
+        "last_scene_source": None,
+        
+        # DRIVES
+        "active_drive": None,
+        "interaction_arc_progress": 0.0,
+        
+        # USER MODEL
+        "user_model": {
+            "dominance_preference": 0.5,
+            "emotional_dependency": 0.5,
+            "validation_need": 0.5,
+            "jealousy_sensitivity": 0.5,
+            "control_resistance": 0.5,
+            "last_updated": 0
+        },
+        
+        # STRATEGY
+        "master_plan": None,
+        "current_strategy": None,
+        "strategy_updated": 0,
+        "strategy_stats": {},
+        
+        # PLANS
+        "planned_events": [],
+        "last_plan_check": 0,
+        "last_plan_reference": 0,
+        "last_referenced_plan_id": None,
+        
+        # INTENT
+        "final_intent": None,
+        "final_intent_updated": 0,
+        "state_conflicts": [],
+        
+        # MEMORY
+        "salient_memory": None,
+        "salient_memory_updated": 0,
+        "forced_disclosure": None,
+        
+        # CONVERSATION THEMES
+        "conversation_themes": {
+            "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+            "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
+        },
+        
+        # USER PREFERENCES
+        "user_preferences": {
+            "fantasy_themes": [],
+            "turn_ons": [],
+            "turn_offs": [],
+            "communication_style": "neutral",
+            "resistance_level": 0.5,
+            "last_updated": 0
+        },
+        
+        # CONVERSATION ARC
+        "conversation_arc": {
+            "current_theme": None,
+            "theme_depth": 0.0,
+            "theme_started": 0,
+            "previous_themes": []
+        },
+        
+        # MOODS
+        "moods": {
+            "annoyed": 0.20,
+            "warm": 0.45,
+            "bored": 0.20,
+            "playful": 0.35,
+            "tender": 0.40,
+        },
+        
+        # SUBMISSION & KINKS
+        "submission_level": 0.0,
+        "humiliation_tolerance": 0.0,
+        "cuckold_acceptance": 0.0,
+        "strap_on_introduced": False,
+        "chastity_discussed": False,
+        "feminization_level": 0.0,
+        "dominance_level": 1,
+        "last_dominance_escalation": 0,
+        
+        # MANIPULATION
+        "manipulation_history": {
+            "gaslighting_count": 0,
+            "triangulation_count": 0,
+            "push_pull_cycles": 0,
+            "successful_manipulations": 0
+        },
+        
+        # SEXUAL BOUNDARIES
+        "sexual_boundaries": {
+            "hard_nos": [],
+            "soft_nos": [],
+            "accepted": [],
+            "actively_requested": []
+        },
+        
+        # TOPIC STATE
+        "topic_state": {
+            "current_topic": "general",
+            "topic_summary": "",
+            "open_questions": [],
+            "open_loops": [],
+            "updated_at": time.time()
+        },
+        
+        # OTHER MEN
+        "other_men_mentioned": [],
+        "provocative_scenarios": [],
+        
+        # CONVERSATION MODE
+        "conversation_mode": "casual",
+        "conversation_mode_last_change": 0,
+        
+        # TEMPORAL AWARENESS
+        "temporal_state": {
+            "last_message_timestamp": 0,
+            "last_message_time_str": "",
+            "time_since_last_message_hours": 0.0,
+            "time_since_last_message_minutes": 0,
+            "current_activity_started_at": 0,
+            "current_activity_duration_planned": 0,
+            "current_activity_end_time": 0,
+            "activity_type": None,
+            "should_ignore_until": 0,
+            "ignore_reason": None
+        },
+        
+        # SCENE STATE (lisätään automaattisesti)
+        **init_scene_state()
+    }
+
+
+def deep_merge_state(existing: dict, defaults: dict) -> dict:
+    """
+    Yhdistää existing staten defaultsien kanssa.
+    - Säilyttää kaikki existing-arvot
+    - Lisää puuttuvat avaimet defaultseista
+    - Toimii rekursiivisesti nested dicteille
+    """
+    result = defaults.copy()
+    
+    for key, value in existing.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            # Rekursiivinen merge nested dictille
+            result[key] = deep_merge_state(value, result[key])
+        else:
+            # Säilytä existing arvo
+            result[key] = value
+    
+    return result
+
+
+def normalize_state(state: dict) -> dict:
+    """
+    Varmistaa että state sisältää kaikki tarvittavat avaimet.
+    """
+    defaults = build_default_state()
+    return deep_merge_state(state, defaults)
+
 
 def get_or_create_state(user_id):
+    """
+    Palauttaa käyttäjän staten tai luo uuden.
+    AINA normalisoi staten ennen palauttamista.
+    """
     if user_id not in continuity_state:
         print(f"[STATE] Creating new state for user {user_id}")
         
-        # ALUSTA PERUS STATE
-        continuity_state[user_id] = {
-            # BASIC STATE
-            "energy": "normal",
-            "availability": "free",
-            "last_interaction": 0,
-            "persona_mode": "warm",
-            "last_mode_change": 0,
-            "intent": "casual",
-            "summary": "",
-            
-            # DESIRES & GOALS
-            "desire": None,
-            "desire_intensity": 0.0,
-            "desire_last_update": 0,
-            "tension": 0.0,
-            "last_direction": None,
-            "core_desires": [],
-            "desire_profile_updated": 0,
-            
-            # PHASE & ARCS
-            "phase": "neutral",
-            "phase_last_change": 0,
-            "relationship_arcs": [],
-            "active_arc": None,
-            "arc_last_update": 0,
-            "current_goal": None,
-            "goal_updated": 0,
-            
-            # EMOTIONAL STATE
-            "emotional_state": {
-                "valence": 0.0,
-                "arousal": 0.5,
-                "attachment": 0.5
-            },
-            "persona_vector": {
-                "dominance": 0.7,
-                "warmth": 0.5,
-                "playfulness": 0.4
-            },
-            "personality_evolution": {
-                "curiosity": 0.5,
-                "patience": 0.5,
-                "expressiveness": 0.5,
-                "initiative": 0.5,
-                "stability": 0.7,
-                "last_evolved": 0
-            },
-            
-            # PREDICTION
-            "prediction": {
-                "next_user_intent": None,
-                "next_user_mood": None,
-                "confidence": 0.0,
-                "updated_at": 0
-            },
-            
-            # SIDE CHARACTERS
-            "side_characters": {
-                "friend": {"name": "Aino"},
-                "coworker": {"name": "Mika"}
-            },
-            "active_side_character": None,
-            
-            # IMAGE HISTORY
-            "last_image": None,
-            "image_history": [],
-            
-            # JEALOUSY & IGNORE
-            "ignore_until": 0,
-            "pending_narrative": None,
-            "jealousy_stage": 0,
-            "jealousy_started": 0,
-            "jealousy_context": None,
-            "last_jealousy_event": None,
-            "jealousy_mode": False,
-            "jealousy_intensity": 0.0,
-            "last_jealousy_action": 0,
-            "ignore_probability": 0.0,
-            "last_response_time": 0,
-            
-            # SPONTANEOUS
-            "spontaneous_message_cooldown": 0,
-            "spontaneous_image_cooldown": 0,
-            "spontaneous_narrative": {
-                "active": False,
-                "type": None,
-                "context": "",
-                "started_at": 0,
-                "last_update": 0,
-                "progression": 0,
-                "details": {},
-                "user_attempts": 0,
-                "pending_user_messages": [],
-                "ignored_messages": [],
-                "ignore_duration": 0
-            },
-            
-            # EMOTIONAL MODE
-            "emotional_mode": "calm",
-            "emotional_mode_last_change": 0,
-            
-            # LOCATION
-            "location_status": "separate",
-            "with_user_physically": False,
-            "shared_scene": False,
-            "last_scene_source": None,
-            
-            # DRIVES
-            "active_drive": None,
-            "interaction_arc_progress": 0.0,
-            
-            # USER MODEL
-            "user_model": {
-                "dominance_preference": 0.5,
-                "emotional_dependency": 0.5,
-                "validation_need": 0.5,
-                "jealousy_sensitivity": 0.5,
-                "control_resistance": 0.5,
-                "last_updated": 0
-            },
-            
-            # STRATEGY
-            "master_plan": None,
-            "current_strategy": None,
-            "strategy_updated": 0,
-            "strategy_stats": {},
-            
-            # PLANS
-            "planned_events": [],
-            "last_plan_check": 0,
-            "last_plan_reference": 0,
-            "last_referenced_plan_id": None,
-            
-            # INTENT
-            "final_intent": None,
-            "final_intent_updated": 0,
-            "state_conflicts": [],
-            
-            # MEMORY
-            "salient_memory": None,
-            "salient_memory_updated": 0,
-            "forced_disclosure": None,
-            
-            # CONVERSATION THEMES
-            "conversation_themes": {
-                "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-                "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            },
-            
-            # USER PREFERENCES
-            "user_preferences": {
-                "fantasy_themes": [],
-                "turn_ons": [],
-                "turn_offs": [],
-                "communication_style": "neutral",
-                "resistance_level": 0.5,
-                "last_updated": 0
-            },
-            
-            # CONVERSATION ARC
-            "conversation_arc": {
-                "current_theme": None,
-                "theme_depth": 0.0,
-                "theme_started": 0,
-                "previous_themes": []
-            },
-            
-            # MOODS
-            "moods": {
-                "annoyed": 0.20,
-                "warm": 0.45,
-                "bored": 0.20,
-                "playful": 0.35,
-                "tender": 0.40,
-            },
-            
-            # SUBMISSION & KINKS
-            "submission_level": 0.0,
-            "humiliation_tolerance": 0.0,
-            "cuckold_acceptance": 0.0,
-            "strap_on_introduced": False,
-            "chastity_discussed": False,
-            "feminization_level": 0.0,
-            "dominance_level": 1,
-            "last_dominance_escalation": 0,
-            
-            # MANIPULATION
-            "manipulation_history": {
-                "gaslighting_count": 0,
-                "triangulation_count": 0,
-                "push_pull_cycles": 0,
-                "successful_manipulations": 0
-            },
-            
-            # SEXUAL BOUNDARIES
-            "sexual_boundaries": {
-                "hard_nos": [],
-                "soft_nos": [],
-                "accepted": [],
-                "actively_requested": []
-            },
-            
-            # TOPIC STATE
-            "topic_state": {
-                "current_topic": "general",
-                "topic_summary": "",
-                "open_questions": [],
-                "open_loops": [],
-                "updated_at": time.time()
-            },
-            
-            # OTHER MEN
-            "other_men_mentioned": [],
-            "provocative_scenarios": [],
-            
-            # CONVERSATION MODE
-            "conversation_mode": "casual",
-            "conversation_mode_last_change": 0,
-            
-            # TEMPORAL AWARENESS (LISÄÄ TÄMÄ)
-            "temporal_state": {
-                "last_message_timestamp": 0,
-                "last_message_time_str": "",
-                "time_since_last_message_hours": 0.0,
-                "time_since_last_message_minutes": 0,
-                "current_activity_started_at": 0,
-                "current_activity_duration_planned": 0,
-                "current_activity_end_time": 0,
-                "activity_type": None,
-                "should_ignore_until": 0,
-                "ignore_reason": None
-            },
-        }
-
-        # LISÄÄ SCENE STATE (sisältää last_scene_change)
-        scene_state = init_scene_state()
-        continuity_state[user_id].update(scene_state)
-        print(f"[STATE] Added scene state: {list(scene_state.keys())}")
+        # Luo täysi default state
+        continuity_state[user_id] = build_default_state()
         
-        # LATAA PLANS
+        # Lataa plans
         continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-
-        # LATAA TOPIC STATE
+        
+        # Lataa topic state
         topic_state = load_topic_state_from_db(user_id)
         if topic_state:
             continuity_state[user_id]["topic_state"] = topic_state
-    
-    # VARMISTA ETTÄ SCENE STATE ON OLEMASSA (myös vanhoille käyttäjille)
-    state = continuity_state[user_id]
-    if "last_scene_change" not in state:
-        print(f"[STATE FIX] Adding missing scene keys for user {user_id}")
-        scene_state = init_scene_state()
-        state.update(scene_state)
+    else:
+        # Normalisoi vanha state
+        continuity_state[user_id] = normalize_state(continuity_state[user_id])
     
     return continuity_state[user_id]
 
