@@ -1367,6 +1367,10 @@ for user_id_str, data in rows:
         
         continuity_state[uid] = loaded_state
         
+        # ✅ TALLENNA TAKAISIN TIETOKANTAAN jos temporal_state luotiin uutena
+        if "temporal_state" not in json.loads(data):
+            save_persistent_state_to_db(uid)
+
         topic_state = load_topic_state_from_db(uid)
         if topic_state:
             continuity_state[uid]["topic_state"] = topic_state
@@ -2416,6 +2420,20 @@ ACTIVITY_DURATIONS = {
 
 # ====================== UUSI: can_start_activity ======================
 
+# Semanttiset aktiviteettiryhmät duplikaattitarkistukseen
+
+ACTIVITY_GROUPS = {
+“social_date”: [“casual_date”, “evening_date”, “dinner”, “coffee”],
+“party”: [“bar”, “club_night”, “party”],
+“exercise”: [“gym”, “spa”],
+}
+
+def get_activity_group(activity_type: str) -> str:
+for group, activities in ACTIVITY_GROUPS.items():
+if activity_type in activities:
+return group
+return activity_type
+
 def can_start_activity(user_id: int, activity_type: str) -> dict:
 “””
 Tarkistaa voiko aktiviteetin aloittaa.
@@ -2483,7 +2501,7 @@ with db_lock:
     recent = result.fetchall()
 
 for act_type, desc in recent:
-    if act_type == activity_type:
+    if get_activity_group(act_type) == get_activity_group(activity_type):
         return {
             "can_start": False,
             "reason": "semantic_duplicate",
@@ -2601,7 +2619,7 @@ profile = ACTIVITY_DURATIONS.get(activity_type, {
 
 with db_lock:
     try:
-        conn.execute("BEGIN TRANSACTION")
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("""
             INSERT INTO activity_log
             (user_id, activity_type, started_at, duration_hours, description, metadata)
@@ -3547,24 +3565,34 @@ except Exception as e:
 
 # Main function: Try Replicate first, fallback to Venice
 
-async def generate_image(prompt: str):
+async def generate_image(prompt: str, max_retries: int = 2):
 “””
 Try Replicate first (best quality + NSFW support),
 fallback to Venice if Replicate fails.
+Retries up to max_retries times with 2s delay between attempts.
 “””
+for attempt in range(max_retries):
+try:
 if REPLICATE_API_KEY:
-print(”[IMAGE] Trying Replicate API…”)
+print(f”[IMAGE] Trying Replicate API (attempt {attempt+1}/{max_retries})…”)
 result = await generate_image_replicate(prompt)
 if result:
 return result
 print(”[IMAGE] Replicate failed, trying Venice fallback…”)
 
 ```
-if VENICE_API_KEY:
-    print("[IMAGE] Using Venice API...")
-    return await generate_image_venice(prompt)
+        if VENICE_API_KEY:
+            print(f"[IMAGE] Using Venice API (attempt {attempt+1}/{max_retries})...")
+            result = await generate_image_venice(prompt)
+            if result:
+                return result
 
-print("[IMAGE ERROR] No image generation API available!")
+    except Exception as e:
+        print(f"[IMAGE ERROR] Attempt {attempt+1}/{max_retries}: {e}")
+        if attempt < max_retries - 1:
+            await asyncio.sleep(2)
+
+print("[IMAGE ERROR] No image generation API available or all attempts failed!")
 return None
 ```
 
@@ -4486,7 +4514,10 @@ print(error_msg)
 # ====================== CHECK_PROACTIVE_TRIGGERS ======================
 
 async def check_proactive_triggers(application):
-# ✅ EI ENSIMMÄISTÄ SLEEPIÄ
+“””
+Tarkistaa proaktiiviset triggerit 5 minuutin välein.
+EI sleep ennen ensimmäistä iteraatiota.
+“””
 while True:
 try:
 now_ts = time.time()
