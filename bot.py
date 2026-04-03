@@ -1,6 +1,3 @@
-
-Copy
-
 import os
 import random
 import json
