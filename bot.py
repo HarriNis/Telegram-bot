@@ -1425,8 +1425,9 @@ return plans
 def parse_json_object(text: str, default: dict):
 try:
 cleaned = text.strip()
-if cleaned.startswith(”`"): cleaned = re.sub(r"^`(?:json)?”, “”, cleaned.strip(), flags=re.IGNORECASE).strip()
-cleaned = re.sub(r”```$”, “”, cleaned.strip()).strip()
+if cleaned.startswith(””):
+cleaned = re.sub(r”^(?:json)?”, “”, cleaned.strip(), flags=re.IGNORECASE).strip()
+cleaned = re.sub(r”$”, “”, cleaned.strip()).strip()
 start = cleaned.find(”{”)
 end = cleaned.rfind(”}”)
 if start != -1 and end != -1 and end > start:
