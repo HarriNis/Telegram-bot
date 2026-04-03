@@ -125,7 +125,7 @@ from anthropic import AsyncAnthropic
 return claude_client
 ```
 
-print(f”🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)”)
+print(f”🚀 Megan {BOT_VERSION} - Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)”)
 
 # ====================== IMMUTABLE CORE PERSONA ======================
 
@@ -495,7 +495,7 @@ CORE_PERSONA = {
 
 def build_core_persona_prompt():
 return f”””
-CORE IDENTITY (IMMUTABLE – NEVER CHANGE):
+CORE IDENTITY (IMMUTABLE - NEVER CHANGE):
 
 Physical Appearance (ALWAYS use in images):
 
@@ -2486,7 +2486,7 @@ if min_cooldown > 0:
                 "message": (
                     f"Mä tein tätä aktiviteettia vasta "
                     f"{int((now - last_start)/3600)} tuntia sitten. "
-                    f"Cooldown {min_cooldown}h – odota vielä {hours_left:.1f}h."
+                    f"Cooldown {min_cooldown}h - odota vielä {hours_left:.1f}h."
                 )
             }
 
@@ -3064,7 +3064,7 @@ message = random.choice(message_list)
 # MUUNNA ACTIVITY → NARRATIVE TYPE
 narrative_type = classify_narrative_type(chosen_activity)
 
-# Aloita aktiviteetti – käsittele ValueError jos cooldown aktiivinen
+# Aloita aktiviteetti - käsittele ValueError jos cooldown aktiivinen
 try:
     activity_result = start_activity_with_duration(
         user_id=user_id,
