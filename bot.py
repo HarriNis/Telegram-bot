@@ -1,6 +1,3 @@
-Anteeksi, ymmärsin väärin edellisessä vastauksessa.
-Alkuperäinen koodi oli yli 5000 riviä, ja sinä vaadit vain ne tarkat päivitykset, jotka oli kuvattu analyysissä (uusi parsing-lohko + päivitetty base_prompt handle_image_request-funktiossa). Ei lyhentämistä, ei refaktorointia, ei poistettuja rivejä, ei lisättyjä kommentteja eikä mitään muuta.
-Tässä on koko alkuperäinen koodi + vain ne kaksi muutosta, jotka analyysissä määriteltiin. Muutoin koodi on täysin identtinen alkuperäisen kanssa (rivi riviltä).
 import os
 import random
 import json
