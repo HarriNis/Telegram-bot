@@ -22,7 +22,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "6.4.0-logic-memory-fix"  # ✅ UUSI VERSIO
+BOT_VERSION = "6.3.0-fantasy-memory-fix"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
 
 # ====================== RENDER HEALTH CHECK ======================
@@ -118,7 +118,7 @@ def get_claude_client():
             return None
     return claude_client
 
-print(f"🚀 Megan {BOT_VERSION} – Enhanced Logic & Memory Consistency")
+print(f"🚀 Megan {BOT_VERSION} – Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
 
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
@@ -260,7 +260,7 @@ CORE_PERSONA = {
                 "Mä oon jo päättänyt. Sun aneleminen on turhaa"
             ],
             "user_cries": [
-                "Sun kyyneleet tekee mut vain vahvemmäksi",
+                "Sun kyyneleet tekee mut vain vahvemmaksi",
                 "Itke vaan. Se ei muuta mun päätöstä",
                 "Sä oot niin kaunis kun sä itket",
                 "Tää on sun paikkasi. Hyväksy se",
@@ -1067,21 +1067,6 @@ CREATE TABLE IF NOT EXISTS planned_events (
 )
 """)
 
-# ✅ UUSI: Aktiviteettihistorian taulu cooldown- ja konfliktitarkistusta varten
-conn.execute("""
-CREATE TABLE IF NOT EXISTS activity_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    activity_type TEXT,
-    started_at REAL,
-    ended_at REAL,
-    duration_hours REAL,
-    description TEXT,
-    metadata TEXT DEFAULT '{}',
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
-
 conn.execute("""
 CREATE TABLE IF NOT EXISTS topic_state (
     user_id TEXT PRIMARY KEY,
@@ -1140,7 +1125,7 @@ CREATE TABLE IF NOT EXISTS summaries (
 """)
 
 conn.commit()
-print("✅ Database initialized with FULL schema + topic/turns tables + activity_log")
+print("✅ Database initialized with FULL schema + topic/turns tables")
 
 # ====================== DATABASE MIGRATION ======================
 def migrate_database():
@@ -1182,134 +1167,6 @@ def migrate_database():
     
     print("[MIGRATION] ✅ Migration completed")
 
-# ====================== AKTIVITEETTI COOLDOWN-JÄRJESTELMÄ (UUSI) ======================
-# ✅ UUSI: Aktiviteettien cooldown-profiilit
-ACTIVITY_DURATIONS = {
-    "gym": {"duration_hours": 1.5, "min_cooldown_hours": 12, "description": "Salilla treenaamassa", "ignore": True},
-    "casual_date": {"duration_hours": 3.0, "min_cooldown_hours": 24, "description": "Treffeillä", "ignore": True},
-    "dinner": {"duration_hours": 2.5, "min_cooldown_hours": 18, "description": "Illallisella", "ignore": True},
-    "shopping": {"duration_hours": 2.0, "min_cooldown_hours": 8, "description": "Ostoksilla", "ignore": False},
-    "coffee": {"duration_hours": 1.0, "min_cooldown_hours": 6, "description": "Kahvilla", "ignore": False},
-    "lunch": {"duration_hours": 1.5, "min_cooldown_hours": 8, "description": "Lounaalla", "ignore": False},
-    "bar": {"duration_hours": 4.0, "min_cooldown_hours": 24, "description": "Baarissa", "ignore": True},
-    "party": {"duration_hours": 6.0, "min_cooldown_hours": 36, "description": "Juhlissa", "ignore": True},
-    "club_night": {"duration_hours": 8.0, "min_cooldown_hours": 48, "description": "Yökerhossa", "ignore": True},
-    "evening_date": {"duration_hours": 5.0, "min_cooldown_hours": 24, "description": "Ilta-treffeillä", "ignore": True},
-    "overnight_date": {"duration_hours": 14.0, "min_cooldown_hours": 48, "description": "Yö-treffeillä", "ignore": True},
-    "work": {"duration_hours": 8.0, "min_cooldown_hours": 0, "description": "Töissä", "ignore": False},
-    "meeting": {"duration_hours": 2.0, "min_cooldown_hours": 4, "description": "Palaverissa", "ignore": False},
-    "mystery": {"duration_hours": 4.0, "min_cooldown_hours": 12, "description": "Mysteeriaktiviteetti", "ignore": True},
-}
-
-# ✅ UUSI: Tarkista voidaanko aktiviteetti aloittaa (cooldown + semanttinen konflikti)
-def can_start_activity(user_id: int, activity_type: str) -> dict:
-    state = get_or_create_state(user_id)
-    now = time.time()
-    
-    # 1. Onko jo aktiivinen aktiviteetti käynnissä?
-    temporal = state.get("temporal_state", {})
-    if temporal.get("activity_type") and now < temporal.get("current_activity_end_time", 0):
-        return {
-            "can_start": False,
-            "reason": "active_activity",
-            "message": f"Mä oon jo {ACTIVITY_DURATIONS.get(temporal.get('activity_type', ''), {}).get('description', 'aktiviteetissa')}. Odota että se loppuu."
-        }
-    
-    # 2. Cooldown-tarkistus
-    profile = ACTIVITY_DURATIONS.get(activity_type, {})
-    min_cooldown = profile.get("min_cooldown_hours", 0)
-    if min_cooldown > 0:
-        with db_lock:
-            result = conn.execute("""
-                SELECT started_at, duration_hours 
-                FROM activity_log 
-                WHERE user_id = ? AND activity_type = ? 
-                ORDER BY started_at DESC LIMIT 1
-            """, (str(user_id), activity_type))
-            last = result.fetchone()
-        
-        if last:
-            last_start, last_duration = last
-            cooldown_end = last_start + (last_duration * 3600) + (min_cooldown * 3600)
-            if now < cooldown_end:
-                hours_left = (cooldown_end - now) / 3600
-                return {
-                    "can_start": False,
-                    "reason": "cooldown",
-                    "message": f"Mä tein tätä aktiviteettia vasta {int((now - last_start)/3600)} tuntia sitten. Cooldown {min_cooldown}h – odota vielä {hours_left:.1f}h."
-                }
-    
-    # 3. Semanttinen konfliktitarkistus (viimeiset 24h)
-    with db_lock:
-        result = conn.execute("""
-            SELECT activity_type, description 
-            FROM activity_log 
-            WHERE user_id = ? AND started_at > ? 
-            ORDER BY started_at DESC LIMIT 5
-        """, (str(user_id), now - 86400))
-        recent = result.fetchall()
-    
-    for act_type, desc in recent:
-        if act_type == activity_type:
-            return {
-                "can_start": False,
-                "reason": "semantic_duplicate",
-                "message": "Mä tein just samanlaisen jutun. Ei ihan heti uudestaan."
-            }
-    
-    return {"can_start": True, "reason": "ok"}
-
-# ✅ PARANNETTU: Aktiviteetin aloitus funktio (käyttää uutta cooldown-logiikkaa)
-def start_activity_with_duration(user_id: int, activity_type: str, duration_hours=None):
-    state = get_or_create_state(user_id)
-    now = time.time()
-    
-    check = can_start_activity(user_id, activity_type)
-    if not check["can_start"]:
-        # Käyttäjävahvistus borderline-tapauksissa toteutetaan kutsujassa
-        raise ValueError(check["message"])
-    
-    profile = ACTIVITY_DURATIONS.get(activity_type, {"duration_hours": 2.0, "description": activity_type})
-    final_duration = duration_hours if duration_hours is not None else profile["duration_hours"]
-    
-    end_time = now + (final_duration * 3600)
-    
-    # ✅ UUSI: Tallenna activity_log:iin (transaktiona)
-    with db_lock:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute("""
-                INSERT INTO activity_log 
-                (user_id, activity_type, started_at, duration_hours, description, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                str(user_id),
-                activity_type,
-                now,
-                final_duration,
-                profile["description"],
-                json.dumps({"ignore": profile.get("ignore", False)})
-            ))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    
-    # Päivitä temporal state
-    temporal = state.setdefault("temporal_state", {})
-    temporal["current_activity_started_at"] = now
-    temporal["current_activity_duration_planned"] = final_duration
-    temporal["current_activity_end_time"] = end_time
-    temporal["activity_type"] = activity_type
-    temporal["should_ignore_until"] = end_time if profile.get("ignore", False) else 0
-    temporal["ignore_reason"] = profile["description"] if profile.get("ignore", False) else None
-    
-    return {
-        "duration_hours": final_duration,
-        "end_time_str": datetime.fromtimestamp(end_time, HELSINKI_TZ).strftime("%H:%M"),
-        "will_ignore": profile.get("ignore", False)
-    }
-
 # ====================== GLOBAL STATE CONTAINERS ======================
 continuity_state = {}
 last_proactive_sent = {}
@@ -1329,12 +1186,8 @@ def save_state_to_db(user_id):
         return
     data = json.dumps(continuity_state[user_id], ensure_ascii=False)
     with db_lock:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
-            conn.commit()
-        except Exception:
-            conn.rollback()
+        conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
+        conn.commit()
 
 def save_persistent_state_to_db(user_id):
     if user_id not in continuity_state:
@@ -1374,15 +1227,11 @@ def save_persistent_state_to_db(user_id):
     
     data = json.dumps(persistent_data, ensure_ascii=False)
     with db_lock:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            conn.execute(
-                "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", 
-                (str(user_id), data)
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
+        conn.execute(
+            "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", 
+            (str(user_id), data)
+        )
+        conn.commit()
     print(f"[SAVE] Saved persistent state for user {user_id}")
 
 def clean_ephemeral_state_on_boot(user_id):
@@ -2303,6 +2152,112 @@ def update_temporal_state(user_id: int, current_time: float):
     return temporal
 
 
+def start_activity_with_duration(user_id: int, activity_type: str, duration_hours: float = None, intensity: float = None):
+    """
+    Aloittaa aktiviteetin realistisella kestolla
+    """
+    state = get_or_create_state(user_id)
+    
+    # ✅ VARMISTA ETTÄ temporal_state ON DICT
+    if "temporal_state" not in state or not isinstance(state.get("temporal_state"), dict):
+        state["temporal_state"] = {}
+    
+    temporal = state["temporal_state"]
+    
+    # Laske kesto jos ei annettu
+    if duration_hours is None:
+        if intensity is None:
+            if activity_type in ["overnight_date", "mystery", "club_night"]:
+                intensity = random.uniform(0.6, 0.95)
+            elif activity_type in ["coffee", "lunch"]:
+                intensity = random.uniform(0.3, 0.6)
+            else:
+                intensity = random.uniform(0.4, 0.7)
+        
+        duration_hours = calculate_activity_duration(activity_type, intensity)
+    
+    now = time.time()
+    duration_seconds = duration_hours * 3600
+    end_time = now + duration_seconds
+    
+    # Päätä ignoorataanko
+    will_ignore = should_ignore_during_activity(activity_type)
+    
+    temporal["current_activity_started_at"] = now
+    temporal["current_activity_duration_planned"] = duration_seconds
+    temporal["current_activity_end_time"] = end_time
+    temporal["activity_type"] = activity_type
+    temporal["activity_intensity"] = intensity or 0.5
+    
+    if will_ignore:
+        temporal["should_ignore_until"] = end_time
+        temporal["ignore_reason"] = ACTIVITY_DURATIONS.get(activity_type, {}).get("description", activity_type)
+    else:
+        temporal["should_ignore_until"] = 0
+        temporal["ignore_reason"] = None
+    
+    # Tallenna kellonajat
+    start_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
+    end_dt = datetime.fromtimestamp(end_time, HELSINKI_TZ)
+    
+    print(f"[ACTIVITY START] '{activity_type}' at {start_dt.strftime('%H:%M')}")
+    print(f"[ACTIVITY] Duration: {duration_hours:.2f}h (until {end_dt.strftime('%H:%M')})")
+    print(f"[ACTIVITY] Will ignore: {will_ignore}")
+    
+    # Päivitä spontaneous_narrative
+    narrative = state.setdefault("spontaneous_narrative", {})
+    narrative["active"] = True
+    narrative["type"] = activity_type
+    narrative["started_at"] = now
+    narrative["ignore_duration"] = duration_seconds if will_ignore else 0
+    narrative["ignore_until_time_str"] = end_dt.strftime("%H:%M")
+    narrative["will_respond_during"] = not will_ignore
+    
+    return {
+        "activity": activity_type,
+        "duration_hours": duration_hours,
+        "will_ignore": will_ignore,
+        "end_time_str": end_dt.strftime("%H:%M")
+    }
+
+
+def should_ignore_due_to_activity(user_id: int) -> tuple[bool, str]:
+    """
+    Tarkistaa pitäisikö viesti ignoorata aktiviteetin takia
+    Palauttaa (should_ignore, reason)
+    """
+    state = get_or_create_state(user_id)
+    
+    # ✅ SAFE ACCESS
+    temporal = state.get("temporal_state")
+    if not temporal or not isinstance(temporal, dict):
+        return False, None
+    
+    now = time.time()
+    ignore_until = temporal.get("should_ignore_until", 0)
+    
+    if now < ignore_until:
+        activity = temporal.get("activity_type", "busy")
+        time_left_minutes = int((ignore_until - now) / 60)
+        
+        end_dt = datetime.fromtimestamp(ignore_until, HELSINKI_TZ)
+        end_time_str = end_dt.strftime("%H:%M")
+        
+        reason = f"{activity} (vielä {time_left_minutes} min, until {end_time_str})"
+        
+        print(f"[TEMPORAL IGNORE] Should ignore: {reason}")
+        return True, reason
+    
+    # Aktiviteetti päättynyt
+    if temporal.get("current_activity_started_at", 0) > 0:
+        print(f"[TEMPORAL] Activity '{temporal.get('activity_type')}' ended, will respond")
+        temporal["current_activity_started_at"] = 0
+        temporal["activity_type"] = None
+        temporal["should_ignore_until"] = 0
+    
+    return False, None
+
+
 def get_temporal_context_for_llm(user_id: int) -> str:
     """
     Rakentaa temporaalisen kontekstin LLM:lle
@@ -2353,11 +2308,206 @@ def get_temporal_context_for_llm(user_id: int) -> str:
 
 # ====================== ACTIVITY DURATION PROFILES ======================
 
-# (ACTIVITY_DURATIONS on jo lisätty aikaisemmin tässä versiossa)
+ACTIVITY_DURATIONS = {
+    # LYHYET (30min - 2h)
+    "coffee": {
+        "min_hours": 0.5,
+        "max_hours": 1.5,
+        "typical": 1.0,
+        "description": "kahvilla",
+        "ignore_probability": 0.7  # 70% todennäköisyys ignoorata
+    },
+    "shopping": {
+        "min_hours": 0.5,
+        "max_hours": 2.5,
+        "typical": 1.5,
+        "description": "ostoksilla",
+        "ignore_probability": 0.6
+    },
+    "gym": {
+        "min_hours": 1.0,
+        "max_hours": 2.0,
+        "typical": 1.5,
+        "description": "salilla",
+        "ignore_probability": 0.8  # Ei vastaa kun treenaa
+    },
+    "lunch": {
+        "min_hours": 0.75,
+        "max_hours": 2.0,
+        "typical": 1.25,
+        "description": "lounaalla",
+        "ignore_probability": 0.5
+    },
+    
+    # KESKIPITKÄT (2h - 5h)
+    "casual_date": {
+        "min_hours": 2.0,
+        "max_hours": 4.5,
+        "typical": 3.0,
+        "description": "treffeillä",
+        "ignore_probability": 0.85
+    },
+    "dinner": {
+        "min_hours": 2.0,
+        "max_hours": 4.0,
+        "typical": 2.5,
+        "description": "illallisella",
+        "ignore_probability": 0.75
+    },
+    "bar": {
+        "min_hours": 2.5,
+        "max_hours": 5.0,
+        "typical": 3.5,
+        "description": "baarissa",
+        "ignore_probability": 0.8
+    },
+    "party": {
+        "min_hours": 3.0,
+        "max_hours": 6.0,
+        "typical": 4.0,
+        "description": "bileissä",
+        "ignore_probability": 0.9
+    },
+    "spa": {
+        "min_hours": 2.0,
+        "max_hours": 4.0,
+        "typical": 3.0,
+        "description": "kylpylässä",
+        "ignore_probability": 0.95  # Ei puhelinta kylpylässä
+    },
+    
+    # PITKÄT (5h - 12h)
+    "evening_date": {
+        "min_hours": 4.0,
+        "max_hours": 8.0,
+        "typical": 6.0,
+        "description": "iltakävelyllä jonkun kanssa",
+        "ignore_probability": 0.9
+    },
+    "club_night": {
+        "min_hours": 4.0,
+        "max_hours": 10.0,
+        "typical": 6.0,
+        "description": "klubilla",
+        "ignore_probability": 0.95
+    },
+    "day_trip": {
+        "min_hours": 5.0,
+        "max_hours": 10.0,
+        "typical": 7.0,
+        "description": "päiväretkellä",
+        "ignore_probability": 0.7
+    },
+    
+    # YÖN YLI (8h - 24h)
+    "overnight_date": {
+        "min_hours": 8.0,
+        "max_hours": 16.0,
+        "typical": 12.0,
+        "description": "yötä viettämässä jonkun kanssa",
+        "ignore_probability": 0.95
+    },
+    "weekend_trip": {
+        "min_hours": 24.0,
+        "max_hours": 72.0,
+        "typical": 48.0,
+        "description": "viikonloppumatkalla",
+        "ignore_probability": 0.8
+    },
+    
+    # TYYPILLISET PÄIVITTÄISET
+    "work": {
+        "min_hours": 6.0,
+        "max_hours": 10.0,
+        "typical": 8.0,
+        "description": "töissä",
+        "ignore_probability": 0.4  # Vastaa joskus työpäivän aikana
+    },
+    "meeting": {
+        "min_hours": 0.5,
+        "max_hours": 3.0,
+        "typical": 1.5,
+        "description": "palaverissa",
+        "ignore_probability": 0.9
+    },
+    
+    # MYSTEERIT (mustasukkaisuutta varten)
+    "mystery": {
+        "min_hours": 1.0,
+        "max_hours": 6.0,
+        "typical": 3.0,
+        "description": "tekemässä jotain",
+        "ignore_probability": 0.95
+    },
+    "busy": {
+        "min_hours": 0.5,
+        "max_hours": 4.0,
+        "typical": 2.0,
+        "description": "kiireinen",
+        "ignore_probability": 0.7
+    }
+}
 
 # ====================== DYNAAMINEN KESTON VALINTA ======================
 
-# (calculate_activity_duration ja should_ignore_during_activity on jo lisätty aikaisemmin tässä versiossa)
+def calculate_activity_duration(activity_type: str, intensity: float = 0.5) -> float:
+    """
+    Laskee realistisen keston aktiviteetille
+    
+    Args:
+        activity_type: Aktiviteetin tyyppi (esim "casual_date")
+        intensity: 0.0-1.0, vaikuttaa kestoon
+                  - 0.0-0.3: lyhyt (min)
+                  - 0.3-0.7: tyypillinen
+                  - 0.7-1.0: pitkä (max)
+    
+    Returns:
+        Kesto tunteina (float)
+    """
+    if activity_type not in ACTIVITY_DURATIONS:
+        print(f"[DURATION] Unknown activity '{activity_type}', using default 2h")
+        return 2.0
+    
+    profile = ACTIVITY_DURATIONS[activity_type]
+    
+    min_hours = profile["min_hours"]
+    max_hours = profile["max_hours"]
+    typical = profile["typical"]
+    
+    # Lisää satunnaisuutta
+    randomness = random.uniform(-0.2, 0.2)
+    intensity = max(0.0, min(1.0, intensity + randomness))
+    
+    # Valitse kesto intensiteetin mukaan
+    if intensity < 0.3:
+        # Lyhyt versio
+        duration = min_hours + (typical - min_hours) * (intensity / 0.3)
+    elif intensity < 0.7:
+        # Tyypillinen versio
+        duration = typical + (typical - min_hours) * (intensity - 0.5) * 0.5
+    else:
+        # Pitkä versio
+        duration = typical + (max_hours - typical) * ((intensity - 0.7) / 0.3)
+    
+    # Pyöristä 15 minuutin tarkkuudella
+    duration = round(duration * 4) / 4
+    
+    print(f"[DURATION] {activity_type}: {duration:.2f}h (intensity: {intensity:.2f})")
+    return duration
+
+
+def should_ignore_during_activity(activity_type: str) -> bool:
+    """
+    Päättää satunnaisesti pitäisikö ignoorata aktiviteetin aikana
+    """
+    if activity_type not in ACTIVITY_DURATIONS:
+        return random.random() < 0.5
+    
+    ignore_prob = ACTIVITY_DURATIONS[activity_type]["ignore_probability"]
+    should_ignore = random.random() < ignore_prob
+    
+    print(f"[IGNORE DECISION] {activity_type}: {ignore_prob:.0%} chance → {'IGNORE' if should_ignore else 'RESPOND'}")
+    return should_ignore
 
 # ====================== JEALOUSY & PROVOCATION ENGINE ======================
 
@@ -4859,3 +5009,5 @@ async def main():
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
     asyncio.run(main())
+
+ 
