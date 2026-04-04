@@ -4877,54 +4877,46 @@ def create_database_indexes():
 # ====================== MAIN ======================
 async def main():
     global background_task
-    
+ 
     print("[MAIN] ===== STARTING MAIN FUNCTION =====")
+    import sys
+    print(f"[MAIN] Python {sys.version}")
     print("[MAIN] Step 1: Starting Flask thread...")
-    
+ 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
-    print("[MAIN] Step 2: Flask thread started (no wait)")
-    
-    # ✅ REPLICATE-TESTI VAIN DEBUG-TILASSA
-    if os.getenv("RUN_IMAGE_SELF_TEST") == "1":
-        print("[MAIN] ===== REPLICATE TEST START =====")
-        if REPLICATE_API_KEY:
-            print(f"[REPLICATE TEST] API Key present: {bool(REPLICATE_API_KEY)}")
-            test_prompt = "A photorealistic red apple on a white background, 8K quality"
-            try:
-                test_result = await generate_image(test_prompt)
-                if test_result:
-                    print(f"[REPLICATE TEST] ✅ SUCCESS! Generated {len(test_result)} bytes")
-                else:
-                    print(f"[REPLICATE TEST] ❌ FAILED - returned None")
-            except Exception as e:
-                print(f"[REPLICATE TEST] ❌ EXCEPTION: {type(e).__name__}: {e}")
-        else:
-            print("[REPLICATE TEST] ⚠️ No API key set")
-        print("[REPLICATE TEST] ===== TEST COMPLETE =====")
-    
-    print("[MAIN] Step 5: Now running migration...")
+    print("[MAIN] Step 2: Flask thread started")
+ 
+    print("[MAIN] Step 5: Migration...")
     try:
         migrate_database()
     except Exception as e:
         print(f"[MAIN] Migration error: {e}")
-    
-    print("[MAIN] Step 6: Now loading states...")
+ 
+    print("[MAIN] Step 6: Loading states...")
     try:
         load_states_from_db()
     except Exception as e:
         print(f"[MAIN] Load states error: {e}")
  
-    print("[MAIN] Step 7: Cleaning ephemeral states...")
+    print("[MAIN] Step 7: Boot cleanup...")
     for user_id in list(continuity_state.keys()):
-        clean_ephemeral_state_on_boot(user_id)
+        try:
+            clean_ephemeral_state_on_boot(user_id)
+        except Exception as e:
+            print(f"[MAIN] Boot clean error {user_id}: {e}")
  
-    create_database_indexes()
+    try:
+        create_database_indexes()
+    except Exception as e:
+        print(f"[MAIN] Index error: {e}")
  
-    # TELEGRAM BOT
     print("[MAIN] Step 8: Building Telegram application...")
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
  
     print("[MAIN] Step 9: Adding handlers...")
     application.add_handler(CommandHandler("newgame", cmd_new_game))
@@ -4942,32 +4934,53 @@ async def main():
     application.add_handler(CommandHandler("activity", cmd_activity))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
  
-    print("[MAIN] Step 10: Initializing Telegram bot...")
+    print("[MAIN] Step 10: Initializing...")
     await application.initialize()
-    
-    print("[MAIN] Step 11: Starting Telegram bot...")
+ 
+    print("[MAIN] Step 11: Starting...")
     await application.start()
-    
-    print("[MAIN] Step 12: Starting polling...")
-    await application.updater.start_polling()
-    
-    # ✅ VASTA NYT KÄYNNISTÄ BACKGROUND TASK
-    print("[MAIN] Step 13: Starting background task...")
+ 
+    print("[MAIN] Step 12: Starting background task...")
     background_task = asyncio.create_task(check_proactive_triggers(application))
-    
-    print("[MAIN] ✅ Bot is now running!")
+ 
+    print("[MAIN] Step 13: Starting polling...")
+    await application.updater.start_polling(drop_pending_updates=True)
+ 
+    print("[MAIN] ✅ Bot is running!")
  
     try:
         await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
+    except (KeyboardInterrupt, SystemExit):
+        print("\n[MAIN] Shutdown signal received")
+    except Exception as e:
+        print(f"[MAIN] Event loop error: {type(e).__name__}: {e}")
     finally:
-        if background_task:
+        print("[MAIN] Cleaning up...")
+        if background_task and not background_task.done():
             background_task.cancel()
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+            try:
+                await background_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            await application.updater.stop()
+        except Exception as e:
+            print(f"[MAIN] Updater stop error: {e}")
+        try:
+            await application.stop()
+            await application.shutdown()
+        except Exception as e:
+            print(f"[MAIN] Shutdown error: {e}")
+        print("[MAIN] Done.")
  
  
 if __name__ == "__main__":
-    print("[STARTUP] Running asyncio.run(main())
+    print("[STARTUP] Starting bot...")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[STARTUP] Interrupted")
+    except Exception as e:
+        print(f"[STARTUP] Fatal: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
