@@ -22,7 +22,7 @@ from io import BytesIO
  
 logging.basicConfig(level=logging.INFO)
  
-BOT_VERSION = "6.9.0-visual-intent"
+BOT_VERSION = "7.0.0-vision-aware"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
  
 # ====================== RENDER HEALTH CHECK ======================
@@ -3209,6 +3209,147 @@ Ultra-realistic 8K photography, cinematic lighting, editorial quality
 """
  
  
+# ====================== IMAGE VISION ANALYSIS ======================
+ 
+async def analyze_generated_image(image_bytes: bytes, user_request: str, state: dict) -> dict:
+    """
+    Analysoi valmiin generoivan kuvan vision-mallilla.
+    Palauttaa rakenteisen kuvauksen siita mita kuvassa oikeasti nakyy.
+    """
+    default = {
+        "summary": "",
+        "visible_outfit": "",
+        "visible_setting": "",
+        "pose": "",
+        "mood": "",
+        "notable_details": [],
+        "matches_request": True,
+        "caption_seed": ""
+    }
+ 
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        conv_mode = state.get("conversation_mode", "casual")
+        submission = state.get("submission_level", 0.0)
+ 
+        prompt = f"""Return JSON only. No markdown, no explanation.
+ 
+Schema:
+{{
+  "summary": "1-2 lause suomeksi: mita kuvassa nakyy",
+  "visible_outfit": "mita vaatteita kuvassa oikeasti nakyy",
+  "visible_setting": "mika tausta tai paikka kuvassa nakyy",
+  "pose": "mika asento tai ele kuvassa nakyy",
+  "mood": "mika fiilis tai ilme kuvasta valittaa",
+  "notable_details": ["huomattava yksityiskohta 1", "huomattava yksityiskohta 2"],
+  "matches_request": true,
+  "caption_seed": "yksi luonnollinen suomenkielinen lause jota Megan voisi sanoa lahettaessaan juuri taman kuvan"
+}}
+ 
+Conversation mode: {conv_mode}
+Submission level: {submission:.2f}
+User originally asked: {user_request[:200]}
+ 
+Analyze the ACTUAL image. Be concrete and specific.
+caption_seed should feel natural for Megan - dominant, direct, not generic.
+If mode is nsfw or submission is high, caption_seed can be more provocative."""
+ 
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{b64}",
+                            "detail": "low"
+                        }
+                    }
+                ]
+            }],
+            max_tokens=350,
+            temperature=0.2
+        )
+ 
+        raw = (resp.choices[0].message.content or "{}").strip()
+        result = parse_json_object(raw, default)
+        print(f"[VISION] outfit={result.get('visible_outfit','?')[:50]}")
+        print(f"[VISION] setting={result.get('visible_setting','?')[:50]}")
+        print(f"[VISION] mood={result.get('mood','?')[:40]}")
+        return result
+ 
+    except Exception as e:
+        print(f"[IMAGE ANALYSIS ERROR] {e}")
+        return default
+ 
+ 
+async def generate_image_commentary(user_id: int, analysis: dict, state: dict, user_request: str) -> str:
+    """
+    Generoi Meganille luonnollinen kommentti kuvasta sen analyysin perusteella.
+    Ei random fraaseja - perustuu siihen mita kuvassa oikeasti nakyy.
+    """
+    conversation_mode = state.get("conversation_mode", "casual")
+    submission_level = state.get("submission_level", 0.0)
+ 
+    # Jos analyysi on tyhja, kayta caption_seed suoraan
+    caption_seed = analysis.get("caption_seed", "")
+    if not analysis.get("summary") and caption_seed:
+        return caption_seed
+ 
+    prompt = f"""Write one short natural Finnish line Megan would say when sending her own photo.
+ 
+Rules:
+- Comment on the ACTUAL image content, not generic phrases
+- Be specific - mention something concrete from the image analysis
+- Tone fits mode: {conversation_mode} (submission: {submission_level:.2f})
+- If nsfw/submission high: can be provocative and direct
+- If casual/romantic: warm but still confident
+- Max 1-2 sentences, feel natural and human
+- No hollow filler like "tassa sulle" as the only content
+ 
+Image analysis:
+- Outfit: {analysis.get('visible_outfit', 'not analyzed')}
+- Setting: {analysis.get('visible_setting', 'not analyzed')}
+- Pose: {analysis.get('pose', 'not analyzed')}
+- Mood/vibe: {analysis.get('mood', 'not analyzed')}
+- Notable details: {', '.join(analysis.get('notable_details', [])[:3])}
+- Summary: {analysis.get('summary', '')}
+ 
+Original request: {user_request[:100]}
+Caption seed idea: {caption_seed}"""
+ 
+    try:
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=80,
+            temperature=0.9
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text
+        return caption_seed or "Mita sä tykkaat? 😏"
+    except Exception as e:
+        print(f"[IMAGE COMMENT ERROR] {e}")
+        return caption_seed or "Mita sä tykkaat? 😏"
+ 
+ 
+async def reanalyze_last_sent_image(bot, state: dict) -> dict:
+    """Lataa ja analysoi viimeksi lahetetyn kuvan Telegram file_id:n avulla."""
+    file_id = (state.get("last_image") or {}).get("telegram_file_id")
+    if not file_id:
+        return None
+    try:
+        tg_file = await bot.get_file(file_id)
+        data = await tg_file.download_as_bytearray()
+        return await analyze_generated_image(bytes(data), "Reanalyze last sent image", state)
+    except Exception as e:
+        print(f"[REANALYZE ERROR] {e}")
+        return None
+ 
+ 
 async def extract_visual_intent(user_id: int, text: str, recent_turns: list, state: dict) -> dict:
     """
     LLM parsii kuvapyynnon rakenteiseksi JSON:ksi ennen generointia.
@@ -3386,27 +3527,30 @@ async def handle_image_request(update: Update, user_id: int, text: str):
         await update.message.reply_text(f"Virhe: {str(e)}")
         return
  
-    # Kuvateksti tunnelman mukaan
-    captions = {
-        "nsfw":       ["Mitä sä tykkäät? 😏", "Tässä sulle... 💕", "Miltä näytän? 😘"],
-        "suggestive": ["Otin kuvan sulle 📸", "Ajattelin sua 😊", "Tykkäätkö? 💕"],
-        "romantic":   ["Sulle 💕", "Miltä näytän? 😊", "Ajattelin sua 🥰"],
-        "casual":     ["Tässä! 📸", "Miltä näytän tänään? 😊", "Selfie sulle ✨"],
-    }
-    caption = random.choice(captions.get(conversation_mode, captions["casual"]))
+    # Analysoi valmis kuva vision-mallilla
+    print("[IMAGE] Analyzing generated image with vision...")
+    analysis = await analyze_generated_image(image_bytes, text, state)
  
+    # Generoi kommentti analyysin pohjalta - ei random fraaseja
+    caption = await generate_image_commentary(user_id, analysis, state, text)
+ 
+    # Laheta kuva
+    telegram_file_id = None
     try:
-        await update.message.reply_photo(
+        sent_msg = await update.message.reply_photo(
             photo=BytesIO(image_bytes),
             caption=caption
         )
-        print(f"[IMAGE] Sent OK - {len(image_bytes)} bytes")
+        # Tallenna Telegram file_id myohempaa kayttoa varten
+        if sent_msg and sent_msg.photo:
+            telegram_file_id = sent_msg.photo[-1].file_id
+        print(f"[IMAGE] Sent OK - {len(image_bytes)} bytes | file_id: {telegram_file_id}")
     except Exception as e:
         print(f"[IMAGE ERROR] Send failed: {e}")
-        await update.message.reply_text(f"Lähetysvirhe: {str(e)}")
+        await update.message.reply_text(f"Lahetysvirhe: {str(e)}")
         return
  
-    # Tallenna viimeisin kuva muistiin
+    # Tallenna viimeisin kuva muistiin - sisaltaa nyt analyysin ja file_id:n
     state["last_image"] = {
         "prompt": base_prompt,
         "user_request": text,
@@ -3414,6 +3558,9 @@ async def handle_image_request(update: Update, user_id: int, text: str):
         "setting": setting,
         "mood": mood,
         "timestamp": time.time(),
+        "telegram_file_id": telegram_file_id,
+        "analysis": analysis,
+        "caption": caption,
     }
     state.setdefault("image_history", []).append(state["last_image"])
     state["image_history"] = state["image_history"][-20:]
@@ -3422,8 +3569,11 @@ async def handle_image_request(update: Update, user_id: int, text: str):
         user_id=user_id,
         content=json.dumps({
             "type": "image_sent",
-            "outfit": outfit,
-            "setting": setting,
+            "outfit": analysis.get("visible_outfit") or outfit,
+            "setting": analysis.get("visible_setting") or setting,
+            "mood": analysis.get("mood") or mood,
+            "summary": analysis.get("summary", ""),
+            "caption": caption,
             "mode": conversation_mode,
             "user_request": text[:100],
         }, ensure_ascii=False),
@@ -3535,23 +3685,35 @@ async def maybe_send_proactive_image(application, user_id: int):
             print(f"[PROACTIVE IMAGE] Generation failed")
             return
  
-        caption = random.choice(config["captions"])
-        await application.bot.send_photo(
+        # Vision-analyysi ja AI-kommentti myos proaktiiviselle kuvalle
+        analysis = await analyze_generated_image(image_bytes, f"proactive_{reason}", state)
+        caption = await generate_image_commentary(user_id, analysis, state, f"proactive_{reason}")
+        # Jos AI-kommentti epaonnistuu, kayta vararivi config:sta
+        if not caption:
+            caption = random.choice(config["captions"])
+ 
+        telegram_file_id = None
+        sent_msg = await application.bot.send_photo(
             chat_id=user_id,
             photo=BytesIO(image_bytes),
             caption=caption
         )
-        print(f"[PROACTIVE IMAGE] Sent: {caption}")
+        if sent_msg and sent_msg.photo:
+            telegram_file_id = sent_msg.photo[-1].file_id
+        print(f"[PROACTIVE IMAGE] Sent: {caption[:60]}")
  
-        # Päivitä tila
+        # Paivita tila
         state["last_proactive_image_at"] = time.time()
         state["last_image"] = {
             "prompt": base_prompt,
             "user_request": f"proactive_{reason}",
-            "context": config["outfit"],
-            "setting": config["setting"],
+            "context": analysis.get("visible_outfit") or config["outfit"],
+            "setting": analysis.get("visible_setting") or config["setting"],
             "mood": mood,
             "timestamp": time.time(),
+            "telegram_file_id": telegram_file_id,
+            "analysis": analysis,
+            "caption": caption,
         }
         state.setdefault("image_history", []).append(state["last_image"])
         state["image_history"] = state["image_history"][-20:]
@@ -3563,6 +3725,7 @@ async def maybe_send_proactive_image(application, user_id: int):
                 "reason": reason,
                 "mood": mood,
                 "caption": caption,
+                "summary": analysis.get("summary", ""),
             }, ensure_ascii=False),
             memory_type="image_sent",
         )
@@ -4169,11 +4332,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t = text.lower()
  
         image_triggers = [
-            "lähetä kuva", "haluan kuvan", "tee kuva", "näytä kuva",
-            "ota kuva", "lähetä pic", "send pic", "picture",
-            "show me", "selfie", "valokuva"
+            "laheta kuva", "haluan kuvan", "tee kuva", "nayta kuva",
+            "ota kuva", "laheta pic", "send pic", "picture",
+            "show me", "selfie", "valokuva",
+            # Finnish variants without special chars
+            "lahetä kuva", "lähetä kuva", "näytä kuva",
         ]
         is_image_request = any(trigger in t for trigger in image_triggers)
+ 
+        # Kuvakommentti-triggerit - Megan kommentoi viimeksi lahettamansa kuvan
+        comment_image_triggers = [
+            "kommentoi kuvaa", "kommentoi se kuva", "mita mielta oot siita kuvasta",
+            "mita mielto oot", "kerro siita kuvasta", "analysoi se kuva",
+            "milta se kuva nakyttaa", "mita siina kuvassa on", "muistatko sen kuvan",
+            "se kuva", "tuo kuva", "edellinen kuva", "viiminen kuva",
+        ]
+        is_image_comment = (
+            any(trigger in t for trigger in comment_image_triggers)
+            and get_or_create_state(user_id).get("last_image")
+        )
  
         # STATE ALUSTETAAN AINA - myös kuvapyynnolle
         state = get_or_create_state(user_id)
@@ -4203,6 +4380,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Frame extract myos kuvapyynnolle - tallentaa kontekstin muistiin
         frame = await extract_turn_frame(user_id, text)
         await apply_frame(user_id, frame, user_turn_id)
+ 
+        # KUVAKOMMENTTI - Megan kommentoi viimeksi lahettamansa kuvan
+        if is_image_comment:
+            last_img = state.get("last_image") or {}
+            existing_analysis = last_img.get("analysis")
+ 
+            if not existing_analysis:
+                # Ladataan kuva uudelleen Telegramista ja analysoidaan
+                existing_analysis = await reanalyze_last_sent_image(
+                    context.bot, state
+                )
+ 
+            if existing_analysis:
+                comment = await generate_image_commentary(user_id, existing_analysis, state, text)
+                await update.message.reply_text(comment)
+            else:
+                await update.message.reply_text(
+                    "Mulla ei oo kuvaa mitä kommentoida... laheta pyynto ensin? 📸"
+                )
+            save_persistent_state_to_db(user_id)
+            return
  
         # KUVAPYYNTO - nyt viesti on jo muistissa
         if is_image_request:
