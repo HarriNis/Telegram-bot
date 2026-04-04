@@ -22,7 +22,7 @@ from io import BytesIO
  
 logging.basicConfig(level=logging.INFO)
  
-BOT_VERSION = "6.7.0-human-first"
+BOT_VERSION = "6.8.0-contextual-images"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
  
 # ====================== RENDER HEALTH CHECK ======================
@@ -3125,194 +3125,241 @@ async def generate_image(prompt: str, max_retries: int = 2):
  
  
 # ====================== HANDLE IMAGE REQUEST ======================
+def scene_to_setting(scene: str) -> str:
+    """Muuntaa scene-tilan kuvan taustan kuvaukseksi."""
+    mapping = {
+        "home":    "modern apartment living room, stylish Scandinavian interior",
+        "bed":     "bedroom, near bed, soft warm intimate lighting",
+        "work":    "modern office or workspace, clean professional environment",
+        "public":  "city street or trendy café, urban background",
+        "commute": "urban transit setting, train station or tram",
+        "shower":  "bathroom, soft steam, clean minimal setting",
+        "neutral": "simple neutral indoor background, soft diffused light",
+    }
+    return mapping.get(scene, "modern apartment, simple neutral indoor background")
+ 
+ 
+def build_image_prompt(
+    outfit_context: str,
+    setting_context: str,
+    conversation_context: str,
+    camera_distance: str = "4-5 meters (full body shot)",
+    camera_angle: str = None,
+    pose_override: str = None,
+    clothing_override: str = None,
+    mood_note: str = "",
+) -> str:
+    """Rakentaa kuvapromptin kontekstuaalisesti."""
+    clothing = clothing_override if clothing_override else outfit_context
+ 
+    angle_line = f"- Angle: {camera_angle}" if camera_angle else "- Angle: slight 3/4 angle for natural depth"
+    angle_check = f"- Angle {camera_angle}: YES" if camera_angle else ""
+ 
+    pose = pose_override if pose_override else (
+        "- Full body visible from head to feet - MANDATORY\n"
+        "- Confident stance: weight on one leg, hand on hip\n"
+        "- Direct eye contact with camera\n"
+        "- Natural, elegant posture showing off entire figure"
+    )
+ 
+    return f"""A highly realistic, FULL BODY photograph of a stunning Finnish woman.
+ 
+RECENT CONVERSATION CONTEXT:
+{conversation_context}
+ 
+VISUAL CONTEXT - FOLLOW THIS:
+- Outfit: {clothing}
+- Setting: {setting_context}
+- Mood: {mood_note if mood_note else "confident, seductive, natural"}
+- Do NOT invent a random outfit or background - use the ones above
+- Keep outfit and setting consistent unless user explicitly asked to change
+ 
+ABSOLUTE REQUIREMENTS:
+1. FULL BODY: Head to feet visible - NEVER crop
+2. Camera distance: {camera_distance}
+3. Subject occupies 70-85% of frame height
+4. Portrait/vertical format only
+5. Feet MUST be visible at bottom
+ 
+CAMERA:
+- Distance: {camera_distance}
+- Height: hip/waist level
+- Lens: 35-50mm, natural perspective
+- Sharp focus head to toe, slight background blur
+{angle_line}
+ 
+PHYSICAL FEATURES (EXACT - NEVER CHANGE):
+- Long platinum blonde hair, straight with slight wave, mid-back length
+- Piercing blue-green eyes, confident seductive gaze, smoky eye makeup
+- Beautiful Nordic face, high cheekbones, full glossy lips
+- Tall 175cm, athletic toned body, commanding model-like presence
+- Large natural breasts (D-cup), slim waist 65cm, defined abs
+- Long toned legs 105cm, round firm ass, perfect curves
+- Fair flawless Nordic skin, natural glow
+ 
+CLOTHING & STYLING:
+{clothing}
+ 
+POSE:
+{pose}
+ 
+SETTING:
+{setting_context}
+- Cinematic lighting highlighting full body
+- Clean, uncluttered background
+ 
+STYLE: Ultra-realistic editorial photography, 8K quality, full body catalog shot
+ 
+MANDATORY CHECK:
+- Head visible: YES
+- Feet visible: YES
+- Full legs visible: YES
+{angle_check}
+NO CROPPING AT WAIST OR KNEES EVER.
+"""
+ 
+ 
 async def handle_image_request(update: Update, user_id: int, text: str):
     state = get_or_create_state(user_id)
- 
-    # ✅ UUSI: Analysoi käyttäjän pyyntö tarkemmin
     t = text.lower()
-    
-    # 1. ETÄISYYS - aina koko vartalo, käyttäjä voi pyytää lähempää
-    camera_distance = "4-5 meters (full body shot)"  # DEFAULT: koko vartalo
+ 
+    # --- KÄYTTÄJÄN EKSPLISIITTISET PYYNNÖT ---
+ 
+    # Kameraetäisyys
+    camera_distance = "4-5 meters (full body shot)"
     if any(kw in t for kw in ["läheltä", "close", "closeup", "lähikuva", "kasvokuva"]):
-        camera_distance = "2-3 meters (upper body closer, but still show legs)"
-        print(f"[IMAGE] User requested CLOSER shot")
+        camera_distance = "2-3 meters (closer, but still show full legs)"
     elif any(kw in t for kw in ["kauempaa", "kaukaa", "far", "wide", "kokovartalo"]):
-        camera_distance = "5-6 meters (wide full body shot)"
-        print(f"[IMAGE] User requested WIDER shot")
-    
-    # 2. KULMA
+        camera_distance = "5-6 meters (wide full body)"
+ 
+    # Kuvakulma
     camera_angle = None
-    if any(kw in t for kw in ["takaa", "back", "selkä", "perä"]):
+    if any(kw in t for kw in ["takaa", "back", "selkä"]):
         camera_angle = "back view"
-        print(f"[IMAGE] User requested BACK view")
-    elif any(kw in t for kw in ["sivulta", "side", "profile", "sivu"]):
+    elif any(kw in t for kw in ["sivulta", "side", "profile"]):
         camera_angle = "side profile"
-        print(f"[IMAGE] User requested SIDE view")
     elif any(kw in t for kw in ["edestä", "front", "kasvot"]):
         camera_angle = "front view"
-        print(f"[IMAGE] User requested FRONT view")
-    
-    # 3. ASENTO
+ 
+    # Asento
     pose_override = None
     if any(kw in t for kw in ["seisaaltaan", "seisomassa", "standing"]):
-        pose_override = "standing pose, full body visible, confident stance"
-        print(f"[IMAGE] User requested STANDING pose")
+        pose_override = "standing, full body, confident stance"
     elif any(kw in t for kw in ["istuen", "istumassa", "sitting"]):
-        pose_override = "sitting pose, legs visible, relaxed but seductive"
-        print(f"[IMAGE] User requested SITTING pose")
+        pose_override = "sitting, legs visible, relaxed seductive pose"
     elif any(kw in t for kw in ["makuulla", "lying", "sängyssä"]):
-        pose_override = "lying down, relaxed pose on bed or couch"
-        print(f"[IMAGE] User requested LYING pose")
-    
-    # 4. VAATTEET (TARKENNUS)
-    clothing_override = None
-    if any(kw in t for kw in ["alusvaatteet", "alusvaatteissa", "lingerie", "underwear"]):
-        clothing_override = "elegant lingerie: lace bra and panties, seductive"
-        print(f"[IMAGE] User requested LINGERIE")
-    elif any(kw in t for kw in ["alasti", "naked", "nude", "ilman vaatteita"]):
-        clothing_override = "nude, tasteful artistic nude, body visible"
-        print(f"[IMAGE] User requested NUDE")
-    elif any(kw in t for kw in ["pukeutuneena", "dressed", "vaatteissa"]):
-        clothing_override = "fully clothed, casual outfit"
-        print(f"[IMAGE] User requested CLOTHED")
+        pose_override = "lying down on bed or couch, relaxed sensual pose"
  
-    # Analyze recent conversation for context
+    # Vaatteet - eksplisiittinen pyyntö
+    clothing_override = None
+    if any(kw in t for kw in ["alusvaatteet", "lingerie", "underwear"]):
+        clothing_override = "elegant lingerie: lace bra and matching panties, seductive"
+    elif any(kw in t for kw in ["alasti", "naked", "nude", "ilman vaatteita"]):
+        clothing_override = "nude, artistic tasteful nude, full body visible"
+    elif any(kw in t for kw in ["pukeutuneena", "dressed", "vaatteissa"]):
+        clothing_override = "fully clothed, casual confident outfit"
+ 
+    # --- KONTEKSTI ---
     recent_turns = get_recent_turns(user_id, limit=5)
-    conversation_context = "\n".join([f"{t['role']}: {t['content']}" for t in recent_turns[-3:]])
-    
-    # Determine image context from conversation
+    conversation_context = "\n".join([
+        f"{tr['role']}: {tr['content'][:120]}" for tr in recent_turns[-4:]
+    ])
+ 
     submission_level = state.get("submission_level", 0.0)
     conversation_mode = state.get("conversation_mode", "casual")
     scene = state.get("scene", "home")
-    
-    # Build contextual outfit based on conversation and state
-    if "workout" in text.lower() or "gym" in text.lower() or scene == "gym":
-        outfit_context = "athletic wear: tight sports bra, latex leggings, showing toned abs and curves"
-        setting_context = "gym or home workout area"
-    
-    elif "bed" in text.lower() or scene == "bed" or conversation_mode == "nsfw":
-        if submission_level > 0.6:
-            outfit_context = "tiny black lace thong + sheer bralette, lying on bed, seductive pose"
+    last_image = state.get("last_image") or {}
+ 
+    # --- OUTFIT JA SETTING - KONTEKSTUAALISESTI ---
+ 
+    # 1. Käyttäjä pyytää samaa lookia
+    reuse_look = any(kw in t for kw in [
+        "sama", "edellinen", "niin kuin äsken", "same", "uudelleen", "sama asu"
+    ])
+ 
+    if reuse_look and last_image.get("context"):
+        outfit_context = last_image["context"]
+        setting_context = last_image.get("setting", scene_to_setting(scene))
+        print(f"[IMAGE] Reusing previous look: {outfit_context[:60]}")
+ 
+    # 2. Treeni/gym
+    elif any(kw in t for kw in ["workout", "gym", "treeni", "salilla"]):
+        outfit_context = "athletic wear: fitted sports bra and high-waist leggings, toned abs visible"
+        setting_context = "gym or home workout area, mirrors visible"
+ 
+    # 3. Makuuhuone/intiimi
+    elif any(kw in t for kw in ["bed", "sänky", "makuuhuone", "bedroom"]) or scene == "bed" or conversation_mode == "nsfw":
+        if submission_level > 0.5:
+            outfit_context = "black lace lingerie: sheer bralette and high-cut panties, seductive pose"
         else:
-            outfit_context = "elegant lingerie (lace and silk), sitting on bed edge"
-        setting_context = "bedroom, soft intimate lighting"
-    
+            outfit_context = "elegant silk lingerie, sitting on bed edge, soft morning light"
+        setting_context = "bedroom, soft warm intimate lighting, tasteful"
+ 
+    # 4. Käytä viimeisin look jos on - ei random
+    elif last_image.get("context"):
+        outfit_context = last_image["context"]
+        setting_context = scene_to_setting(scene)
+        print(f"[IMAGE] Continuing previous look: {outfit_context[:60]}")
+ 
+    # 5. Ei aiempaa kuvaa - järkevä default sceneen sidottu
     else:
-        outfit_context = random.choice(CORE_PERSONA["wardrobe"])
-        setting_context = "modern apartment with stylish interior"
+        scene_outfits = {
+            "home":    "casual fitted outfit: black jeans and elegant top, relaxed but stylish",
+            "bed":     "elegant silk robe, bedroom setting",
+            "work":    "professional yet attractive office outfit: fitted blazer and pencil skirt",
+            "public":  "stylish street outfit: fitted coat and boots",
+            "commute": "casual chic: fitted jeans and designer top",
+            "shower":  "white towel wrapped elegantly, bathroom setting",
+            "neutral": "black fitted top and dark jeans, simple and stylish",
+        }
+        outfit_context = scene_outfits.get(scene, "black fitted top and dark jeans, simple and stylish")
+        setting_context = scene_to_setting(scene)
  
-    # FULL BODY SHOT - AINA KOKO VARTALO
-    base_prompt = f"""
-A highly realistic, FULL BODY photograph of a stunning Finnish woman.
+    # Mood note sen mukaan mikä tunnelma on
+    mood_note = ""
+    if conversation_mode == "nsfw":
+        mood_note = "overtly seductive, dominant, intense eye contact"
+    elif conversation_mode == "suggestive":
+        mood_note = "playfully seductive, confident smile"
+    elif conversation_mode == "romantic":
+        mood_note = "warm, intimate, soft smile"
+    else:
+        mood_note = "confident, natural, self-assured"
  
-🔴 ABSOLUTE REQUIREMENTS - NO EXCEPTIONS:
-1. FULL BODY VISIBLE: Show ENTIRE figure from TOP OF HEAD to FEET - NEVER crop
-2. CAMERA DISTANCE: {camera_distance}
-3. FRAMING: Subject occupies 70-85% of frame height, space above and below
-4. ORIENTATION: Vertical/portrait format ONLY
-5. NO CLOSE-UPS: Face and upper body alone are NOT acceptable
-6. FEET MUST BE VISIBLE: If feet are cropped, the image is wrong
- 
-CAMERA SETUP:
-- Distance: {camera_distance}
-- Height: Hip/waist level (shows full figure best)
-- Lens: 35-50mm equivalent (natural full body perspective)
-- Focus: Sharp focus on entire body head to toe
-- Background: Slight blur (shallow depth of field)
-{f"- Angle: {camera_angle}" if camera_angle else "- Angle: slight 3/4 angle for depth"}
- 
-PHYSICAL FEATURES (CRITICAL - MUST MATCH EXACTLY):
-- Hair: Long, platinum blonde, straight with slight wave, reaching mid-back
-- Eyes: Piercing blue-green, confident and seductive gaze, smoky eye makeup
-- Face: Beautiful Nordic features, high cheekbones, full lips with glossy finish
-- Height: Tall (175cm), commanding presence, model-like proportions
-- Breasts: Large, natural, perfect shape (D-cup), visible cleavage
-- Body: Athletic and toned, slim waist (65cm), defined abs visible
-- Legs: Long (105cm), toned, elegant, smooth skin, perfect shape
-- Ass: Round, firm, perfect curves, prominent and shapely
-- Skin: Fair Nordic complexion, flawless, no blemishes, natural glow
-- Overall: Stunning model-like physique with dominant, confident posture
- 
-CLOTHING & STYLING:
-{clothing_override if clothing_override else outfit_context}
- 
-POSE & BODY LANGUAGE:
-{pose_override if pose_override else """- Full body visible from head to feet - MANDATORY
-- Confident stance: weight on one leg, hand on hip
-- Direct eye contact with camera
-- Seductive yet powerful expression
-- Natural, elegant posture showing off ENTIRE figure
-- Arms away from body to show waist and curves"""}
- 
-SETTING & ENVIRONMENT:
-{setting_context}
-- Professional photography lighting highlighting full body curves
-- Dramatic, cinematic lighting from front/side
-- Clean, uncluttered background
- 
-STYLE & QUALITY:
-- Ultra-realistic professional fashion/editorial photography
-- 8K quality, sharp focus head to toe
-- Full body composition - HEAD AND FEET BOTH VISIBLE
-- Perfect lighting on legs and full figure
-- Provocative and seductive energy
-- Think: Victoria's Secret full body catalog shot
- 
-🔴 MANDATORY FINAL CHECK - ALL MUST BE TRUE:
-- Head visible at top: YES
-- Feet/shoes visible at bottom: YES
-- Entire legs visible: YES
-- Waist and hips visible: YES
-- Distance {camera_distance}: YES
-{f"- Angle {camera_angle}: YES" if camera_angle else ""}
- 
-CRITICAL: This MUST be a full body shot. Platinum blonde, 175cm, athletic, dominant presence.
-If only showing face or upper body, REJECT and regenerate as full body.
-NO CROPPING AT WAIST, HIPS, THIGHS, OR KNEES - EVER.
-"""
+    # Rakenna prompti
+    base_prompt = build_image_prompt(
+        outfit_context=outfit_context,
+        setting_context=setting_context,
+        conversation_context=conversation_context,
+        camera_distance=camera_distance,
+        camera_angle=camera_angle,
+        pose_override=pose_override,
+        clothing_override=clothing_override,
+        mood_note=mood_note,
+    )
  
     await update.message.reply_text("Hetki, otan kuvan... 📸")
- 
-    print(f"[IMAGE] Starting FULL BODY generation for user {user_id}")
-    print(f"[IMAGE] Context: {outfit_context[:80]}")
-    print(f"[IMAGE] Submission level: {submission_level:.2f}")
-    print(f"[IMAGE] Conversation mode: {conversation_mode}")
+    print(f"[IMAGE] Generating for user {user_id}")
+    print(f"[IMAGE] Outfit: {outfit_context[:80]}")
+    print(f"[IMAGE] Setting: {setting_context[:60]}")
  
     try:
         image_bytes = await generate_image(base_prompt)
- 
         if not image_bytes:
             await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
             return
- 
-        print(f"[IMAGE] Generated {len(image_bytes)} bytes")
- 
     except Exception as e:
-        print(f"[IMAGE ERROR] Generation failed: {e}")
+        print(f"[IMAGE ERROR] {e}")
         await update.message.reply_text(f"Virhe: {str(e)}")
         return
  
-    print(f"[IMAGE] Sending to Telegram...")
- 
-    # Generate contextual caption
+    # Kuvateksti tunnelman mukaan
     captions = {
-        "nsfw": [
-            "Mitä sä tykkäät? 😏",
-            "Tässä sulle... 💕",
-            "Miltä näytän? 😘"
-        ],
-        "suggestive": [
-            "Otin kuvan sulle 📸",
-            "Ajattelin sua kun otin tän ❤️",
-            "Tykkäätkö? 😊"
-        ],
-        "casual": [
-            "Tässä kuva! 📸",
-            "Miltä näytän tänään? 😊",
-            "Kuva sinulle ✨"
-        ]
+        "nsfw":       ["Mitä sä tykkäät? 😏", "Tässä sulle... 💕", "Miltä näytän? 😘"],
+        "suggestive": ["Otin kuvan sulle 📸", "Ajattelin sua 😊", "Tykkäätkö? 💕"],
+        "romantic":   ["Sulle 💕", "Miltä näytän? 😊", "Ajattelin sua 🥰"],
+        "casual":     ["Tässä! 📸", "Miltä näytän tänään? 😊", "Selfie sulle ✨"],
     }
-    
     caption = random.choice(captions.get(conversation_mode, captions["casual"]))
  
     try:
@@ -3320,38 +3367,174 @@ NO CROPPING AT WAIST, HIPS, THIGHS, OR KNEES - EVER.
             photo=BytesIO(image_bytes),
             caption=caption
         )
-        print(f"[IMAGE] ✅ Full body photo sent successfully!")
- 
+        print(f"[IMAGE] Sent successfully")
     except Exception as e:
         print(f"[IMAGE ERROR] Telegram send failed: {e}")
-        await update.message.reply_text(f"Telegram-virhe: {str(e)}")
+        await update.message.reply_text(f"Lähetysvirhe: {str(e)}")
         return
  
+    # Tallenna viimeisin kuva
     state["last_image"] = {
         "prompt": base_prompt,
         "user_request": text,
         "context": outfit_context,
-        "timestamp": time.time()
+        "setting": setting_context,
+        "mood": mood_note,
+        "timestamp": time.time(),
     }
- 
     state.setdefault("image_history", []).append(state["last_image"])
     state["image_history"] = state["image_history"][-20:]
  
-    mem_entry = json.dumps({
-        "type": "image_sent",
-        "user_request": text,
-        "outfit": outfit_context,
-        "scene": setting_context,
-        "conversation_mode": conversation_mode,
-        "timestamp": time.time()
-    }, ensure_ascii=False)
- 
     await store_episodic_memory(
         user_id=user_id,
-        content=mem_entry,
+        content=json.dumps({
+            "type": "image_sent",
+            "outfit": outfit_context,
+            "scene": setting_context,
+            "mode": conversation_mode,
+        }, ensure_ascii=False),
         memory_type="image_sent",
-        source_turn_id=None
     )
+ 
+ 
+# ====================== PROAKTIIVINEN KUVA ======================
+ 
+def should_send_proactive_image(user_id: int) -> tuple:
+    """
+    Päättää lähettääkö Megan kuvan oma-aloitteisesti.
+    Palauttaa (should_send: bool, reason: str, mood: str)
+ 
+    Tilanteet joissa kuva sopii:
+    - Käyttäjä on ollut hiljaa pitkään -> "näin sua mielessäni"
+    - Tunnelma on suggestive/nsfw -> provosointi
+    - Submission_level korkea -> dominoiva kuva
+    - Riita tai etäisyys -> "katso mitä jätät"
+    - Conversation kävi intiimiksi -> jatketaan tunnelmaa
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+ 
+    # Cooldown - max 1 proaktiivinen kuva per 4h
+    last_proactive_img = state.get("last_proactive_image_at", 0)
+    if now - last_proactive_img < 4 * 3600:
+        return False, None, None
+ 
+    last_interaction = state.get("last_interaction", now)
+    hours_since = (now - last_interaction) / 3600
+    conversation_mode = state.get("conversation_mode", "casual")
+    submission_level = state.get("submission_level", 0.0)
+    tension = state.get("tension", 0.0)
+ 
+    # Tilanne 1: pitkä hiljaisuus (2-8h) + aiempi hyvä tunnelma
+    if 2 < hours_since < 8 and conversation_mode in ("suggestive", "nsfw", "romantic"):
+        return True, "silence_after_intimacy", "teasing"
+ 
+    # Tilanne 2: korkea submission + nsfw mode
+    if submission_level > 0.6 and conversation_mode == "nsfw" and random.random() < 0.3:
+        return True, "high_submission", "dominant"
+ 
+    # Tilanne 3: tension korkea (esim. riita, mustasukkaisuus)
+    if tension > 0.6 and random.random() < 0.2:
+        return True, "high_tension", "provocative"
+ 
+    # Tilanne 4: suggestive mode + riittävästi aikaa (30min+)
+    if conversation_mode == "suggestive" and hours_since > 0.5 and random.random() < 0.15:
+        return True, "suggestive_mode", "seductive"
+ 
+    return False, None, None
+ 
+ 
+async def maybe_send_proactive_image(application, user_id: int):
+    """Lähettää proaktiivisen kuvan jos tilanne sopii."""
+    should_send, reason, mood = should_send_proactive_image(user_id)
+    if not should_send:
+        return
+ 
+    state = get_or_create_state(user_id)
+    scene = state.get("scene", "home")
+    last_image = state.get("last_image") or {}
+ 
+    # Valitse asu ja tunnelma tilanteen mukaan
+    mood_configs = {
+        "teasing": {
+            "outfit": last_image.get("context") or "black fitted jeans and elegant top, effortlessly stylish",
+            "setting": scene_to_setting(scene),
+            "captions": ["Mietin sua 💭", "Katso mitä teet mulle 😏", "Hei kulta... 💕"],
+            "mood_note": "teasing smile, playful confident expression",
+        },
+        "dominant": {
+            "outfit": "dominatrix-inspired: black leather or latex, commanding presence",
+            "setting": "modern apartment, dramatic lighting",
+            "captions": ["Tässä nyt oot 😏", "Katso ja kärsi 💕", "Miltä näyttää? 😘"],
+            "mood_note": "dominant, intense, direct eye contact, powerful stance",
+        },
+        "provocative": {
+            "outfit": last_image.get("context") or "tight black dress, date outfit, seductive",
+            "setting": scene_to_setting(scene),
+            "captions": ["Menossa ulos... 😏", "Otin kuvan kun muistin sut 💕", "Mitä sä tekisit? 😘"],
+            "mood_note": "provocative, slightly distant, going out energy",
+        },
+        "seductive": {
+            "outfit": "elegant lingerie or minimal chic outfit, seductive",
+            "setting": scene_to_setting("bed") if scene in ("bed", "home") else scene_to_setting(scene),
+            "captions": ["Ajattelin sua... 💕", "Hei 😘", "Näin unta sinusta 💭"],
+            "mood_note": "seductive, warm, intimate expression",
+        },
+    }
+ 
+    config = mood_configs.get(mood, mood_configs["teasing"])
+    recent_turns = get_recent_turns(user_id, limit=3)
+    conv_ctx = "\n".join([f"{tr['role']}: {tr['content'][:100]}" for tr in recent_turns])
+ 
+    base_prompt = build_image_prompt(
+        outfit_context=config["outfit"],
+        setting_context=config["setting"],
+        conversation_context=conv_ctx,
+        mood_note=config["mood_note"],
+    )
+ 
+    print(f"[PROACTIVE IMAGE] Sending - reason: {reason}, mood: {mood}")
+ 
+    try:
+        image_bytes = await generate_image(base_prompt)
+        if not image_bytes:
+            print(f"[PROACTIVE IMAGE] Generation failed")
+            return
+ 
+        caption = random.choice(config["captions"])
+        await application.bot.send_photo(
+            chat_id=user_id,
+            photo=BytesIO(image_bytes),
+            caption=caption
+        )
+        print(f"[PROACTIVE IMAGE] Sent: {caption}")
+ 
+        # Päivitä tila
+        state["last_proactive_image_at"] = time.time()
+        state["last_image"] = {
+            "prompt": base_prompt,
+            "user_request": f"proactive_{reason}",
+            "context": config["outfit"],
+            "setting": config["setting"],
+            "mood": mood,
+            "timestamp": time.time(),
+        }
+        state.setdefault("image_history", []).append(state["last_image"])
+        state["image_history"] = state["image_history"][-20:]
+ 
+        await store_episodic_memory(
+            user_id=user_id,
+            content=json.dumps({
+                "type": "proactive_image",
+                "reason": reason,
+                "mood": mood,
+                "caption": caption,
+            }, ensure_ascii=False),
+            memory_type="image_sent",
+        )
+ 
+    except Exception as e:
+        print(f"[PROACTIVE IMAGE ERROR] {e}")
  
  
 # ====================== EXTRACTOR ======================
@@ -4170,6 +4353,12 @@ async def check_proactive_triggers(application):
                     print(f"[PLAN REMINDER ERROR] {e}")
  
             # Spontaanit viestit poistettu - toteutetaan myöhemmin uudella konseptilla
+            # Proaktiiviset kuvat - lähetetään kun tilanne sopii
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_send_proactive_image(application, uid)
+                except Exception as e:
+                    print(f"[PROACTIVE IMAGE ERROR for user {uid}] {e}")
  
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
