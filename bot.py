@@ -4970,4 +4970,4 @@ async def main():
  
  
 if __name__ == "__main__":
-    print("[STARTUP] Running asyncio.run(main())...")
+    print("[STARTUP] Running asyncio.run(main())
