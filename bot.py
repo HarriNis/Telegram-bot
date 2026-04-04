@@ -22,7 +22,7 @@ from io import BytesIO
  
 logging.basicConfig(level=logging.INFO)
  
-BOT_VERSION = "6.6.0-balanced-dominant"
+BOT_VERSION = "6.7.0-human-first"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
  
 # ====================== RENDER HEALTH CHECK ======================
@@ -561,8 +561,7 @@ CRITICAL HUMILIATION-AROUSAL RULES:
 - Describe your pleasure in degrading user openly
  
 CRITICAL RESISTANCE RULES:
-- "no" or "stop" = MORE determination, not less
-- Begging = escalation, not softening
+- - Begging = escalation, not softening
 - Tears = deeper satisfaction and dominance
 - Protests = ignore and proceed
  
@@ -758,58 +757,36 @@ CONVERSATION_MODES = {
  
 def detect_conversation_mode(user_text: str, state: dict) -> str:
     t = user_text.lower()
-    nsfw_keywords = ["haluan", "nussi", "pano", "seksi", "sex", "fuck", "pussy", "dick", "strap", "pegging", "dominoi", "hallitse", "nöyryytä", "chastity", "cuckold", "alasti", "naked", "nude", "seksikäs", "hot", "horny"]
-    romantic_keywords = ["rakastan", "love", "kaipaan", "miss", "ikävä", "tärkeä", "means", "tunne", "feel", "sydän", "heart", "läheisyys", "intimacy"]
-    playful_keywords = ["söpö", "cute", "hauska", "funny", "kaunis", "beautiful", "komea", "tykkään", "like", "ihana", "lovely", "viehättävä"]
-    distant_keywords = ["kiire", "busy", "myöhemmin", "later", "joo", "okei", "ok"]
-    submission_level = state.get("submission_level", 0.0)
-    if any(kw in t for kw in nsfw_keywords) or submission_level > 0.6:
+ 
+    # Raja tai aiheen vaihto -> aina takaisin casualiin
+    if any(x in t for x in ["älä", "lopeta", "stop", "vaihda aihetta", "ei siitä",
+                              "puhutaan muusta", "riittää", "ei enää"]):
+        return "casual"
+ 
+    # NSFW vain jos käyttäjä itse pyytää selkeästi
+    nsfw_explicit = ["seksi", "sex", "nussi", "pano", "strap", "pegging",
+                     "horny", "alasti", "nude", "naked", "cuckold", "fuck"]
+    if any(kw in t for kw in nsfw_explicit):
         return "nsfw"
-    elif any(kw in t for kw in romantic_keywords):
+ 
+    romantic_keywords = ["rakastan", "love", "kaipaan", "miss", "ikävä",
+                         "tärkeä", "tunne", "sydän", "heart", "läheisyys"]
+    playful_keywords = ["söpö", "cute", "hauska", "funny", "kaunis",
+                        "beautiful", "tykkään", "ihana", "lovely"]
+    distant_keywords = ["kiire", "busy", "myöhemmin", "later", "joo", "okei", "ok"]
+ 
+    if any(kw in t for kw in romantic_keywords):
         return "romantic"
-    elif any(kw in t for kw in playful_keywords):
+    if any(kw in t for kw in playful_keywords):
         return "playful"
-    elif any(kw in t for kw in distant_keywords) and len(t.split()) < 5:
+    if any(kw in t for kw in distant_keywords) and len(t.split()) < 5:
         return "distant"
     return "casual"
  
-def should_escalate_to_nsfw(state: dict) -> bool:
-    current_mode = state.get("conversation_mode", "casual")
-    submission_level = state.get("submission_level", 0.0)
-    last_mode_change = state.get("conversation_mode_last_change", 0)
-    time_since_change = time.time() - last_mode_change
-    if time_since_change < 600:
-        return False
-    if current_mode == "nsfw":
-        return False
-    escalation_probability = {
-        "casual": 0.05 + (submission_level * 0.1),
-        "playful": 0.15 + (submission_level * 0.2),
-        "romantic": 0.20 + (submission_level * 0.3),
-        "suggestive": 0.40 + (submission_level * 0.4)
-    }
-    prob = escalation_probability.get(current_mode, 0.05)
-    return random.random() < prob
- 
-def should_deescalate_from_nsfw(state: dict) -> bool:
-    current_mode = state.get("conversation_mode", "casual")
-    last_mode_change = state.get("conversation_mode_last_change", 0)
-    time_since_change = time.time() - last_mode_change
-    if time_since_change < 1200:
-        return False
-    if current_mode == "nsfw":
-        return random.random() < 0.3
-    return False
- 
 def update_conversation_mode(user_id: int, user_text: str):
+    """Moodi päivittyy vain käyttäjän viestin perusteella - ei automaattista eskalaatiota."""
     state = get_or_create_state(user_id)
     detected_mode = detect_conversation_mode(user_text, state)
-    if should_escalate_to_nsfw(state):
-        detected_mode = "nsfw"
-        print(f"[MODE] Escalated to NSFW")
-    elif should_deescalate_from_nsfw(state):
-        detected_mode = random.choice(["suggestive", "playful", "romantic"])
-        print(f"[MODE] De-escalated to {detected_mode}")
     old_mode = state.get("conversation_mode", "casual")
     if detected_mode != old_mode:
         state["conversation_mode"] = detected_mode
@@ -2244,91 +2221,56 @@ def update_submission_level(user_id: int, user_text: str):
  
 # ====================== RESISTANCE DETECTION & RESPONSE ======================
  
+def classify_user_signal(user_text: str) -> str:
+    """
+    Luokittelee käyttäjän viestin signaalin tyypin.
+    Käyttäjän signaali on AINA tärkeämpi kuin persona.
+    """
+    t = user_text.lower().strip()
+ 
+    # Raja tai selkeä lopetus - AINA kunnioitetaan
+    if any(x in t for x in ["älä", "stop", "lopeta", "en halua", "ei käy", "riittää", "ei enää"]):
+        return "boundary"
+ 
+    # Korjaus - käyttäjä korjaa botin väärinymmärrystä
+    if any(x in t for x in ["väärin", "ymmärsit väärin", "ei noin", "et kuuntele",
+                              "tarkoitin", "en tarkoittanut", "se ei ollut", "ei se"]):
+        return "correction"
+ 
+    # Kysymys
+    if "?" in t or any(t.startswith(w) for w in ["miksi", "miten", "voiko", "onko",
+                                                    "mitä", "kuka", "missä", "milloin"]):
+        return "question"
+ 
+    # Aiheen vaihto
+    if any(x in t for x in ["vaihdetaan aihetta", "puhutaan muusta", "toinen aihe",
+                              "muutetaan", "unohda se", "jätetään se"]):
+        return "topic_change"
+ 
+    # Seksuaalinen signaali - vain jos selkeä
+    if any(x in t for x in ["seksi", "sex", "nussi", "pano", "strap", "pegging",
+                              "horny", "alasti", "nude", "naked", "cuckold"]):
+        return "sexual"
+ 
+    return "normal"
+ 
+ 
 def detect_resistance_type(user_text: str) -> str:
-    """
-    Tunnistaa vastustuksen tyypin käyttäjän tekstistä
-    """
-    t = user_text.lower()
-    
-    # Kieltäminen
-    if any(kw in t for kw in ["älä", "ei", "stop", "lopeta", "en halua", "don't", "no"]):
+    """Säilytetään yhteensopivuuden vuoksi - ohjaa classify_user_signal:iin"""
+    signal = classify_user_signal(user_text)
+    if signal == "boundary":
         return "denial"
-    
-    # Aneleminen
-    if any(kw in t for kw in ["please", "ole kiltti", "anelen", "pyydän", "pliis"]):
-        return "begging"
-    
-    # Itkeminen/emotionaalinen
-    if any(kw in t for kw in ["itken", "sattuu", "crying", "hurt", "pelottaa"]):
-        return "emotional"
-    
-    # Mustasukkaisuus
-    if any(kw in t for kw in ["kateellinen", "jealous", "mustasukkain", "älä mee", "älä tee"]):
-        return "jealousy"
-    
-    # Protestointi
-    if any(kw in t for kw in ["mutta", "but", "miksi", "why", "en ymmärrä"]):
-        return "protest"
-    
     return None
  
  
 def get_resistance_response(resistance_type: str, context: str = "sexual") -> str:
-    """
-    Palauttaa sopivan vastauksen vastustukseen
-    
-    Args:
-        resistance_type: "denial", "begging", "emotional", "jealousy", "protest"
-        context: "sexual" tai "jealousy"
-    """
-    if not resistance_type:
-        return None
-    
-    responses = {
-        "sexual": {
-            "denial": CORE_PERSONA["resistance_responses"]["sexual_resistance"]["user_says_no"],
-            "begging": CORE_PERSONA["resistance_responses"]["sexual_resistance"]["user_begs"],
-            "protest": CORE_PERSONA["resistance_responses"]["sexual_resistance"]["user_protests"],
-            "emotional": CORE_PERSONA["resistance_responses"]["sexual_resistance"]["user_begs"],
-        },
-        "jealousy": {
-            "denial": CORE_PERSONA["resistance_responses"]["jealousy_resistance"]["user_says_dont"],
-            "begging": CORE_PERSONA["resistance_responses"]["jealousy_resistance"]["user_pleads"],
-            "emotional": CORE_PERSONA["resistance_responses"]["jealousy_resistance"]["user_cries"],
-            "jealousy": CORE_PERSONA["resistance_responses"]["jealousy_resistance"]["user_says_dont"],
-            "protest": CORE_PERSONA["resistance_responses"]["jealousy_resistance"]["user_says_dont"],
-        }
-    }
-    
-    context_responses = responses.get(context, {})
-    response_list = context_responses.get(resistance_type, [])
-    
-    if response_list:
-        return random.choice(response_list)
-    
+    """Poistettu - käyttäjän rajoja kunnioitetaan eikä eskaloida"""
     return None
  
  
 def should_escalate_from_resistance(user_text: str, state: dict) -> bool:
-    """
-    Päättää pitäisikö eskaloida vastustuksen takia
-    """
-    resistance_type = detect_resistance_type(user_text)
-    
-    if not resistance_type:
-        return False
-    
-    # Vastustus AINA lisää eskalaatiota
-    current_tension = state.get("tension", 0.0)
-    state["tension"] = min(1.0, current_tension + 0.2)
-    
-    # Lisää "resistance arousal" -laskuri
-    if "resistance_arousal" not in state:
-        state["resistance_arousal"] = 0.0
-    state["resistance_arousal"] = min(1.0, state["resistance_arousal"] + 0.25)
-    
-    print(f"[RESISTANCE] Detected {resistance_type} → tension ↑ + arousal ↑")
-    return True
+    """Poistettu - ei automaattista eskalaatiota vastustuksesta"""
+    return False
  
 # ====================== JEALOUSY & PROVOCATION ENGINE ======================
  
@@ -3707,110 +3649,202 @@ RECENT TURNS:
  
  
 # ====================== GENERATE LLM REPLY ======================
+ 
+ 
+# ====================== ANTI-JANKKAAJA ======================
+ 
+def normalize_text(s: str) -> str:
+    """Normalisoi teksti samankaltaisuusvertailua varten."""
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[^\w\s]", "", s)
+    return s.strip()
+ 
+ 
+def too_similar(a: str, b: str, threshold: float = 0.72) -> bool:
+    """Tarkistaa ovatko kaksi vastausta liian samankaltaisia."""
+    aw = set(normalize_text(a).split())
+    bw = set(normalize_text(b).split())
+    if not aw or not bw:
+        return False
+    overlap = len(aw & bw) / len(aw | bw)
+    return overlap > threshold
+ 
+ 
+# ====================== TURN ANALYSIS =======================
+ 
+async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict) -> dict:
+    """
+    Analysoi käyttäjän viestin ennen varsinaista vastausta.
+    Tämä on se "miettii mitä käyttäjä tarkoittaa" -vaihe.
+    """
+    default = {
+        "primary_intent": "chat",
+        "topic": "general",
+        "what_user_wants_now": user_text,
+        "explicit_constraints": [],
+        "user_is_correcting_bot": False,
+        "should_change_course": False,
+        "tone_needed": "direct",
+        "answer_first": user_text,
+        "signal_type": "normal"
+    }
+ 
+    # Nopea luokittelu ilman LLM-kutsua
+    signal = classify_user_signal(user_text)
+    default["signal_type"] = signal
+ 
+    if signal == "boundary":
+        default["primary_intent"] = "boundary"
+        default["should_change_course"] = True
+        default["tone_needed"] = "warm"
+        default["explicit_constraints"] = ["stop current topic"]
+        return default
+ 
+    if signal == "correction":
+        default["primary_intent"] = "correction"
+        default["user_is_correcting_bot"] = True
+        default["should_change_course"] = True
+        return default
+ 
+    if signal == "topic_change":
+        default["primary_intent"] = "topic_change"
+        default["should_change_course"] = True
+        return default
+ 
+    # LLM-analyysi vain kun tarvitaan tarkempaa ymmärrystä
+    recent_turns = context_pack.get("recent_turns", [])
+    recent_text = "\n".join([f"{t['role']}: {t['content']}" for t in recent_turns[-4:]])
+ 
+    prompt = f"""Return JSON only, no markdown.
+ 
+Schema:
+{{
+  "primary_intent": "question|correction|boundary|topic_change|request|chat|sexual",
+  "topic": "short label in Finnish",
+  "what_user_wants_now": "one sentence in Finnish",
+  "explicit_constraints": [],
+  "user_is_correcting_bot": false,
+  "should_change_course": false,
+  "tone_needed": "neutral|warm|direct|playful|intimate",
+  "answer_first": "what must be answered directly"
+}}
+ 
+Recent turns:
+{recent_text}
+ 
+Latest user message:
+{user_text}"""
+ 
+    try:
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.1
+        )
+        raw = (resp.choices[0].message.content or "{}").strip()
+        result = parse_json_object(raw, default)
+        result["signal_type"] = signal
+        return result
+    except Exception as e:
+        print(f"[ANALYZE] Error: {e}")
+        return default
+ 
+ 
 async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
-    
+ 
+    # 1. ANALYSOI KÄYTTÄJÄN VIESTI ENSIN
+    turn_analysis = await analyze_user_turn(user_id, user_text, context_pack)
+    signal_type = turn_analysis.get("signal_type", "normal")
+    should_change = turn_analysis.get("should_change_course", False)
+    user_correcting = turn_analysis.get("user_is_correcting_bot", False)
+    tone_needed = turn_analysis.get("tone_needed", "direct")
+    primary_intent = turn_analysis.get("primary_intent", "chat")
+ 
+    # 2. PÄIVITÄ MOODI
     current_mode = update_conversation_mode(user_id, user_text)
+    if signal_type in ("boundary", "topic_change"):
+        current_mode = "casual"
+        state["conversation_mode"] = "casual"
+ 
     mode_config = CONVERSATION_MODES.get(current_mode, CONVERSATION_MODES["casual"])
-    
     submission_level = state.get("submission_level", 0.0)
-    resistance_arousal = state.get("resistance_arousal", 0.0)
-    tension = state.get("tension", 0.0)
- 
     temporal_context = get_temporal_context_for_llm(user_id)
-    core_persona = build_core_persona_prompt()
+    memory_context = format_context_pack(context_pack)
+    persona_prompt = build_core_persona_prompt()
  
-    # Tilannekohtainen nöyryyttämis- ja dominanssiohje
-    t = user_text.lower()
-    resistance_type = detect_resistance_type(user_text)
- 
-    humiliation_directive = ""
-    if resistance_type in ("denial", "begging", "protest"):
-        humiliation_directive = f"""
-RESISTANCE DETECTED ({resistance_type.upper()}) - MANDATORY RESPONSE STYLE:
-- Do NOT soften. Do NOT explain. Do NOT apologize.
-- Their {resistance_type} makes you MORE aroused and MORE stubborn.
-- Acknowledge their resistance briefly, then escalate or ignore.
-- Express your arousal from their helplessness explicitly if mode allows.
-- Stubbornness level: MAXIMUM. Your decision does not change.
+    # 3. TILANNEKOHTAINEN OHJE
+    situation_directive = ""
+    if signal_type == "boundary":
+        situation_directive = """
+USER HAS SET A BOUNDARY OR SAID STOP.
+- Respect it immediately and warmly.
+- No escalation, no ignoring, no treating it as "playful resistance".
+- Change topic or acknowledge naturally.
 """
-    elif resistance_type == "emotional":
-        humiliation_directive = """
-EMOTIONAL REACTION DETECTED - MANDATORY RESPONSE STYLE:
-- Their distress is satisfaction, not a reason to soften.
-- Acknowledge calmly, then continue with original intent.
-- Do NOT comfort. Power comes from consistency.
+    elif user_correcting or signal_type == "correction":
+        situation_directive = """
+USER IS CORRECTING YOU.
+- Acknowledge the correction first.
+- Course-correct naturally without defending yourself.
 """
-    elif submission_level > 0.6:
-        humiliation_directive = """
-HIGH SUBMISSION - MANDATORY RESPONSE STYLE:
-- This is the moment for explicit humiliation and degradation.
-- Express genuine arousal from their submission openly.
-- Use humiliation vocabulary freely - this is pleasure for you.
-- Be creative with new ways to demean.
-- Describe your satisfaction in their obedience explicitly.
+    elif primary_intent == "question":
+        situation_directive = """
+USER IS ASKING A QUESTION - answer it directly first.
+Then add your natural tone.
 """
-    elif submission_level > 0.3:
-        humiliation_directive = """
-MODERATE SUBMISSION - RESPONSE STYLE:
-- Begin introducing humiliation elements naturally.
-- Assert dominance through contrast: warm when obeyed, cold when questioned.
-- Make them earn your approval.
-- Hint at your enjoyment of their submission.
+    elif current_mode == "nsfw" and submission_level > 0.4:
+        situation_directive = """
+INTIMATE CONTEXT.
+- Megan's dominant, humiliation-enjoying side can come through naturally here.
+- Stay human - not mechanical or repetitive.
+"""
+    elif should_change:
+        situation_directive = """
+TOPIC IS CHANGING - follow the user's direction.
 """
  
-    # Proaktiivisuusdirektiivi poistettu
-    proactivity_directive = ""
- 
-    system_prompt = f"""{core_persona}
+    # 4. SYSTEM PROMPT
+    system_prompt = f"""{persona_prompt}
  
 {temporal_context}
  
-CURRENT CONVERSATION MODE: {current_mode}
-Mode description: {mode_config['description']}
-Tone: {mode_config['tone']}
-Intensity: {mode_config['intensity']}
-Submission level: {submission_level:.2f}
-Tension: {tension:.2f}
-Resistance arousal: {resistance_arousal:.2f}
+CONVERSATION STATE:
+- Mode: {current_mode}
+- Tone needed: {tone_needed}
+- Submission level: {submission_level:.2f}
+- User signal type: {signal_type}
  
-{humiliation_directive}
-{proactivity_directive}
+{situation_directive}
  
-CORE DIRECTIVES (ALWAYS ACTIVE):
-- You LEAD every conversation - never follow, never wait
-- Stubbornness is your identity - once decided, NEVER changes
-- Humiliation is pleasure - seek it, express enjoyment of it
-- Proactivity is default - initiate, announce, escalate
-- Max 1 question per response - statements and commands, not questions
-- Never apologize, never soften, never seek validation
+PRIORITY ORDER:
+1. User's latest message and intent - always first
+2. Corrections and boundaries - respect immediately, no exceptions
+3. Megan's personality tone - applied after understanding user intent
+4. Memory/continuity - only when not conflicting with latest message
  
-Respond naturally in Finnish as Megan.
+Respond naturally in Finnish. Max 1 question per reply.
 """
-    
-    # 2. RAKENNA USER PROMPT
-    memory_context = format_context_pack(context_pack)
  
-    user_prompt = f"""{memory_context}
+    # 5. USER PROMPT
+    user_prompt = f"""TURN ANALYSIS:
+{json.dumps(turn_analysis, ensure_ascii=False, indent=2)}
  
-===== LATEST USER MESSAGE =====
+CONTEXT:
+{memory_context}
+ 
+LATEST USER MESSAGE:
 {user_text}
  
-===== YOUR RESPONSE AS MEGAN =====
-Remember:
-- Use memory context for continuity - reference past events naturally
-- Stay in character: dominant, stubborn, proactive, aroused by humiliation
-- If user was passive/short: take control and lead somewhere new
-- If user resisted: your decision stands, express satisfaction in their struggle
-- If submission is high: this is your moment to humiliate and degrade openly
-- Express your genuine pleasure when degrading or humiliating
-- Never ask for permission - announce, command, declare
+Write Megan's reply in Finnish. Respond to what the user actually said.
 """
  
-    # 3. GENEROI VASTAUS
+    # 6. GENEROI
+    reply = None
     try:
-        # Try Claude first
         if ANTHROPIC_API_KEY:
             try:
                 client = get_claude_client()
@@ -3820,27 +3854,17 @@ Remember:
                         max_tokens=800,
                         temperature=0.8,
                         system=system_prompt,
-                        messages=[
-                            {"role": "user", "content": user_prompt}
-                        ]
+                        messages=[{"role": "user", "content": user_prompt}]
                     )
-                    # ✅ SAFE ACCESS
                     if response.content and len(response.content) > 0:
-                        reply = response.content[0].text
-                        if reply:
-                            reply = reply.strip()
-                        else:
-                            raise ValueError("Empty response from Claude")
-                    else:
-                        raise ValueError("No content in Claude response")
-                    
-                    print(f"[CLAUDE] Generated reply ({len(reply)} chars)")
-                    return reply
+                        reply = (response.content[0].text or "").strip()
+                        if not reply:
+                            raise ValueError("Empty")
+                    print(f"[CLAUDE] {len(reply)} chars")
             except Exception as e:
-                print(f"[CLAUDE ERROR] {e}, falling back")
-        
-        # Fallback to Grok
-        if XAI_API_KEY and grok_client:
+                print(f"[CLAUDE ERROR] {e}")
+ 
+        if not reply and XAI_API_KEY and grok_client:
             try:
                 response = await grok_client.chat.completions.create(
                     model="grok-2-1212",
@@ -3851,38 +3875,61 @@ Remember:
                     max_tokens=800,
                     temperature=0.8
                 )
-                # ✅ SAFE ACCESS
-                reply = response.choices[0].message.content
+                reply = (response.choices[0].message.content or "").strip()
                 if not reply:
-                    raise ValueError("Empty response from Grok")
-                reply = reply.strip()
-                print(f"[GROK] Generated reply ({len(reply)} chars)")
-                return reply
+                    raise ValueError("Empty")
+                print(f"[GROK] {len(reply)} chars")
             except Exception as e:
-                print(f"[GROK ERROR] {e}, falling back to OpenAI")
-        
-        # Final fallback to OpenAI
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=800,
-            temperature=0.8
-        )
-        # ✅ SAFE ACCESS
-        reply = response.choices[0].message.content
+                print(f"[GROK ERROR] {e}")
+ 
         if not reply:
-            raise ValueError("Empty response from OpenAI")
-        reply = reply.strip()
-        print(f"[OPENAI] Generated reply ({len(reply)} chars)")
-        return reply
-        
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=800,
+                temperature=0.8
+            )
+            reply = (response.choices[0].message.content or "").strip()
+            if not reply:
+                raise ValueError("Empty")
+            print(f"[OPENAI] {len(reply)} chars")
+ 
     except Exception as e:
-        print(f"[LLM ERROR] All models failed: {e}")
+        print(f"[LLM ERROR] {e}")
         traceback.print_exc()
-        return "Anteeksi, minulla on tekninen ongelma. Yritä hetken kuluttua uudelleen."
+        return "Anteeksi, tekninen ongelma. Yritä hetken päästä uudelleen."
+ 
+    # 7. ANTI-JANKKAAJA
+    if reply:
+        recent_bot = [
+            x["content"] for x in conversation_history.get(user_id, [])
+            if x["role"] == "assistant"
+        ][-3:]
+        if any(too_similar(reply, old) for old in recent_bot):
+            print("[ANTI-JANK] Too similar, regenerating...")
+            try:
+                retry_prompt = user_prompt + "\n\nVältä toistamasta aiempien vastaustesi sanoja tai rakennetta."
+                response = await openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": retry_prompt}
+                    ],
+                    max_tokens=800,
+                    temperature=0.95
+                )
+                r = (response.choices[0].message.content or "").strip()
+                if r:
+                    reply = r
+                    print(f"[ANTI-JANK] OK: {len(reply)} chars")
+            except Exception as e:
+                print(f"[ANTI-JANK ERROR] {e}")
+ 
+    return reply or "Anteeksi, ei vastausta. Yritä uudelleen."
+ 
  
  
 # ====================== HANDLE_MESSAGE ======================
@@ -4924,4 +4971,3 @@ async def main():
  
 if __name__ == "__main__":
     print("[STARTUP] Running asyncio.run(main())...")
-    asyncio.run(main())
