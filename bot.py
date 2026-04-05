@@ -22,7 +22,7 @@ from io import BytesIO
  
 logging.basicConfig(level=logging.INFO)
  
-BOT_VERSION = "7.0.0-vision-aware"
+BOT_VERSION = "7.1.0-robust-memory"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
  
 # ====================== RENDER HEALTH CHECK ======================
@@ -1009,7 +1009,32 @@ db_lock = threading.Lock()
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
  
 conn.execute("PRAGMA journal_mode=WAL")
-conn.execute("PRAGMA busy_timeout=5000")
+conn.execute("PRAGMA busy_timeout=10000")
+conn.execute("PRAGMA wal_autocheckpoint=100")
+ 
+def db_execute_with_retry(sql, params=(), max_retries=3, use_immediate=False):
+    """Suorittaa DB-operaation retry-logiikalla jos DB on lukittu."""
+    import sqlite3 as _sqlite3
+    import time as _time
+    for attempt in range(max_retries):
+        try:
+            with db_lock:
+                if use_immediate:
+                    conn.execute("BEGIN IMMEDIATE")
+                result = conn.execute(sql, params)
+                conn.commit()
+                return result
+        except _sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                print(f"[DB RETRY] Attempt {attempt+1}/{max_retries}: {e}")
+                _time.sleep(0.2 * (attempt + 1))
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                continue
+            raise
+    return None
  
 conn.execute("""
 CREATE TABLE IF NOT EXISTS memories (
@@ -1234,6 +1259,26 @@ HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
  
 background_task = None
  
+# ====================== DB RETRY HELPER ======================
+ 
+def db_write_with_retry(func, max_retries=3, delay=0.2):
+    """
+    Suorittaa DB-kirjoitusoperaation retry-logiikalla.
+    Kasittelee sqlite3.OperationalError: database is locked.
+    """
+    import sqlite3 as _sqlite3
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except _sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                print(f"[DB RETRY] Attempt {attempt+1}/{max_retries}: {e}")
+                time.sleep(delay * (attempt + 1))
+            else:
+                raise
+    return None
+ 
+ 
 # ====================== STATE PERSISTENCE ======================
 def save_state_to_db(user_id):
     if user_id not in continuity_state:
@@ -1411,16 +1456,25 @@ def load_plans_from_db(user_id):
 # ====================== AGREEMENTS (LUKITUT SOPIMUKSET) ======================
  
 def save_agreement(user_id: int, description: str, target_time: float = None, initiated_by: str = "user"):
-    """Tallentaa lukitun sopimuksen tietokantaan."""
+    """Tallentaa lukitun sopimuksen tietokantaan transaktioturvatusti."""
     now = time.time()
-    with db_lock:
-        conn.execute("""
-            INSERT INTO agreements
-            (user_id, description, agreed_at, target_time, locked, initiated_by, status, created_at)
-            VALUES (?, ?, ?, ?, 1, ?, 'active', ?)
-        """, (str(user_id), description, now, target_time, initiated_by, now))
-        conn.commit()
-    print(f"[AGREEMENT] Saved: {description[:60]}")
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT INTO agreements
+                (user_id, description, agreed_at, target_time, locked, initiated_by, status, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, 'active', ?)
+            """, (str(user_id), description, now, target_time, initiated_by, now))
+            conn.commit()
+        print(f"[AGREEMENT] Saved: {description[:60]}")
+        save_persistent_state_to_db(user_id)
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[AGREEMENT ERROR] {e}")
  
 def get_active_agreements(user_id: int) -> list:
     """Hakee aktiiviset sopimukset."""
@@ -1715,23 +1769,29 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
             FROM episodic_memories
             WHERE user_id=?
             ORDER BY created_at DESC
-            LIMIT 300
+            LIMIT 400
         """, (str(user_id),))
         rows = result.fetchall()
     scored = []
     now = time.time()
+    # Tyyppikohtaiset painotukset - suunnitelmat ja sopimukset korkeammalle
+    type_weights = {
+        "plan_update": 0.4,
+        "agreement": 0.4,
+        "fantasy": 0.25,
+        "image_sent": 0.15,
+        "spontaneous_narrative": 0.1,
+        "conversation_event": 0.0,
+        "event": 0.05,
+    }
     for content, emb_blob, memory_type, created_at in rows:
         try:
             emb = np.frombuffer(emb_blob, dtype=np.float32)
             sim = cosine_similarity(q_emb, emb)
             age_hours = max((now - created_at) / 3600.0, 0.0)
             recency = 1.0 / (1.0 + (age_hours / 24.0))
-            score = 0.7 * sim + 0.3 * recency
-            if any(kw in content.lower() for kw in [
-                "fantasy", "strap", "pegging", "nöyryytä", "hallitse", 
-                "alistaa", "chastity", "cuckold", "humiliation"
-            ]):
-                score += 0.2
+            type_bonus = type_weights.get(memory_type, 0.0)
+            score = 0.65 * sim + 0.25 * recency + 0.10 * type_bonus
             scored.append((score, content, memory_type))
         except Exception as e:
             print(f"[MEMORY ERROR] {e}")
@@ -1742,24 +1802,25 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
 def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence: float = 0.7, source_turn_id: int = None):
     if not fact_key or not fact_value:
         return
-    with db_lock:
-        conn.execute("""
-            DELETE FROM profile_facts
-            WHERE user_id=? AND fact_key=?
-        """, (str(user_id), fact_key))
-        conn.execute("""
-            INSERT INTO profile_facts
-            (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            str(user_id),
-            fact_key,
-            fact_value,
-            confidence,
-            source_turn_id,
-            time.time()
-        ))
-        conn.commit()
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                DELETE FROM profile_facts
+                WHERE user_id=? AND fact_key=?
+            """, (str(user_id), fact_key))
+            conn.execute("""
+                INSERT INTO profile_facts
+                (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(user_id), fact_key, fact_value, confidence, source_turn_id, time.time()))
+            conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[FACT ERROR] {e}")
  
 def get_profile_facts(user_id: int, limit: int = 12):
     with db_lock:
@@ -1858,58 +1919,49 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
     commitment = plan_data.get("commitment_strength", "medium")
     now = time.time()
     existing = find_similar_plan(user_id, description)
-    if existing:
+    try:
+        if existing:
+            with db_lock:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("""
+                    UPDATE planned_events
+                    SET description=?, target_time=?, status=?, commitment_level=?,
+                        last_updated=?, status_changed_at=?
+                    WHERE id=?
+                """, (description, due_at, "planned", commitment, now, now, existing["id"]))
+                conn.commit()
+            sync_plans_to_state(user_id)
+            save_persistent_state_to_db(user_id)
+            print(f"[PLAN] Updated: {description[:60]}")
+            return existing["id"]
+        plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
         with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("""
-                UPDATE planned_events
-                SET description=?, target_time=?, status=?, commitment_level=?, 
-                    last_updated=?, status_changed_at=?
-                WHERE id=?
+                INSERT INTO planned_events
+                (id, user_id, description, created_at, target_time, status,
+                 commitment_level, must_fulfill, last_updated, last_reminded_at,
+                 status_changed_at, evolution_log, needs_check, urgency,
+                 user_referenced, reference_time, proactive, plan_type, plan_intent)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                description,
-                due_at,
-                "planned",
-                commitment,
-                now,
-                now,
-                existing["id"]
+                plan_id, str(user_id), description, now, due_at, "planned",
+                commitment, 1 if commitment == "strong" else 0,
+                now, 0, now, json.dumps([], ensure_ascii=False),
+                0, "normal", 0, 0, 0, "user_plan", "follow_up"
             ))
             conn.commit()
         sync_plans_to_state(user_id)
-        return existing["id"]
-    plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
-    with db_lock:
-        conn.execute("""
-            INSERT INTO planned_events
-            (id, user_id, description, created_at, target_time, status,
-             commitment_level, must_fulfill, last_updated, last_reminded_at,
-             status_changed_at, evolution_log, needs_check, urgency, 
-             user_referenced, reference_time, proactive, plan_type, plan_intent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            plan_id,
-            str(user_id),
-            description,
-            now,
-            due_at,
-            "planned",
-            commitment,
-            1 if commitment == "strong" else 0,
-            now,
-            0,
-            now,
-            json.dumps([], ensure_ascii=False),
-            0,
-            "normal",
-            0,
-            0,
-            0,
-            "user_plan",
-            "follow_up"
-        ))
-        conn.commit()
-    sync_plans_to_state(user_id)
-    return plan_id
+        save_persistent_state_to_db(user_id)
+        print(f"[PLAN] Created: {description[:60]}")
+        return plan_id
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[PLAN ERROR] {e}")
+        return None
  
 def get_active_plans(user_id: int, limit: int = 5):
     with db_lock:
@@ -1966,10 +2018,10 @@ async def maybe_create_summary(user_id: int):
             FROM turns
             WHERE user_id=? AND id > ?
             ORDER BY id ASC
-            LIMIT 12
+            LIMIT 8
         """, (str(user_id), last_summarized_turn_id))
         rows = result.fetchall()
-    if len(rows) < 10:
+    if len(rows) < 6:
         return
     start_turn_id = rows[0][0]
     end_turn_id = rows[-1][0]
@@ -2037,6 +2089,7 @@ Conversation:
 def mark_plan_completed(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("""
             UPDATE planned_events
             SET status='completed', last_updated=?, status_changed_at=?
@@ -2044,10 +2097,13 @@ def mark_plan_completed(user_id: int, plan_id: str):
         """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
+    save_persistent_state_to_db(user_id)
+    print(f"[PLAN] Completed: {plan_id}")
  
 def mark_plan_cancelled(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("""
             UPDATE planned_events
             SET status='cancelled', last_updated=?, status_changed_at=?
@@ -2055,10 +2111,13 @@ def mark_plan_cancelled(user_id: int, plan_id: str):
         """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
+    save_persistent_state_to_db(user_id)
+    print(f"[PLAN] Cancelled: {plan_id}")
  
 def mark_plan_in_progress(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("""
             UPDATE planned_events
             SET status='in_progress', last_updated=?, status_changed_at=?
@@ -2066,6 +2125,8 @@ def mark_plan_in_progress(user_id: int, plan_id: str):
         """, (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
+    save_persistent_state_to_db(user_id)
+    print(f"[PLAN] In progress: {plan_id}")
  
 def resolve_plan_reference(user_id: int, user_text: str):
     t = user_text.lower()
@@ -2165,19 +2226,20 @@ async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hour
             FROM episodic_memories
             WHERE user_id=? AND memory_type=? AND created_at > ?
             ORDER BY created_at DESC
-            LIMIT 20
+            LIMIT 30
         """, (str(user_id), memory_type, cutoff_time))
         rows = result.fetchall()
     if not rows:
         return False
     new_words = set(content.lower().split())
+    # Laskettu kynnys: 0.82 -> loydetaan enemman uniikit muistot
     for existing_content, _ in rows:
         existing_words = set(existing_content.lower().split())
         overlap = len(new_words & existing_words)
         total = len(new_words | existing_words)
         if total > 0:
             similarity = overlap / total
-            if similarity > 0.75:
+            if similarity > 0.82:
                 return True
     return False
  
@@ -4418,6 +4480,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 source_turn_id=user_turn_id
             )
  
+        # Tarkista lisattiinko uusia suunnitelmia framessa - laheta vahvistus
+        new_plans = frame.get("plans", [])
+        plan_confirmations = []
+        for p in new_plans[:3]:
+            pdesc = (p.get("description") or "").strip()
+            if pdesc and len(pdesc) > 8:
+                due = p.get("due_hint", "")
+                due_str = f" ({due})" if due else ""
+                plan_confirmations.append(f"- {pdesc}{due_str}")
+ 
         reply = await generate_llm_reply(user_id, text)
  
         if breaks_scene_logic(reply, state):
@@ -4454,6 +4526,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(reply)
         
         save_persistent_state_to_db(user_id)
+ 
+        # Laheta vahvistus tallennetuista suunnitelmista jos niita lisattiin
+        if plan_confirmations:
+            confirmation_msg = "Tallensin suunnitelmat:\n" + "\n".join(plan_confirmations)
+            print(f"[PLAN CONFIRM] Sent confirmation for {len(plan_confirmations)} plans")
+            # Ei laheteta erillistä viestiä - lisätään generoidun replyn jatkoksi
+            # Megan mainitsee ne luonnollisesti generate_llm_reply:ssa
  
     except KeyError as e:
         # ✅ SAFE ERROR HANDLING
@@ -4568,6 +4647,16 @@ async def check_proactive_triggers(application):
  
             # Spontaanit viestit poistettu - toteutetaan myöhemmin uudella konseptilla
             # Proaktiiviset kuvat - lähetetään kun tilanne sopii
+ 
+            # Periodinen state flush - varmista etta kaikki muutokset tallennetaan
+            for flush_uid in list(continuity_state.keys()):
+                try:
+                    last_save = continuity_state[flush_uid].get("_last_save_at", 0)
+                    if time.time() - last_save > 1800:  # 30min
+                        save_persistent_state_to_db(flush_uid)
+                        continuity_state[flush_uid]["_last_save_at"] = time.time()
+                except Exception as flush_err:
+                    print(f"[FLUSH ERROR] user {flush_uid}: {flush_err}")
             for uid in list(continuity_state.keys()):
                 try:
                     await maybe_send_proactive_image(application, uid)
@@ -5271,6 +5360,18 @@ def create_database_indexes():
                 CREATE INDEX IF NOT EXISTS idx_agreements_user_status
                 ON agreements(user_id, status, agreed_at DESC)
             """)
+ 
+            # Planned events - aikaperusteinen haku
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_plans_target_time
+                ON planned_events(user_id, target_time, status)
+            """)
+ 
+            # Summaries
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_summaries_user
+                ON summaries(user_id, created_at DESC)
+            """)
             
             conn.commit()
             print("✅ Database indexes created")
@@ -5359,6 +5460,16 @@ async def main():
         print(f"[MAIN] Event loop error: {type(e).__name__}: {e}")
     finally:
         print("[MAIN] Cleaning up...")
+ 
+        # Tallenna kaikkien aktiivisten kayttajien state ennen sammutusta
+        print(f"[MAIN] Flushing state for {len(continuity_state)} users...")
+        for flush_uid in list(continuity_state.keys()):
+            try:
+                save_persistent_state_to_db(flush_uid)
+            except Exception as e:
+                print(f"[MAIN] Flush error for {flush_uid}: {e}")
+        print("[MAIN] State flushed.")
+ 
         if background_task and not background_task.done():
             background_task.cancel()
             try:
