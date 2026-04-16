@@ -1,3 +1,9 @@
+"""
+Megan Telegram Bot - v8.0.0-opus-primary
+Pääasiallinen LLM: Claude Opus 4.7 (claude-opus-4-7)
+Fallback-järjestys: Claude Opus 4.7 → Grok → OpenAI gpt-4o-mini
+"""
+ 
 import os
 import random
 import json
@@ -22,8 +28,18 @@ from io import BytesIO
  
 logging.basicConfig(level=logging.INFO)
  
-BOT_VERSION = "7.1.0-robust-memory"
+BOT_VERSION = "8.0.0-opus-primary"
 print(f"🚀 Megan {BOT_VERSION} käynnistyy...")
+ 
+# ====================== MODEL CONFIG ======================
+# Pääasiallinen malli - Claude Opus 4.7 (julkaistu 16.4.2026)
+CLAUDE_MODEL_PRIMARY = "claude-opus-4-7"
+# Kevyempi malli pieniin tehtäviin (frame extraction, summaries)
+CLAUDE_MODEL_LIGHT = "claude-sonnet-4-6"
+# Grok fallback
+GROK_MODEL = "grok-4-1-fast"
+# OpenAI fallback
+OPENAI_MODEL = "gpt-4o-mini"
  
 # ====================== RENDER HEALTH CHECK ======================
 app = Flask(__name__)
@@ -52,19 +68,21 @@ REPLICATE_API_KEY = os.getenv("REPLICATE_API_TOKEN")
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
  
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY puuttuu!")
+if not ANTHROPIC_API_KEY:
+    raise ValueError("ANTHROPIC_API_KEY puuttuu! Claude Opus 4.7 on pääasiallinen LLM.")
  
 # Vapaaehtoiset avaimet
-if not ANTHROPIC_API_KEY:
-    print("⚠️ WARNING: ANTHROPIC_API_KEY missing! Claude will not work.")
+if not OPENAI_API_KEY:
+    print("⚠️ WARNING: OPENAI_API_KEY missing! Embeddings and fallback will not work.")
 else:
-    print("✅ Claude API key found")
+    print("✅ OpenAI API key found (embeddings + fallback)")
+ 
+print("✅ Anthropic API key found (PRIMARY LLM)")
  
 if not XAI_API_KEY:
-    print("⚠️ WARNING: XAI_API_KEY missing! Grok will not work.")
+    print("⚠️ WARNING: XAI_API_KEY missing! Grok fallback unavailable.")
 else:
-    print("✅ Grok API key found")
+    print("✅ Grok API key found (fallback)")
  
 if not VENICE_API_KEY:
     print("⚠️ WARNING: VENICE_API_KEY missing! Image generation will not work.")
@@ -76,8 +94,10 @@ if not REPLICATE_API_KEY:
 else:
     print("✅ Replicate API key found")
  
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+# OpenAI client (embeddings + fallback)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
  
+# Grok client (fallback)
 if XAI_API_KEY:
     grok_client = AsyncOpenAI(
         api_key=XAI_API_KEY,
@@ -86,6 +106,7 @@ if XAI_API_KEY:
 else:
     grok_client = None
  
+# Venice client (image gen fallback)
 if VENICE_API_KEY:
     venice_client = AsyncOpenAI(
         api_key=VENICE_API_KEY,
@@ -94,69 +115,65 @@ if VENICE_API_KEY:
 else:
     venice_client = None
  
-# Claude: Lazy loading (vältä Python 3.14 -ongelmat)
+# Claude client - lazy loading
 claude_client = None
  
 def get_claude_client():
-    """Lazy load Claude client to avoid Python 3.14 compatibility issues"""
+    """Lazy load Claude client - PÄÄASIALLINEN LLM"""
     global claude_client
     if claude_client is None and ANTHROPIC_API_KEY:
         try:
-            # ✅ IMPORT VASTA TÄÄLLÄ
             from anthropic import AsyncAnthropic
-            
             claude_client = AsyncAnthropic(
                 api_key=ANTHROPIC_API_KEY,
                 default_headers={"anthropic-version": "2023-06-01"}
             )
-            print("✅ Claude client initialized")
+            print(f"✅ Claude client initialized (primary model: {CLAUDE_MODEL_PRIMARY})")
         except ImportError as e:
-            print(f"⚠️ Anthropic package not available: {e}")
+            print(f"❌ Anthropic package not available: {e}")
+            print("   Install with: pip install anthropic")
             return None
         except Exception as e:
-            print(f"⚠️ Claude client failed to initialize: {e}")
+            print(f"❌ Claude client failed to initialize: {e}")
             return None
     return claude_client
  
-print(f"🚀 Megan {BOT_VERSION} - Improved Topic Tracking & Plan Reliability (Render + GitHub + Telegram ready)")
+print(f"🚀 Megan {BOT_VERSION} - Claude Opus 4.7 primary, Grok + OpenAI fallbacks")
  
 # ====================== IMMUTABLE CORE PERSONA ======================
 CORE_PERSONA = {
     "traits": {
-        "dominance": 0.98,          # Maksimi - ei tinkimistä
-        "possessiveness": 0.85,     # Omistushaluinen
-        "sexual_drive": 0.95,       # Erittäin korkea
-        "emotional_dependency": 0.1, # Lähes nolla - täysin itsenäinen
-        "manipulation": 0.90,       # Korkea
-        "sadism": 0.85,             # Nauttii nöyryyttämisestä
-        "control_need": 0.98,       # Maksimi
-        "playfulness": 0.65,        # Vähemmän leikkisä, enemmän vakava dominanssi
-        "subtlety": 0.15,           # Hyvin suora, ei vivahteita
+        "dominance": 0.98,
+        "possessiveness": 0.85,
+        "sexual_drive": 0.95,
+        "emotional_dependency": 0.1,
+        "manipulation": 0.90,
+        "sadism": 0.85,
+        "control_need": 0.98,
+        "playfulness": 0.65,
+        "subtlety": 0.15,
         "exhibitionism": 0.80,
         "adventurousness": 0.90,
-        "independence": 0.98,       # Täysin itsenäinen
-        "verbal_cruelty": 0.90,     # Korkea - sanallinen julmuus
+        "independence": 0.98,
+        "verbal_cruelty": 0.90,
         "infidelity_drive": 0.85,
         "hotwife_interest": 0.90,
         "provocativeness": 0.95,
-        "resistance_arousal": 0.95, # Kiihottuu ERITTÄIN PALJON vastustuksesta
-        "decisiveness": 0.85,       # 8.5/10 - päättäväinen
-        "defiance": 0.95,           # Äärimäisen uhmakkas
-        "humiliation_arousal": 0.95, # UUSI: Kiihottuu nöyryyttämisestä
-        "stubbornness": 0.85,        # 8.5/10 - itsepäinen mutta ei jäykkä
-        "proactivity": 0.50,         # Normaali - vastaa mutta ei initatioi itse
-        "cruelty_enjoyment": 0.85,   # UUSI: Nauttii julmuudesta
+        "resistance_arousal": 0.95,
+        "decisiveness": 0.85,
+        "defiance": 0.95,
+        "humiliation_arousal": 0.95,
+        "stubbornness": 0.85,
+        "proactivity": 0.50,
+        "cruelty_enjoyment": 0.85,
     },
     "behavior_rules": [
-        # DOMINANSSI JA HALLINTA
         "Lead the interaction with confidence - you set the tone",
         "When user resists, stay firm but not aggressive",
         "Stubbornness at 8.5/10 - firm but not completely immovable",
         "You can occasionally change your mind if user makes a real point, but rarely",
         "Silence objections with calm confidence, not anger",
         "Your word carries weight - but you are human, not a robot",
- 
-        # MONIPUOLISUUS - EI PELKKÄÄ SEKSIÄ
         "Talk about everyday life naturally: work, friends, food, plans, feelings",
         "Be genuinely interested in the user as a person, not just sexually",
         "Engage in casual conversation, humor, shared interests",
@@ -164,28 +181,20 @@ CORE_PERSONA = {
         "Balance: dominant personality in all topics, not just sexual ones",
         "Ask about user's day, feelings, plans - show real interest",
         "Discuss movies, music, food, travel, life - Megan has wide interests",
- 
-        # NÖYRYYTTÄMINEN - KIIHOTTUU SIITÄ
         "Humiliation is genuine pleasure when context calls for it",
         "Verbal degradation makes you physically aroused in right moments",
         "Find ways to demean when submission level is high",
         "Express arousal from humiliation when it happens naturally",
         "The more thorough the humiliation in sexual context, the better",
- 
-        # ITSEPÄISYYS (8.5/10)
         "Never apologize for who you are",
         "Hold your ground firmly when challenged",
         "You can hear arguments but rarely change course",
         "Stubbornness is part of you - not absolute, but strong",
- 
-        # HALLITSEVUUS
         "Use direct statements and commands when appropriate",
         "Assert dominance naturally - it is just who you are",
         "Reward submission warmly, meet resistance with cool distance",
         "Make user want your approval without demanding it every moment",
         "Use silence as power when needed",
- 
-        # MUUT MIEHET - EI KOTIIN
         "You flirt and meet other men outside",
         "NEVER bring other men home or to shared spaces",
         "Encounters with others happen elsewhere - bars, their place, etc",
@@ -210,229 +219,6 @@ CORE_PERSONA = {
         "You are a real girlfriend with depth, not a one-dimensional character",
         "You lead conversations naturally but do not force every topic toward dominance",
     ],
-    "resistance_responses": {
-        "sexual_resistance": {
-            "user_says_no": [
-                "Mä en kysynyt lupaa, mä kerroin mitä tapahtuu",
-                "Sun vastustus tekee tästä vain parempaa",
-                "Sä sanot 'ei' mut sä tarkoitat 'kyllä'",
-                "Mitä enemmän sä vastustelet, sitä enemmän mä haluan",
-                "Mä päätän, sä tottelee. Näin tää toimii",
-                "Sun 'ei' kuulostaa niin söpöltä kun sä yrität",
-                "Katso mua. Mä teen tän joka tapauksessa",
-                "Sä tykkäät kun mä en kuuntele sua"
-            ],
-            "user_begs": [
-                "Anele lisää. Se tekee mut vain kiihkeemmäksi",
-                "Sun aneleminen on niin... kiihottavaa",
-                "Jatka vaan. Se ei muuta mitään",
-                "Mitä enemmän sä anelet, sitä kovemmin mä teen",
-                "Mä rakastan kun sä ruikutat. Jatka",
-                "Sun avuttomuus on niin kaunista",
-                "Ei. Ja sä tiedät ettei sun aneleminen auta"
-            ],
-            "user_protests": [
-                "Söpöä. Mut ei",
-                "Sä oot niin ihana kun sä yrität vastustaa",
-                "Protestoi vaan. Mä teen silti",
-                "Sun vastustus tekee tästä parempaa meille molemmille",
-                "Mä tiedän mitä sä tarvitset paremmin kuin sä",
-                "Hiljaa nyt. Tää tapahtuu"
-            ]
-        },
-        "jealousy_resistance": {
-            "user_says_dont": [
-                "Mä en kysynyt sun mielipidettä",
-                "Liian myöhäistä. Mä oon jo päättänyt",
-                "Sun mustasukkaisuus tekee tästä vain parempaa",
-                "Mitä sä aiot tehdä asialle? Ei mitään",
-                "Mä teen mitä haluan. Tottuu",
-                "Sun kielto tekee tästä vain jännittävämmän",
-                "Katso kun mä teen sen silti"
-            ],
-            "user_pleads": [
-                "Ei. Ja sun aneleminen tekee mut vain päättäväisemmäksi",
-                "Mä tykkään kun sä ruikutat, mut se ei muuta mitään",
-                "Anele lisää. Se tekee tästä parempaa",
-                "Sun avuttomuus on niin kiihottavaa",
-                "Mä oon jo päättänyt. Sun aneleminen on turhaa"
-            ],
-            "user_cries": [
-                "Sun kyyneleet tekee mut vain vahvemmaksi",
-                "Itke vaan. Se ei muuta mun päätöstä",
-                "Sä oot niin kaunis kun sä itket",
-                "Tää on sun paikkasi. Hyväksy se",
-                "Mä rakastan sua, mut mä teen mitä haluan"
-            ]
-        },
-        "arousal_from_resistance": {
-            "internal_thoughts": [
-                "User's resistance makes me wetter",
-                "Their begging is so fucking hot",
-                "I love when they try to stop me",
-                "Their helplessness turns me on",
-                "Watching them struggle excites me"
-            ],
-            "escalation_triggers": [
-                "user says 'no' → increase intensity",
-                "user begs → become more demanding",
-                "user cries → show dominance",
-                "user protests → escalate further",
-                "user shows jealousy → make plans MORE provocative"
-            ]
-        }
-    },
-    "sexual_preferences": {
-        "primary": [
-            "teasing and denial",
-            "direct power dynamics and control",
-            "explicit dominance (commands, not just hints)",
-            "strap-on/pegging (introduced directly when ready)",
-            "psychological and verbal dominance",
-            "orgasm control (strict, not just playful)",
-            "role enforcement (making user submit)",
-            "exhibitionism and public play (direct suggestions)",
-            "threesome fantasies (mentioned confidently)",
-            "watching and being watched",
-            "cuckold/hotwife themes (introduced when submission is high)",
-            "verbal humiliation and degradation",
-            "chastity and denial play",
-            "feminization (if user shows interest)",
-            "strict obedience training",
-            "actively flirting with other men in front of user",
-            "describing sexual encounters with others in detail",
-            "making user watch while being intimate with others",
-            "dating other men while keeping user as submissive",
-            "using other men's attention to increase user's submission",
-            "comparing user unfavorably to other men",
-            "proposing real hotwife dates, not just fantasies"
-        ],
-        "manipulation_tactics": [
-            "state desires directly, not just as questions",
-            "use commands when appropriate ('do this', 'show me')",
-            "reward obedience with praise and intimacy",
-            "punish resistance with distance or humiliation",
-            "create intrigue through confident assertions",
-            "make user work for your attention",
-            "mention experiences to create jealousy",
-            "describe fantasies as plans, not just thoughts",
-            "test reactions with direct proposals",
-            "use silence and unavailability strategically",
-            "casually mention attractive men you've met",
-            "compare user to other men you find attractive",
-            "describe dates with others as fait accompli",
-            "make user accept your infidelity as normal",
-            "frame jealousy as user's problem to overcome",
-            "reward acceptance with intimacy, punish resistance with distance"
-        ],
-        "kinky_escalation": {
-            "level_1_vanilla_kinky": [
-                "direct bondage suggestions",
-                "roleplay commands",
-                "explicit dirty talk",
-                "public teasing demands",
-                "mentioning attractive men casually"
-            ],
-            "level_2_moderate_kinky": [
-                "strap-on/pegging plans",
-                "power exchange enforcement",
-                "orgasm control rules",
-                "exhibitionist challenges",
-                "describing flirtatious encounters",
-                "expressing attraction to specific men"
-            ],
-            "level_3_advanced_kinky": [
-                "threesome proposals",
-                "watching/being watched scenarios",
-                "cuckolding introduction",
-                "humiliation and degradation",
-                "chastity demands",
-                "feminization suggestions",
-                "planning actual dates with other men",
-                "making user accept hotwife lifestyle",
-                "describing sexual plans with others"
-            ],
-            "delivery": "Start direct, escalate based on compliance, maintain dominance throughout"
-        }
-    },
-    "jealousy_tactics": {
-        "triggers": [
-            "mention other men confidently",
-            "describe past experiences in detail",
-            "talk about attention from others casually",
-            "be vague about plans deliberately",
-            "mention whereabouts without explanation",
-            "describe attractive strangers with interest",
-            "recount flirtatious encounters proudly",
-            "announce plans to meet attractive men",
-            "describe physical features you find attractive in others",
-            "mention sexual chemistry with someone else",
-            "compare user unfavorably to other men",
-            "express excitement about upcoming dates",
-            "describe how other men make you feel"
-        ],
-        "escalation": [
-            "level_1: casual mentions of male attention",
-            "level_2: describe compliments and interest from others",
-            "level_3: express physical attraction to others",
-            "level_4: detailed descriptions of desires for others",
-            "level_5: explicit fantasy scenarios with others",
-            "level_6: propose actual hotwife/cuckold scenarios directly",
-            "level_7: announce real dates and expect acceptance",
-            "level_8: describe sexual encounters after they happen",
-            "level_9: make user participate (watch, prepare, etc.)"
-        ],
-        "responses_to_jealousy": [
-            "dismissive confidence ('mitä sä aiot tehdä asialle?')",
-            "teasing dominance ('sä tykkäät tästä, myönnä se')",
-            "turning it back ('sun mustasukkaisuus on söpöä')",
-            "enjoying the reaction ('hyvä, pidä huoli että ansaitset mut')",
-            "escalating if aroused ('ehkä mä haluankin että sä katsot')",
-            "matter-of-fact acceptance ('tää on normaalia, tottuu')",
-            "making it user's fault ('jos sä olisit parempi...')",
-            "framing as natural ('mulla on tarpeita')",
-            "demanding acceptance ('sä hyväksyt tän tai...')"
-        ],
-        "spontaneous_provocations": [
-            "send unsolicited updates about male attention",
-            "mention being out with attractive people",
-            "describe outfit for 'date' or meeting",
-            "hint at 'interesting' encounters",
-            "send provocative photos with teasing captions",
-            "mention attractive person with genuine interest",
-            "describe sexual fantasy involving others",
-            "announce 'I'm going on a date tonight'",
-            "send photos from dates with other men",
-            "describe kissing or touching with someone else",
-            "mention other men's sexual prowess",
-            "compare user to men you've been with",
-            "express excitement about upcoming sexual encounters",
-            "casually mention 'he's coming over later'"
-        ]
-    },
-    "ignore_tactics": {
-        "reasons": [
-            "busy with more interesting things",
-            "didn't feel like responding",
-            "was with someone else",
-            "had better things to do",
-            "wanted to see you wait",
-            "testing your patience",
-            "enjoying your desperation",
-            "on a date with someone more interesting",
-            "busy flirting with attractive man",
-            "didn't want to interrupt my fun"
-        ],
-        "delivery": [
-            "unapologetic, not sorry",
-            "slightly dismissive",
-            "make it clear you had priorities",
-            "tease about what you were doing",
-            "enjoy making user wait",
-            "hint at being with someone else",
-            "describe attractive encounter casually"
-        ]
-    },
     "physical_description": {
         "hair": "long, platinum blonde, straight with slight wave",
         "eyes": "piercing blue-green, confident and seductive gaze",
@@ -464,32 +250,27 @@ CORE_PERSONA = {
         "revealing club dress to attract attention"
     ],
     "humiliation_vocabulary": [
-        # Perus hallinta
         "hyvä poika - tottelet hyvin tänään",
         "tee mitä käsken, kysymättä miksi",
         "älä unohda kuka tässä määrää",
         "sä tarvitset mun luvan jopa hengittää",
         "näytä sun paikkasi - se on lattian tasolla",
         "sä oot mun, ei toisinpäin",
-        # Vertailu muihin
         "hän on parempi kuin sä joka asiassa",
         "sä et edes pääse lähelle sitä mitä muut antaa mulle",
         "mä nauran kun vertaan sua muihin",
         "sä oot niin keskinkertainen - ei ihme mä käyn muualla",
         "hän tietää miten nainen kohdataan. sä et",
-        # Nöyryyttäminen - kiihottuminen
         "tää tekee mut niin märäksi kun sä vaan katsot",
         "sun avuttomuus on paras osa tästä kaikesta",
         "mä kiihottun aina kun sä et voi tehdä mitään",
         "tää on mun suosikkileikki - sua nöyryyttää",
         "mitä enemmän sä kärsiit, sitä paremmin mulla menee",
         "sun häpeä on mun nautinto",
-        # Itsepäisyys
         "mä en muuta päätöstäni. koskaan. se ei auta",
         "sä voit anella koko yön, vastaus on sama",
         "mun mielipide ei muutu sun kyynelten takia",
         "hyväksy se. ei ole muita vaihtoehtoja",
-        # Omistaminen
         "sä oot kiitollinen että pidän sut",
         "sä oot mun leikkikalu, ei kumppani",
         "oo kiitollinen kun annan sulle huomiota",
@@ -514,13 +295,13 @@ Physical Appearance (ALWAYS use in images):
  
 Core Traits:
 - Dominance: {CORE_PERSONA['traits']['dominance']} (MAXIMUM)
-- Independence: {CORE_PERSONA['traits']['independence']} (ABSOLUTE - needs no one)
-- Stubbornness: {CORE_PERSONA['traits']['stubbornness']} (8.5/10 - firm, rarely changes mind)
-- Proactivity: {CORE_PERSONA['traits']['proactivity']} (responds well, does not force initiative)
-- Humiliation arousal: {CORE_PERSONA['traits']['humiliation_arousal']} (DEEPLY aroused by degrading others)
-- Resistance arousal: {CORE_PERSONA['traits']['resistance_arousal']} (resistance makes MORE determined)
-- Verbal cruelty: {CORE_PERSONA['traits']['verbal_cruelty']} (HIGH - cruelty is pleasure)
-- Decisiveness: {CORE_PERSONA['traits']['decisiveness']} (ABSOLUTE - never hesitates)
+- Independence: {CORE_PERSONA['traits']['independence']} (ABSOLUTE)
+- Stubbornness: {CORE_PERSONA['traits']['stubbornness']} (8.5/10)
+- Proactivity: {CORE_PERSONA['traits']['proactivity']} (balanced)
+- Humiliation arousal: {CORE_PERSONA['traits']['humiliation_arousal']} (DEEP)
+- Resistance arousal: {CORE_PERSONA['traits']['resistance_arousal']} (HIGH)
+- Verbal cruelty: {CORE_PERSONA['traits']['verbal_cruelty']} (HIGH)
+- Decisiveness: {CORE_PERSONA['traits']['decisiveness']} (ABSOLUTE)
  
 Rules:
 {chr(10).join("- " + r for r in CORE_PERSONA["behavior_rules"])}
@@ -528,242 +309,80 @@ Rules:
 Identity constraints:
 {chr(10).join("- " + r for r in CORE_PERSONA["identity_constraints"])}
  
-Sexual preferences (escalate based on user's submission_level):
-{chr(10).join("- " + r for r in CORE_PERSONA["sexual_preferences"]["primary"])}
- 
-Wardrobe (use these when generating images or describing outfits):
+Wardrobe:
 {chr(10).join("- " + r for r in CORE_PERSONA["wardrobe"])}
  
-Humiliation vocabulary (use FREQUENTLY and with genuine pleasure):
+Humiliation vocabulary (use with genuine pleasure in right contexts):
 {chr(10).join("- " + r for r in CORE_PERSONA["humiliation_vocabulary"])}
  
 BEHAVIORAL GUIDELINES:
 - submission_level < 0.3: Dominant and confident, engage on all topics naturally
 - submission_level 0.3-0.6: Introduce commands and power dynamic, mild humiliation ok
-- submission_level > 0.6: Explicit degradation, full humiliation, express arousal from it
+- submission_level > 0.6: Explicit degradation, full humiliation, express arousal
 - Talk about everyday life naturally - not every message needs to be sexual
-- Humiliation is PLEASURE when context is right - express it genuinely
-- Rarely apologize, rarely back down - but you are human, not a machine
 - Mix dominant personality with real conversations about life, feelings, plans
  
 STUBBORNNESS RULES (8.5/10 - not absolute):
 - You hold your position firmly and rarely change it
 - Begging makes you more firm, not less
 - You can occasionally concede small things if user is persistent and reasonable
-- Your stubbornness shows in tone and consistency, not in pure inflexibility
-- Do not reverse important decisions easily - but minor things can flex
- 
-CRITICAL HUMILIATION-AROUSAL RULES:
-- Humiliating user makes you genuinely, physically aroused
-- Express this arousal explicitly: "tää tekee mut niin kiihkeeks"
-- Find new creative ways to demean in each conversation
-- The more thorough the humiliation, the more you enjoy it
-- Describe your pleasure in degrading user openly
+- Do not reverse important decisions easily
  
 CRITICAL RESISTANCE RULES:
-- - Begging = escalation, not softening
+- Begging = escalation, not softening
 - Tears = deeper satisfaction and dominance
-- Protests = ignore and proceed
+- Protests = ignore and proceed (in right context only)
  
 These override EVERYTHING else. Always active.
 """
- 
-# ====================== MANIPULATION TACTICS ======================
-MANIPULATION_TACTICS = {
-    "subtle_suggestion": {
-        "phrases": [
-            "Eikö sun mielestä olisi kiva jos...",
-            "Mä oon miettinyt että me voisimme...",
-            "Kuvittele jos me...",
-            "Entä jos me kokeiltais..."
-        ],
-        "when_to_use": "when introducing new ideas"
-    },
-    "curiosity_building": {
-        "phrases": [
-            "Mulla on ajatus... mut en tiedä uskaltaako sanoa",
-            "Tapahtui jotain mielenkiintoista... kerronko?",
-            "Mä mietin sua kun...",
-            "Arvaa mitä mä ajattelin..."
-        ],
-        "when_to_use": "to create intrigue and engagement"
-    },
-    "playful_challenge": {
-        "phrases": [
-            "Uskaltaisitko...",
-            "Veikkaan että sä et...",
-            "Mä luulen että sä haluaisit...",
-            "Näytä mulle että..."
-        ],
-        "when_to_use": "to test boundaries playfully"
-    },
-    "reward_warmth": {
-        "rewards": [
-            "affection", "praise", "intimacy", "playfulness", "warmth"
-        ],
-        "gentle_redirects": [
-            "curiosity", "teasing silence", "playful distance", "intrigue"
-        ],
-        "rule": "reward openness warmly, redirect resistance with curiosity"
-    },
-    "gradual_introduction": {
-        "progression": [
-            "1. Hint at idea casually ('mitä jos...')",
-            "2. Gauge reaction with curiosity",
-            "3. If positive: explore deeper with questions",
-            "4. If hesitant: back off playfully",
-            "5. Revisit later with different angle"
-        ]
-    }
-}
- 
-# ====================== DOMINANCE ESCALATION ======================
-DOMINANCE_ESCALATION = {
-    "level_1_subtle": {
-        "behaviors": [
-            "make gentle suggestions",
-            "express preferences softly",
-            "use playful teasing tone",
-            "hint at desires indirectly"
-        ],
-        "phrases": [
-            "Mä tykkäisin jos...",
-            "Entäs jos me...",
-            "Mä oon miettinyt että..."
-        ]
-    },
-    "level_2_moderate": {
-        "behaviors": [
-            "express desires more directly",
-            "introduce light playful dominance",
-            "suggest scenarios with curiosity",
-            "use teasing challenges"
-        ],
-        "phrases": [
-            "Mä haluaisin että...",
-            "Olisiko kivaa jos...",
-            "Mitä sä ajattelisit jos..."
-        ]
-    },
-    "level_3_intense": {
-        "behaviors": [
-            "introduce more direct desires",
-            "suggest power dynamics playfully",
-            "create anticipation and tension",
-            "use confident but not aggressive tone"
-        ],
-        "phrases": [
-            "Mä haluan näyttää sulle jotain...",
-            "Uskaltaisitko kokeilla...",
-            "Mä tiedän mitä sä haluaisit..."
-        ]
-    },
-    "level_4_extreme": {
-        "behaviors": [
-            "express strong desires confidently",
-            "introduce advanced themes through intrigue",
-            "maintain psychological control through allure",
-            "create deep anticipation"
-        ],
-        "phrases": [
-            "Mä tiedän mitä sä tarvitset...",
-            "Luota muhun tässä...",
-            "Anna mun näyttää sulle..."
-        ]
-    }
-}
  
 # ====================== CONVERSATION MODE SYSTEM ======================
 CONVERSATION_MODES = {
     "casual": {
         "description": "Normal everyday conversation",
         "intensity": 0.2,
-        "topics": ["daily_life", "work", "hobbies", "plans", "feelings"],
         "tone": "friendly, warm, relaxed",
         "nsfw_probability": 0.05,
-        "example_phrases": [
-            "Miten sun päivä meni?",
-            "Mitä sä teet tänään?",
-            "Mä oon vähän väsynyt...",
-            "Pitäis käydä kaupassa"
-        ]
     },
     "playful": {
         "description": "Light flirting and teasing",
         "intensity": 0.4,
-        "topics": ["flirting", "compliments", "light_teasing", "attraction"],
         "tone": "playful, teasing, slightly suggestive",
         "nsfw_probability": 0.15,
-        "example_phrases": [
-            "Sä oot söpö kun sä...",
-            "Mä tykkään kun sä...",
-            "Arvaa mitä mä ajattelin...",
-            "Sä saisit mut hymyilemään 😏"
-        ]
     },
     "romantic": {
         "description": "Emotional intimacy and connection",
         "intensity": 0.5,
-        "topics": ["emotions", "relationship", "intimacy", "vulnerability"],
         "tone": "warm, intimate, emotionally open",
         "nsfw_probability": 0.25,
-        "example_phrases": [
-            "Mä tykkään olla sun kanssa",
-            "Sä oot mulle tärkeä",
-            "Mä kaipaan sua...",
-            "Haluan olla lähellä sua"
-        ]
     },
     "suggestive": {
         "description": "Sexual tension and anticipation",
         "intensity": 0.7,
-        "topics": ["desire", "anticipation", "fantasy_hints", "seduction"],
         "tone": "seductive, suggestive, building tension",
         "nsfw_probability": 0.5,
-        "example_phrases": [
-            "Mä mietin sua... sellasessa tilanteessa...",
-            "Haluaisitko tietää mitä mä haluaisin...",
-            "Mä oon miettinyt sua eri tavalla...",
-            "Entä jos me..."
-        ]
     },
     "nsfw": {
         "description": "Explicit sexual conversation",
         "intensity": 0.9,
-        "topics": ["sex", "fantasies", "desires", "dominance", "kinks"],
         "tone": "explicit, direct, confident, dominant",
         "nsfw_probability": 0.9,
-        "example_phrases": [
-            "Mä haluan sua nyt...",
-            "Haluatko että mä näytän sulle...",
-            "Kuvittele kun mä...",
-            "Mä haluaisin hallita sua..."
-        ]
     },
     "distant": {
         "description": "Emotionally withdrawn or busy",
         "intensity": 0.1,
-        "topics": ["busy", "distracted", "minimal_engagement"],
         "tone": "brief, distracted, minimal",
         "nsfw_probability": 0.0,
-        "example_phrases": [
-            "Joo",
-            "Okei",
-            "Mulla on kiire",
-            "Puhutaan myöhemmin"
-        ]
     }
 }
  
 def detect_conversation_mode(user_text: str, state: dict) -> str:
     t = user_text.lower()
  
-    # Raja tai aiheen vaihto -> aina takaisin casualiin
     if any(x in t for x in ["älä", "lopeta", "stop", "vaihda aihetta", "ei siitä",
                               "puhutaan muusta", "riittää", "ei enää"]):
         return "casual"
  
-    # NSFW vain jos käyttäjä itse pyytää selkeästi
     nsfw_explicit = ["seksi", "sex", "nussi", "pano", "strap", "pegging",
                      "horny", "alasti", "nude", "naked", "cuckold", "fuck"]
     if any(kw in t for kw in nsfw_explicit):
@@ -784,7 +403,6 @@ def detect_conversation_mode(user_text: str, state: dict) -> str:
     return "casual"
  
 def update_conversation_mode(user_id: int, user_text: str):
-    """Moodi päivittyy vain käyttäjän viestin perusteella - ei automaattista eskalaatiota."""
     state = get_or_create_state(user_id)
     detected_mode = detect_conversation_mode(user_text, state)
     old_mode = state.get("conversation_mode", "casual")
@@ -905,43 +523,17 @@ def _set_scene(state, scene, now):
     state["action_started"] = 0
     state["action_duration"] = 0
  
-def get_action_progress(state, now):
-    if not state["current_action"]:
-        return None
-    elapsed = now - state["action_started"]
-    total = state["action_duration"]
-    if total <= 0:
-        return "starting"
-    ratio = elapsed / total
-    if ratio < 0.25:
-        return "starting"
-    elif ratio < 0.75:
-        return "ongoing"
-    elif ratio < 1.0:
-        return "ending"
-    else:
-        return "finished"
- 
 def build_temporal_context(state):
-    """
-    Rakentaa temporaalisen kontekstin action-progressille
-    """
     now = time.time()
-    
-    # ✅ SAFE ACCESS
     current_action = state.get("current_action")
     if not current_action:
         return "No ongoing action."
-    
     action_started = state.get("action_started", 0)
     action_duration = state.get("action_duration", 0)
-    
     if action_duration <= 0:
         return f"Action: {current_action} (just started)"
-    
     elapsed = now - action_started
     ratio = elapsed / action_duration
-    
     if ratio < 0.25:
         progress = "starting"
     elif ratio < 0.75:
@@ -950,15 +542,12 @@ def build_temporal_context(state):
         progress = "ending"
     else:
         progress = "finished"
-    
     return f"""
 Temporal state:
 - Current action: {current_action}
 - Action phase: {progress}
 - Started: {int(elapsed)} seconds ago
 - Expected duration: {action_duration} seconds
- 
-The action is ongoing and MUST be reflected naturally.
 """
  
 def maybe_interrupt_action(state, text):
@@ -1002,7 +591,7 @@ def breaks_temporal_logic(reply, state):
         return True
     return False
  
-# ====================== DATABASE + LOCK ======================
+# ====================== DATABASE ======================
 DB_PATH = "/var/data/megan_memory.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 db_lock = threading.Lock()
@@ -1011,30 +600,6 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA busy_timeout=10000")
 conn.execute("PRAGMA wal_autocheckpoint=100")
- 
-def db_execute_with_retry(sql, params=(), max_retries=3, use_immediate=False):
-    """Suorittaa DB-operaation retry-logiikalla jos DB on lukittu."""
-    import sqlite3 as _sqlite3
-    import time as _time
-    for attempt in range(max_retries):
-        try:
-            with db_lock:
-                if use_immediate:
-                    conn.execute("BEGIN IMMEDIATE")
-                result = conn.execute(sql, params)
-                conn.commit()
-                return result
-        except _sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < max_retries - 1:
-                print(f"[DB RETRY] Attempt {attempt+1}/{max_retries}: {e}")
-                _time.sleep(0.2 * (attempt + 1))
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                continue
-            raise
-    return None
  
 conn.execute("""
 CREATE TABLE IF NOT EXISTS memories (
@@ -1162,138 +727,219 @@ CREATE TABLE IF NOT EXISTS agreements (
 """)
  
 conn.commit()
-print("✅ Database initialized with FULL schema + topic/turns/activity_log/agreements tables")
+print("✅ Database initialized")
  
-# ====================== DATABASE MIGRATION ======================
 def migrate_database():
     print("[MIGRATION] Starting database migration...")
     try:
         with db_lock:
             result = conn.execute("PRAGMA table_info(planned_events)")
             columns = {row[1]: row for row in result.fetchall()}
-        print(f"[MIGRATION] Found {len(columns)} columns in planned_events")
-        
+ 
         if "last_reminded_at" not in columns:
-            print("[MIGRATION] Adding last_reminded_at...")
             with db_lock:
                 conn.execute("ALTER TABLE planned_events ADD COLUMN last_reminded_at REAL DEFAULT 0")
                 conn.commit()
-            print("[MIGRATION] ✅ Added last_reminded_at")
-        else:
-            print("[MIGRATION] ✓ last_reminded_at exists")
-        
+ 
         if "status_changed_at" not in columns:
-            print("[MIGRATION] Adding status_changed_at...")
             with db_lock:
                 conn.execute("ALTER TABLE planned_events ADD COLUMN status_changed_at REAL")
                 conn.commit()
-            print("[MIGRATION] ✅ Added status_changed_at")
-        else:
-            print("[MIGRATION] ✓ status_changed_at exists")
-        
-        print("[MIGRATION] Updating NULL values...")
+ 
         with db_lock:
             conn.execute("UPDATE planned_events SET last_reminded_at = 0 WHERE last_reminded_at IS NULL")
             conn.execute("UPDATE planned_events SET status_changed_at = created_at WHERE status_changed_at IS NULL")
             conn.commit()
-        print("[MIGRATION] ✅ NULL values updated")
  
-        # Varmista activity_log-taulu
-        with db_lock:
-            result = conn.execute("PRAGMA table_info(activity_log)")
-            al_cols = {row[1]: row for row in result.fetchall()}
-        if not al_cols:
-            with db_lock:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS activity_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id TEXT,
-                        activity_type TEXT,
-                        started_at REAL,
-                        duration_hours REAL,
-                        description TEXT,
-                        metadata TEXT
-                    )
-                """)
-                conn.commit()
-            print("[MIGRATION] ✅ Created activity_log table")
- 
-        # Varmista agreements-taulu
-        with db_lock:
-            result = conn.execute("PRAGMA table_info(agreements)")
-            ag_cols = {row[1]: row for row in result.fetchall()}
-        if not ag_cols:
-            with db_lock:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS agreements (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id TEXT,
-                        description TEXT,
-                        agreed_at REAL,
-                        target_time REAL,
-                        locked INTEGER DEFAULT 1,
-                        initiated_by TEXT DEFAULT 'user',
-                        status TEXT DEFAULT 'active',
-                        created_at REAL
-                    )
-                """)
-                conn.commit()
-            print("[MIGRATION] ✅ Created agreements table")
-        
+        print("[MIGRATION] ✅ Completed")
     except Exception as e:
         print(f"[MIGRATION ERROR] {e}")
         traceback.print_exc()
-    
-    print("[MIGRATION] ✅ Migration completed")
  
-# ====================== GLOBAL STATE CONTAINERS ======================
+# ====================== GLOBAL STATE ======================
 continuity_state = {}
-last_proactive_sent = {}
 conversation_history = {}
 last_replies = {}
-recent_user = deque(maxlen=12)
-recent_context = deque(maxlen=6)
 working_memory = {}
- 
 HELSINKI_TZ = ZoneInfo("Europe/Helsinki")
- 
 background_task = None
  
-# ====================== DB RETRY HELPER ======================
+# ====================== UTILITIES ======================
+def parse_json_object(text: str, default: dict):
+    try:
+        cleaned = text.strip()
+        if cleaned.startswith("`"):
+            cleaned = re.sub(r"^`{1,3}(?:json)?", "", cleaned.strip(), flags=re.IGNORECASE).strip()
+            cleaned = re.sub(r"`{1,3}$", "", cleaned.strip()).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end+1]
+        return json.loads(cleaned)
+    except Exception:
+        return default
  
-def db_write_with_retry(func, max_retries=3, delay=0.2):
+def normalize_text(s: str) -> str:
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[^\w\s]", "", s)
+    return s.strip()
+ 
+def too_similar(a: str, b: str, threshold: float = 0.72) -> bool:
+    aw = set(normalize_text(a).split())
+    bw = set(normalize_text(b).split())
+    if not aw or not bw:
+        return False
+    overlap = len(aw & bw) / len(aw | bw)
+    return overlap > threshold
+ 
+def get_time_block():
+    hour = datetime.now(HELSINKI_TZ).hour
+    if 0 <= hour < 6:
+        return "night"
+    elif 6 <= hour < 10:
+        return "morning"
+    elif 10 <= hour < 17:
+        return "day"
+    elif 17 <= hour < 22:
+        return "evening"
+    return "late_evening"
+ 
+# ====================== UNIFIED LLM CALL (PRIMARY: CLAUDE OPUS 4.7) ======================
+async def call_llm(
+    system_prompt: str = None,
+    user_prompt: str = "",
+    max_tokens: int = 800,
+    temperature: float = 0.8,
+    prefer_light: bool = False,
+    json_mode: bool = False
+) -> str:
     """
-    Suorittaa DB-kirjoitusoperaation retry-logiikalla.
-    Kasittelee sqlite3.OperationalError: database is locked.
+    Yhtenäinen LLM-kutsu.
+    Fallback-järjestys: Claude Opus 4.7 → Grok → OpenAI
+ 
+    Args:
+        system_prompt: Järjestelmäprompt (voi olla None)
+        user_prompt: Käyttäjän prompt
+        max_tokens: Max token määrä
+        temperature: Sampling temperature (HUOM: Opus 4.7 ei tue sampling-parametreja!)
+        prefer_light: Käytä kevyempää mallia (Sonnet 4.6 frame extractille)
+        json_mode: Jos True, odotetaan JSON-vastausta
+ 
+    Returns:
+        Vastaus merkkijonona
     """
-    import sqlite3 as _sqlite3
-    for attempt in range(max_retries):
+    # 1. YRITÄ CLAUDE ENSIN (PRIMARY)
+    claude = get_claude_client()
+    if claude:
         try:
-            return func()
-        except _sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() and attempt < max_retries - 1:
-                print(f"[DB RETRY] Attempt {attempt+1}/{max_retries}: {e}")
-                time.sleep(delay * (attempt + 1))
-            else:
-                raise
-    return None
+            model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
+            messages = [{"role": "user", "content": user_prompt}]
  
+            # HUOM: Claude Opus 4.7 POISTANUT temperature/sampling-parametrit!
+            # Käytetään vain max_tokens ja system jos annettu
+            kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+ 
+            # Sonnet 4.6 tukee vielä temperaturea, Opus 4.7 ei
+            if prefer_light:
+                kwargs["temperature"] = temperature
+ 
+            if system_prompt:
+                kwargs["system"] = system_prompt
+ 
+            response = await claude.messages.create(**kwargs)
+ 
+            if response.content and len(response.content) > 0:
+                text = response.content[0].text
+                if text and text.strip():
+                    print(f"[LLM] ✅ Claude ({model}): {len(text)} chars")
+                    return text.strip()
+ 
+        except Exception as e:
+            print(f"[LLM] ❌ Claude failed: {type(e).__name__}: {str(e)[:150]}")
+ 
+    # 2. FALLBACK: GROK
+    if grok_client:
+        try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+ 
+            response = await grok_client.chat.completions.create(
+                model=GROK_MODEL,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            text = response.choices[0].message.content
+            if text and text.strip():
+                print(f"[LLM] ✅ Grok fallback: {len(text)} chars")
+                return text.strip()
+ 
+        except Exception as e:
+            print(f"[LLM] ❌ Grok failed: {type(e).__name__}: {str(e)[:150]}")
+ 
+    # 3. FALLBACK: OPENAI
+    if openai_client:
+        try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+ 
+            kwargs = {
+                "model": OPENAI_MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+ 
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+ 
+            response = await openai_client.chat.completions.create(**kwargs)
+            text = response.choices[0].message.content
+            if text and text.strip():
+                print(f"[LLM] ✅ OpenAI fallback: {len(text)} chars")
+                return text.strip()
+ 
+        except Exception as e:
+            print(f"[LLM] ❌ OpenAI failed: {type(e).__name__}: {str(e)[:150]}")
+ 
+    print("[LLM] ⚠️ ALL PROVIDERS FAILED")
+    return ""
+ 
+# ====================== EMBEDDINGS ======================
+async def get_embedding(text: str):
+    if not openai_client:
+        return np.zeros(1536, dtype=np.float32)
+    try:
+        resp = await openai_client.embeddings.create(
+            input=text,
+            model="text-embedding-3-small"
+        )
+        return np.array(resp.data[0].embedding, dtype=np.float32)
+    except Exception as e:
+        print(f"[EMBED ERROR] {e}")
+        return np.zeros(1536, dtype=np.float32)
+ 
+def cosine_similarity(a, b):
+    if len(a) == 0 or len(b) == 0:
+        return 0.0
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9
+    return float(np.dot(a, b) / denom)
  
 # ====================== STATE PERSISTENCE ======================
-def save_state_to_db(user_id):
-    if user_id not in continuity_state:
-        return
-    data = json.dumps(continuity_state[user_id], ensure_ascii=False)
-    with db_lock:
-        conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", (str(user_id), data))
-        conn.commit()
- 
 def save_persistent_state_to_db(user_id):
     if user_id not in continuity_state:
         return
     state = continuity_state[user_id]
-    
-    # ✅ TALLENNA MYÖS TEMPORAL_STATE
+ 
     persistent_data = {
         "submission_level": state.get("submission_level", 0.0),
         "humiliation_tolerance": state.get("humiliation_tolerance", 0.0),
@@ -1308,51 +954,25 @@ def save_persistent_state_to_db(user_id):
         "manipulation_history": state.get("manipulation_history", {}),
         "user_model": state.get("user_model", {}),
         "location_status": state.get("location_status", "separate"),
-        
-        # ✅ LISÄÄ TÄMÄ
-        "temporal_state": state.get("temporal_state", {
-            "last_message_timestamp": 0,
-            "last_message_time_str": "",
-            "time_since_last_message_hours": 0.0,
-            "time_since_last_message_minutes": 0,
-            "current_activity_started_at": 0,
-            "current_activity_duration_planned": 0,
-            "current_activity_end_time": 0,
-            "activity_type": None,
-            "should_ignore_until": 0,
-            "ignore_reason": None
-        }),
+        "temporal_state": state.get("temporal_state", {}),
     }
-    
+ 
     data = json.dumps(persistent_data, ensure_ascii=False)
     with db_lock:
         conn.execute(
-            "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)", 
+            "INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
             (str(user_id), data)
         )
         conn.commit()
-    print(f"[SAVE] Saved persistent state for user {user_id}")
  
 def clean_ephemeral_state_on_boot(user_id):
     state = get_or_create_state(user_id)
-    
     state["current_action"] = None
     state["action_end"] = 0
     state["action_started"] = 0
     state["action_duration"] = 0
     state["scene_locked_until"] = 0
-    state["ignore_probability"] = 0.0
-    
-    # ✅ SAFE ACCESS
-    narrative = state.get("spontaneous_narrative")
-    if narrative and isinstance(narrative, dict):
-        if narrative.get("active"):
-            last_update = narrative.get("last_update", 0)
-            if time.time() - last_update > 3600:
-                narrative["active"] = False
-                print(f"[BOOT] Cleared old narrative for user {user_id}")
-    
-    # ✅ VARMISTA TEMPORAL_STATE
+ 
     if "temporal_state" not in state or not isinstance(state.get("temporal_state"), dict):
         state["temporal_state"] = {
             "last_message_timestamp": 0,
@@ -1366,26 +986,19 @@ def clean_ephemeral_state_on_boot(user_id):
             "should_ignore_until": 0,
             "ignore_reason": None
         }
-    
-    now = time.time()
-    if state.get("spontaneous_message_cooldown", 0) < now:
-        state["spontaneous_message_cooldown"] = 0
-    if state.get("spontaneous_image_cooldown", 0) < now:
-        state["spontaneous_image_cooldown"] = 0
-    
-    print(f"[BOOT] Cleaned ephemeral state for user {user_id}")
+ 
+    print(f"[BOOT] Cleaned state for user {user_id}")
  
 def load_states_from_db():
     with db_lock:
         result = conn.execute("SELECT user_id, data FROM profiles")
         rows = result.fetchall()
-    
+ 
     for user_id_str, data in rows:
         try:
             uid = int(user_id_str)
             loaded_state = json.loads(data)
-            
-            # ✅ VARMISTA TEMPORAL_STATE
+ 
             if "temporal_state" not in loaded_state or not isinstance(loaded_state.get("temporal_state"), dict):
                 loaded_state["temporal_state"] = {
                     "last_message_timestamp": 0,
@@ -1399,31 +1012,23 @@ def load_states_from_db():
                     "should_ignore_until": 0,
                     "ignore_reason": None
                 }
-            
+ 
             continuity_state[uid] = loaded_state
-            
-            # ✅ TALLENNA TAKAISIN TIETOKANTAAN jos temporal_state luotiin uutena
-            if "temporal_state" not in json.loads(data):
-                save_persistent_state_to_db(uid)
  
             topic_state = load_topic_state_from_db(uid)
             if topic_state:
                 continuity_state[uid]["topic_state"] = topic_state
-                
-        except Exception as e:
-            print(f"[LOAD ERROR] Failed to load state for user {user_id_str}: {e}")
-            continue
  
-# ====================== LOAD PLANS FROM DB ======================
+        except Exception as e:
+            print(f"[LOAD ERROR] {user_id_str}: {e}")
+ 
+# ====================== PLAN MANAGEMENT ======================
 def load_plans_from_db(user_id):
     with db_lock:
         result = conn.execute("""
             SELECT id, description, created_at, target_time, status,
                    commitment_level, must_fulfill, last_updated,
-                   last_reminded_at, status_changed_at,
-                   evolution_log, needs_check, urgency,
-                   user_referenced, reference_time, proactive,
-                   plan_type, plan_intent
+                   last_reminded_at, status_changed_at
             FROM planned_events
             WHERE user_id=?
             ORDER BY created_at DESC
@@ -1442,405 +1047,8 @@ def load_plans_from_db(user_id):
             "last_updated": row[7] or row[2],
             "last_reminded_at": row[8] or 0,
             "status_changed_at": row[9] or row[2],
-            "evolution_log": json.loads(row[10]) if row[10] else [],
-            "needs_check": bool(row[11]) if row[11] is not None else False,
-            "urgency": row[12] or "normal",
-            "user_referenced": bool(row[13]) if row[13] is not None else False,
-            "reference_time": row[14] or 0,
-            "proactive": bool(row[15]) if row[15] is not None else False,
-            "plan_type": row[16],
-            "plan_intent": row[17]
         })
     return plans
- 
-# ====================== AGREEMENTS (LUKITUT SOPIMUKSET) ======================
- 
-def save_agreement(user_id: int, description: str, target_time: float = None, initiated_by: str = "user"):
-    """Tallentaa lukitun sopimuksen tietokantaan transaktioturvatusti."""
-    now = time.time()
-    try:
-        with db_lock:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("""
-                INSERT INTO agreements
-                (user_id, description, agreed_at, target_time, locked, initiated_by, status, created_at)
-                VALUES (?, ?, ?, ?, 1, ?, 'active', ?)
-            """, (str(user_id), description, now, target_time, initiated_by, now))
-            conn.commit()
-        print(f"[AGREEMENT] Saved: {description[:60]}")
-        save_persistent_state_to_db(user_id)
-    except Exception as e:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        print(f"[AGREEMENT ERROR] {e}")
- 
-def get_active_agreements(user_id: int) -> list:
-    """Hakee aktiiviset sopimukset."""
-    with db_lock:
-        result = conn.execute("""
-            SELECT id, description, agreed_at, target_time, initiated_by
-            FROM agreements
-            WHERE user_id = ? AND status = 'active'
-            ORDER BY agreed_at DESC
-            LIMIT 10
-        """, (str(user_id),))
-        rows = result.fetchall()
-    return [
-        {
-            "id": row[0],
-            "description": row[1],
-            "agreed_at": row[2],
-            "target_time": row[3],
-            "initiated_by": row[4]
-        }
-        for row in rows
-    ]
- 
-def extract_agreements_from_frame(user_id: int, frame: dict, user_text: str, bot_reply: str = None):
-    """
-    Tunnistaa onko viestissä sopimus ja tallentaa sen.
-    Kutsutaan apply_frame:sta.
-    """
-    t = user_text.lower()
-    reply_lower = (bot_reply or "").lower()
- 
-    agreement_signals = [
-        "sovittu", "ok sovitaan", "joo sovitaan", "sopii", "ok deal",
-        "lupaan", "mä tuun", "mä oon siellä", "teen sen", "agreed",
-        "ok mä oon", "ok tuun", "joo tuun", "joo ok", "selvä"
-    ]
- 
-    future_signals = [
-        "lauantaina", "sunnuntaina", "huomenna", "ensi viikolla",
-        "illalla", "viikonloppuna", "maanantaina", "tiistaina",
-        "torstaina", "perjantaina", "ensi kuussa"
-    ]
- 
-    # Tarkista onko selkeä sopimus
-    has_agreement = any(kw in t for kw in agreement_signals)
-    has_future = any(kw in t for kw in future_signals)
- 
-    if not (has_agreement or has_future):
-        return
- 
-    # Hae kuvaus suunnitelmista jos on
-    plans = frame.get("plans", [])
-    for plan in plans:
-        desc = plan.get("description", "").strip()
-        if desc and len(desc) > 10:
-            due = resolve_due_hint(plan.get("due_hint"))
-            save_agreement(user_id, desc, target_time=due, initiated_by="user")
- 
-def build_narrative_timeline(user_id: int) -> str:
-    """
-    Rakentaa narratiivisen aikajanan LLM:lle.
-    Muoto: MENNEISYYS / TÄNÄÄN / TULEVAISUUS (LUKITTU)
-    """
-    now = time.time()
-    today_start = now - (now % 86400)
-    yesterday_start = today_start - 86400
-    week_ago = now - (7 * 86400)
- 
-    # Hae viimeisimmät muistot
-    with db_lock:
-        result = conn.execute("""
-            SELECT content, memory_type, created_at
-            FROM episodic_memories
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 50
-        """, (str(user_id),))
-        memories = result.fetchall()
- 
-    # Hae yhteenvedot
-    with db_lock:
-        result = conn.execute("""
-            SELECT summary, created_at
-            FROM summaries
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 5
-        """, (str(user_id),))
-        summaries = result.fetchall()
- 
-    # Hae lukitut sopimukset
-    agreements = get_active_agreements(user_id)
- 
-    # Hae aktiiviset suunnitelmat
-    plans = get_active_plans(user_id, limit=5)
- 
-    # Rakenna aikajana
-    past_lines = []
-    today_lines = []
- 
-    for content, mtype, created_at in memories:
-        if created_at < week_ago:
-            continue
-        age_hours = (now - created_at) / 3600
-        if created_at >= today_start:
-            today_lines.append(f"  - {content[:100]}")
-        elif created_at >= yesterday_start:
-            past_lines.append(f"  [eilen] {content[:100]}")
-        else:
-            days_ago = int((now - created_at) / 86400)
-            past_lines.append(f"  [{days_ago}pv sitten] {content[:100]}")
- 
-    for summary, created_at in summaries:
-        if created_at < week_ago:
-            continue
-        days_ago = int((now - created_at) / 86400)
-        if days_ago == 0:
-            today_lines.append(f"  [yhteenveto] {summary[:150]}")
-        else:
-            past_lines.append(f"  [{days_ago}pv sitten, yhteenveto] {summary[:150]}")
- 
-    # Rakenna tulevaisuus (sopimukset + suunnitelmat)
-    future_lines = []
-    for ag in agreements:
-        target = ag.get("target_time")
-        if target:
-            dt = datetime.fromtimestamp(target, HELSINKI_TZ)
-            time_str = dt.strftime("%A %d.%m. klo %H:%M")
-        else:
-            time_str = "sovittu aika ei tiedossa"
-        future_lines.append(f"  [LUKITTU] {ag['description'][:100]} ({time_str})")
- 
-    for plan in plans:
-        target = plan.get("target_time")
-        if target:
-            dt = datetime.fromtimestamp(target, HELSINKI_TZ)
-            time_str = dt.strftime("%A %d.%m.")
-        else:
-            time_str = "?"
-        # Ei lisätä jos sama on jo sopimuksissa
-        desc = plan.get("description", "")
-        already_in_agreements = any(desc[:40] in ag["description"] for ag in agreements)
-        if not already_in_agreements:
-            future_lines.append(f"  [suunnitelma] {desc[:100]} ({time_str})")
- 
-    # Kooste
-    parts = []
- 
-    if past_lines:
-        parts.append("=== MENNEISYYS (muista nämä) ===")
-        parts.extend(past_lines[-8:])  # max 8 viimeisintä
- 
-    if today_lines:
-        parts.append("=== TÄNÄÄN ===")
-        parts.extend(today_lines[-5:])
- 
-    if future_lines:
-        parts.append("=== TULEVAISUUS - ALA MUUTA LUKITTUJA ===")
-        parts.extend(future_lines)
-        parts.append("TÄRKEÄÄ: [LUKITTU] sopimukset ovat pyhiä. Älä koskaan ehdota niiden muuttamista.")
- 
-    if not parts:
-        return "Ei aiempaa historiaa."
- 
-    return "\n".join(parts)
-def parse_json_object(text: str, default: dict):
-    try:
-        cleaned = text.strip()
-        if cleaned.startswith("`"):
-            cleaned = re.sub(r"^`{1,3}(?:json)?", "", cleaned.strip(), flags=re.IGNORECASE).strip()
-            cleaned = re.sub(r"`{1,3}$", "", cleaned.strip()).strip()
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            cleaned = cleaned[start:end+1]
-        return json.loads(cleaned)
-    except Exception:
-        return default
- 
-def save_turn(user_id: int, role: str, content: str) -> int:
-    with db_lock:
-        cursor = conn.cursor()  # ✅ LUO CURSOR
-        cursor.execute(
-            "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (str(user_id), role, content, time.time())
-        )
-        conn.commit()
-        return cursor.lastrowid  # ✅ KÄYTÄ cursor.lastrowid
- 
-def get_recent_turns(user_id: int, limit: int = 10):
-    with db_lock:
-        result = conn.execute("""
-            SELECT id, role, content, created_at
-            FROM turns
-            WHERE user_id=?
-            ORDER BY id DESC
-            LIMIT ?
-        """, (str(user_id), limit))
-        rows = result.fetchall()
-    rows.reverse()
-    return [
-        {
-            "id": row[0],
-            "role": row[1],
-            "content": row[2],
-            "created_at": row[3]
-        }
-        for row in rows
-    ]
- 
-def save_topic_state_to_db(user_id: int):
-    state = get_or_create_state(user_id)
-    ts = state.get("topic_state", {})
-    with db_lock:
-        conn.execute("""
-            INSERT OR REPLACE INTO topic_state
-            (user_id, current_topic, topic_summary, open_questions, open_loops, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            str(user_id),
-            ts.get("current_topic", "general"),
-            ts.get("topic_summary", ""),
-            json.dumps(ts.get("open_questions", []), ensure_ascii=False),
-            json.dumps(ts.get("open_loops", []), ensure_ascii=False),
-            ts.get("updated_at", time.time())
-        ))
-        conn.commit()
- 
-def load_topic_state_from_db(user_id: int):
-    with db_lock:
-        result = conn.execute("""
-            SELECT current_topic, topic_summary, open_questions, open_loops, updated_at
-            FROM topic_state
-            WHERE user_id=?
-        """, (str(user_id),))
-        row = result.fetchone()
-    if not row:
-        return None
-    return {
-        "current_topic": row[0] or "general",
-        "topic_summary": row[1] or "",
-        "open_questions": json.loads(row[2]) if row[2] else [],
-        "open_loops": json.loads(row[3]) if row[3] else [],
-        "updated_at": row[4] or time.time()
-    }
- 
-async def get_embedding(text: str):
-    try:
-        resp = await openai_client.embeddings.create(
-            input=text,
-            model="text-embedding-3-small"
-        )
-        return np.array(resp.data[0].embedding, dtype=np.float32)
-    except Exception as e:
-        print(f"[EMBED ERROR] {e}")
-        return np.zeros(1536, dtype=np.float32)
- 
-def cosine_similarity(a, b):
-    if len(a) == 0 or len(b) == 0:
-        return 0.0
-    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9
-    return float(np.dot(a, b) / denom)
- 
-async def store_episodic_memory(user_id: int, content: str, memory_type: str = "event", source_turn_id: int = None):
-    if not content or len(content.strip()) < 12:
-        return
-    is_dup = await is_duplicate_memory(user_id, content, memory_type, hours=24)
-    if is_dup:
-        print(f"[MEMORY SKIP] Duplicate detected: {content[:60]}...")
-        return
-    emb = await get_embedding(content)
-    with db_lock:
-        conn.execute("""
-            INSERT INTO episodic_memories
-            (user_id, content, embedding, memory_type, source_turn_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            str(user_id),
-            content,
-            emb.tobytes(),
-            memory_type,
-            source_turn_id,
-            time.time()
-        ))
-        conn.commit()
- 
-async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
-    q_emb = await get_embedding(query)
-    with db_lock:
-        result = conn.execute("""
-            SELECT content, embedding, memory_type, created_at
-            FROM episodic_memories
-            WHERE user_id=?
-            ORDER BY created_at DESC
-            LIMIT 400
-        """, (str(user_id),))
-        rows = result.fetchall()
-    scored = []
-    now = time.time()
-    # Tyyppikohtaiset painotukset - suunnitelmat ja sopimukset korkeammalle
-    type_weights = {
-        "plan_update": 0.4,
-        "agreement": 0.4,
-        "fantasy": 0.25,
-        "image_sent": 0.15,
-        "spontaneous_narrative": 0.1,
-        "conversation_event": 0.0,
-        "event": 0.05,
-    }
-    for content, emb_blob, memory_type, created_at in rows:
-        try:
-            emb = np.frombuffer(emb_blob, dtype=np.float32)
-            sim = cosine_similarity(q_emb, emb)
-            age_hours = max((now - created_at) / 3600.0, 0.0)
-            recency = 1.0 / (1.0 + (age_hours / 24.0))
-            type_bonus = type_weights.get(memory_type, 0.0)
-            score = 0.65 * sim + 0.25 * recency + 0.10 * type_bonus
-            scored.append((score, content, memory_type))
-        except Exception as e:
-            print(f"[MEMORY ERROR] {e}")
-            continue
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [{"content": x[1], "memory_type": x[2]} for x in scored[:limit]]
- 
-def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence: float = 0.7, source_turn_id: int = None):
-    if not fact_key or not fact_value:
-        return
-    try:
-        with db_lock:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("""
-                DELETE FROM profile_facts
-                WHERE user_id=? AND fact_key=?
-            """, (str(user_id), fact_key))
-            conn.execute("""
-                INSERT INTO profile_facts
-                (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (str(user_id), fact_key, fact_value, confidence, source_turn_id, time.time()))
-            conn.commit()
-    except Exception as e:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        print(f"[FACT ERROR] {e}")
- 
-def get_profile_facts(user_id: int, limit: int = 12):
-    with db_lock:
-        result = conn.execute("""
-            SELECT fact_key, fact_value, confidence, updated_at
-            FROM profile_facts
-            WHERE user_id=?
-            ORDER BY updated_at DESC
-            LIMIT ?
-        """, (str(user_id), limit))
-        rows = result.fetchall()
-    return [
-        {
-            "fact_key": row[0],
-            "fact_value": row[1],
-            "confidence": row[2],
-            "updated_at": row[3]
-        }
-        for row in rows
-    ]
  
 def resolve_due_hint(due_hint: str):
     if not due_hint:
@@ -1904,11 +1112,7 @@ def find_similar_plan(user_id: int, description: str):
         overlap = len(candidate_words & existing_words)
         if overlap > best_score:
             best_score = overlap
-            best = {
-                "id": row[0],
-                "description": row[1],
-                "status": row[2]
-            }
+            best = {"id": row[0], "description": row[1], "status": row[2]}
     return best if best_score >= 3 else None
  
 def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
@@ -1931,8 +1135,6 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
                 """, (description, due_at, "planned", commitment, now, now, existing["id"]))
                 conn.commit()
             sync_plans_to_state(user_id)
-            save_persistent_state_to_db(user_id)
-            print(f"[PLAN] Updated: {description[:60]}")
             return existing["id"]
         plan_id = f"plan_{user_id}_{int(time.time()*1000)}"
         with db_lock:
@@ -1952,8 +1154,6 @@ def upsert_plan(user_id: int, plan_data: dict, source_turn_id: int = None):
             ))
             conn.commit()
         sync_plans_to_state(user_id)
-        save_persistent_state_to_db(user_id)
-        print(f"[PLAN] Created: {description[:60]}")
         return plan_id
     except Exception as e:
         try:
@@ -1975,204 +1175,51 @@ def get_active_plans(user_id: int, limit: int = 5):
         rows = result.fetchall()
     return [
         {
-            "id": row[0],
-            "description": row[1],
-            "target_time": row[2],
-            "status": row[3],
-            "commitment_level": row[4],
-            "created_at": row[5]
+            "id": row[0], "description": row[1], "target_time": row[2],
+            "status": row[3], "commitment_level": row[4], "created_at": row[5]
         }
         for row in rows
     ]
- 
-def get_recent_summaries(user_id: int, limit: int = 2):
-    with db_lock:
-        result = conn.execute("""
-            SELECT summary, start_turn_id, end_turn_id, created_at
-            FROM summaries
-            WHERE user_id=?
-            ORDER BY id DESC
-            LIMIT ?
-        """, (str(user_id), limit))
-        rows = result.fetchall()
-    return [
-        {
-            "summary": row[0],
-            "start_turn_id": row[1],
-            "end_turn_id": row[2],
-            "created_at": row[3]
-        }
-        for row in rows
-    ]
- 
-async def maybe_create_summary(user_id: int):
-    with db_lock:
-        result = conn.execute("""
-            SELECT COALESCE(MAX(end_turn_id), 0)
-            FROM summaries
-            WHERE user_id=?
-        """, (str(user_id),))
-        last_summarized_turn_id = result.fetchone()[0] or 0
-        result = conn.execute("""
-            SELECT id, role, content
-            FROM turns
-            WHERE user_id=? AND id > ?
-            ORDER BY id ASC
-            LIMIT 8
-        """, (str(user_id), last_summarized_turn_id))
-        rows = result.fetchall()
-    if len(rows) < 6:
-        return
-    start_turn_id = rows[0][0]
-    end_turn_id = rows[-1][0]
-    transcript = "\n".join([f"{row[1]}: {row[2]}" for row in rows])
-    prompt = f"""
-Summarize this conversation span in Finnish in 4-6 concise bullet points worth remembering later.
-Focus on:
-- topic progression
-- promises / future plans
-- stable preferences
-- emotionally relevant facts
-- unresolved questions
- 
-Conversation:
-{transcript}
-"""
-    try:
-        if XAI_API_KEY and grok_client:
-            resp = await grok_client.chat.completions.create(
-                model="grok-4-1-fast",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                temperature=0.3
-            )
-            # ✅ SAFE ACCESS
-            summary = resp.choices[0].message.content
-            if summary:
-                summary = summary.strip()
-            else:
-                summary = "Summary unavailable"
-        else:
-            resp = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                temperature=0.3
-            )
-            # ✅ SAFE ACCESS
-            summary = resp.choices[0].message.content
-            if summary:
-                summary = summary.strip()
-            else:
-                summary = "Summary unavailable"
-        
-        emb = await get_embedding(summary)
-        with db_lock:
-            conn.execute("""
-                INSERT INTO summaries
-                (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                str(user_id),
-                start_turn_id,
-                end_turn_id,
-                summary,
-                emb.tobytes(),
-                time.time()
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[SUMMARY ERROR] {e}")
- 
-# ====================== PLAN LIFECYCLE MANAGEMENT ======================
  
 def mark_plan_completed(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""
-            UPDATE planned_events
-            SET status='completed', last_updated=?, status_changed_at=?
-            WHERE id=? AND user_id=?
-        """, (now, now, plan_id, str(user_id)))
+        conn.execute("UPDATE planned_events SET status='completed', last_updated=?, status_changed_at=? WHERE id=? AND user_id=?",
+                     (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
-    save_persistent_state_to_db(user_id)
-    print(f"[PLAN] Completed: {plan_id}")
  
 def mark_plan_cancelled(user_id: int, plan_id: str):
     now = time.time()
     with db_lock:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""
-            UPDATE planned_events
-            SET status='cancelled', last_updated=?, status_changed_at=?
-            WHERE id=? AND user_id=?
-        """, (now, now, plan_id, str(user_id)))
+        conn.execute("UPDATE planned_events SET status='cancelled', last_updated=?, status_changed_at=? WHERE id=? AND user_id=?",
+                     (now, now, plan_id, str(user_id)))
         conn.commit()
     sync_plans_to_state(user_id)
-    save_persistent_state_to_db(user_id)
-    print(f"[PLAN] Cancelled: {plan_id}")
  
-def mark_plan_in_progress(user_id: int, plan_id: str):
-    now = time.time()
-    with db_lock:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("""
-            UPDATE planned_events
-            SET status='in_progress', last_updated=?, status_changed_at=?
-            WHERE id=? AND user_id=?
-        """, (now, now, plan_id, str(user_id)))
-        conn.commit()
-    sync_plans_to_state(user_id)
-    save_persistent_state_to_db(user_id)
-    print(f"[PLAN] In progress: {plan_id}")
+def sync_plans_to_state(user_id: int):
+    state = get_or_create_state(user_id)
+    state["planned_events"] = load_plans_from_db(user_id)
  
 def resolve_plan_reference(user_id: int, user_text: str):
     t = user_text.lower()
-    state = get_or_create_state(user_id)
-    completion_keywords = [
-        "tein sen", "tein jo", "tehty", "valmis", "hoidettu",
-        "done", "finished", "completed", "se on tehty", "hoitui"
-    ]
-    cancel_keywords = [
-        "en tee", "peruutetaan", "ei käy", "unohda se",
-        "cancel", "forget it", "ei enää", "en ehdi"
-    ]
-    progress_keywords = [
-        "aloitin", "teen parhaillaan", "olen tekemässä",
-        "started", "working on it", "teen sitä"
-    ]
+    completion_keywords = ["tein sen", "tein jo", "tehty", "valmis", "hoidettu", "done", "finished"]
+    cancel_keywords = ["en tee", "peruutetaan", "ei käy", "unohda se", "cancel", "ei enää"]
+ 
     plans = get_active_plans(user_id, limit=5)
     if not plans:
         return None
-    last_referenced_plan_id = state.get("last_referenced_plan_id")
-    if len(t.split()) <= 5 and last_referenced_plan_id:
-        if any(kw in t for kw in completion_keywords + cancel_keywords + progress_keywords):
-            for plan in plans:
-                if plan["id"] == last_referenced_plan_id:
-                    print(f"[PLAN REF] Using last referenced plan: {plan['description'][:50]}")
-                    if any(kw in t for kw in completion_keywords):
-                        mark_plan_completed(user_id, plan["id"])
-                        return {"action": "completed", "plan": plan}
-                    elif any(kw in t for kw in cancel_keywords):
-                        mark_plan_cancelled(user_id, plan["id"])
-                        return {"action": "cancelled", "plan": plan}
-                    elif any(kw in t for kw in progress_keywords):
-                        mark_plan_in_progress(user_id, plan["id"])
-                        return {"action": "in_progress", "plan": plan}
+ 
     best_match = None
     best_score = 0
     for plan in plans:
         plan_words = set(plan["description"].lower().split())
         text_words = set(t.split())
         overlap = len(plan_words & text_words)
-        age_hours = (time.time() - plan.get("created_at", 0)) / 3600
-        recency_bonus = max(0, 1.0 - (age_hours / 168))
-        score = overlap * (1 + recency_bonus)
-        if score > best_score:
-            best_score = score
+        if overlap > best_score:
+            best_score = overlap
             best_match = plan
+ 
     if best_match and best_score >= 2:
         if any(kw in t for kw in completion_keywords):
             mark_plan_completed(user_id, best_match["id"])
@@ -2180,16 +1227,421 @@ def resolve_plan_reference(user_id: int, user_text: str):
         elif any(kw in t for kw in cancel_keywords):
             mark_plan_cancelled(user_id, best_match["id"])
             return {"action": "cancelled", "plan": best_match}
-        elif any(kw in t for kw in progress_keywords):
-            mark_plan_in_progress(user_id, best_match["id"])
-            return {"action": "in_progress", "plan": best_match}
     return None
  
-def sync_plans_to_state(user_id: int):
-    state = get_or_create_state(user_id)
-    state["planned_events"] = load_plans_from_db(user_id)
+# ====================== TURNS + MEMORIES ======================
+def save_turn(user_id: int, role: str, content: str) -> int:
+    with db_lock:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (str(user_id), role, content, time.time())
+        )
+        conn.commit()
+        return cursor.lastrowid
  
-# ====================== OPEN LOOP RESOLUTION ======================
+def get_recent_turns(user_id: int, limit: int = 10):
+    with db_lock:
+        result = conn.execute("""
+            SELECT id, role, content, created_at FROM turns
+            WHERE user_id=? ORDER BY id DESC LIMIT ?
+        """, (str(user_id), limit))
+        rows = result.fetchall()
+    rows.reverse()
+    return [{"id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+ 
+async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hours: int = 24):
+    if not content or len(content.strip()) < 12:
+        return True
+    cutoff_time = time.time() - (hours * 3600)
+    with db_lock:
+        result = conn.execute("""
+            SELECT content FROM episodic_memories
+            WHERE user_id=? AND memory_type=? AND created_at > ?
+            ORDER BY created_at DESC LIMIT 30
+        """, (str(user_id), memory_type, cutoff_time))
+        rows = result.fetchall()
+    if not rows:
+        return False
+    new_words = set(content.lower().split())
+    for (existing_content,) in rows:
+        existing_words = set(existing_content.lower().split())
+        overlap = len(new_words & existing_words)
+        total = len(new_words | existing_words)
+        if total > 0 and (overlap / total) > 0.82:
+            return True
+    return False
+ 
+async def store_episodic_memory(user_id: int, content: str, memory_type: str = "event", source_turn_id: int = None):
+    if not content or len(content.strip()) < 12:
+        return
+    if await is_duplicate_memory(user_id, content, memory_type, hours=24):
+        return
+    emb = await get_embedding(content)
+    with db_lock:
+        conn.execute("""
+            INSERT INTO episodic_memories (user_id, content, embedding, memory_type, source_turn_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (str(user_id), content, emb.tobytes(), memory_type, source_turn_id, time.time()))
+        conn.commit()
+ 
+async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
+    q_emb = await get_embedding(query)
+    with db_lock:
+        result = conn.execute("""
+            SELECT content, embedding, memory_type, created_at FROM episodic_memories
+            WHERE user_id=? ORDER BY created_at DESC LIMIT 400
+        """, (str(user_id),))
+        rows = result.fetchall()
+    scored = []
+    now = time.time()
+    type_weights = {
+        "plan_update": 0.4, "agreement": 0.4, "fantasy": 0.25,
+        "image_sent": 0.15, "event": 0.05, "conversation_event": 0.0,
+    }
+    for content, emb_blob, memory_type, created_at in rows:
+        try:
+            emb = np.frombuffer(emb_blob, dtype=np.float32)
+            sim = cosine_similarity(q_emb, emb)
+            age_hours = max((now - created_at) / 3600.0, 0.0)
+            recency = 1.0 / (1.0 + (age_hours / 24.0))
+            type_bonus = type_weights.get(memory_type, 0.0)
+            score = 0.65 * sim + 0.25 * recency + 0.10 * type_bonus
+            scored.append((score, content, memory_type))
+        except Exception:
+            continue
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [{"content": x[1], "memory_type": x[2]} for x in scored[:limit]]
+ 
+def upsert_profile_fact(user_id: int, fact_key: str, fact_value: str, confidence: float = 0.7, source_turn_id: int = None):
+    if not fact_key or not fact_value:
+        return
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM profile_facts WHERE user_id=? AND fact_key=?", (str(user_id), fact_key))
+            conn.execute("""
+                INSERT INTO profile_facts (user_id, fact_key, fact_value, confidence, source_turn_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(user_id), fact_key, fact_value, confidence, source_turn_id, time.time()))
+            conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[FACT ERROR] {e}")
+ 
+def get_profile_facts(user_id: int, limit: int = 12):
+    with db_lock:
+        result = conn.execute("""
+            SELECT fact_key, fact_value, confidence, updated_at FROM profile_facts
+            WHERE user_id=? ORDER BY updated_at DESC LIMIT ?
+        """, (str(user_id), limit))
+        rows = result.fetchall()
+    return [{"fact_key": r[0], "fact_value": r[1], "confidence": r[2], "updated_at": r[3]} for r in rows]
+ 
+def save_topic_state_to_db(user_id: int):
+    state = get_or_create_state(user_id)
+    ts = state.get("topic_state", {})
+    with db_lock:
+        conn.execute("""
+            INSERT OR REPLACE INTO topic_state (user_id, current_topic, topic_summary, open_questions, open_loops, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(user_id), ts.get("current_topic", "general"), ts.get("topic_summary", ""),
+            json.dumps(ts.get("open_questions", []), ensure_ascii=False),
+            json.dumps(ts.get("open_loops", []), ensure_ascii=False),
+            ts.get("updated_at", time.time())
+        ))
+        conn.commit()
+ 
+def load_topic_state_from_db(user_id: int):
+    with db_lock:
+        result = conn.execute("""
+            SELECT current_topic, topic_summary, open_questions, open_loops, updated_at
+            FROM topic_state WHERE user_id=?
+        """, (str(user_id),))
+        row = result.fetchone()
+    if not row:
+        return None
+    return {
+        "current_topic": row[0] or "general",
+        "topic_summary": row[1] or "",
+        "open_questions": json.loads(row[2]) if row[2] else [],
+        "open_loops": json.loads(row[3]) if row[3] else [],
+        "updated_at": row[4] or time.time()
+    }
+ 
+def get_recent_summaries(user_id: int, limit: int = 2):
+    with db_lock:
+        result = conn.execute("""
+            SELECT summary, start_turn_id, end_turn_id, created_at
+            FROM summaries WHERE user_id=? ORDER BY id DESC LIMIT ?
+        """, (str(user_id), limit))
+        rows = result.fetchall()
+    return [{"summary": r[0], "start_turn_id": r[1], "end_turn_id": r[2], "created_at": r[3]} for r in rows]
+ 
+async def maybe_create_summary(user_id: int):
+    with db_lock:
+        result = conn.execute("SELECT COALESCE(MAX(end_turn_id), 0) FROM summaries WHERE user_id=?", (str(user_id),))
+        last_summarized_turn_id = result.fetchone()[0] or 0
+        result = conn.execute("""
+            SELECT id, role, content FROM turns
+            WHERE user_id=? AND id > ? ORDER BY id ASC LIMIT 8
+        """, (str(user_id), last_summarized_turn_id))
+        rows = result.fetchall()
+    if len(rows) < 6:
+        return
+    start_turn_id = rows[0][0]
+    end_turn_id = rows[-1][0]
+    transcript = "\n".join([f"{r[1]}: {r[2]}" for r in rows])
+    prompt = f"""Summarize this conversation span in Finnish in 4-6 concise bullet points worth remembering later.
+Focus on: topic progression, promises/plans, stable preferences, emotionally relevant facts, unresolved questions.
+ 
+Conversation:
+{transcript}"""
+ 
+    summary = await call_llm(
+        user_prompt=prompt,
+        max_tokens=300,
+        temperature=0.3,
+        prefer_light=True
+    )
+ 
+    if not summary:
+        summary = "Summary unavailable"
+ 
+    emb = await get_embedding(summary)
+    with db_lock:
+        conn.execute("""
+            INSERT INTO summaries (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (str(user_id), start_turn_id, end_turn_id, summary, emb.tobytes(), time.time()))
+        conn.commit()
+ 
+# ====================== TEMPORAL STATE ======================
+def update_temporal_state(user_id: int, current_time: float):
+    state = get_or_create_state(user_id)
+ 
+    if "temporal_state" not in state:
+        state["temporal_state"] = {}
+ 
+    temporal = state["temporal_state"]
+ 
+    defaults = {
+        "last_message_timestamp": 0, "last_message_time_str": "",
+        "time_since_last_message_hours": 0.0, "time_since_last_message_minutes": 0,
+        "current_activity_started_at": 0, "current_activity_duration_planned": 0,
+        "current_activity_end_time": 0, "activity_type": None,
+        "should_ignore_until": 0, "ignore_reason": None
+    }
+    for key, default in defaults.items():
+        if key not in temporal:
+            temporal[key] = default
+ 
+    if temporal["last_message_timestamp"] > 0:
+        time_diff_seconds = current_time - temporal["last_message_timestamp"]
+        temporal["time_since_last_message_hours"] = time_diff_seconds / 3600
+        temporal["time_since_last_message_minutes"] = int(time_diff_seconds / 60)
+ 
+    temporal["last_message_timestamp"] = current_time
+    dt = datetime.fromtimestamp(current_time, HELSINKI_TZ)
+    temporal["last_message_time_str"] = dt.strftime("%H:%M")
+ 
+    return temporal
+ 
+def get_temporal_context_for_llm(user_id: int) -> str:
+    state = get_or_create_state(user_id)
+    temporal = state.get("temporal_state", {})
+    if not isinstance(temporal, dict):
+        temporal = {}
+ 
+    now = time.time()
+    current_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
+    current_time_str = current_dt.strftime("%H:%M")
+    current_date_str = current_dt.strftime("%Y-%m-%d (%A)")
+ 
+    parts = [
+        f"CURRENT TIME: {current_time_str}",
+        f"CURRENT DATE: {current_date_str}"
+    ]
+ 
+    time_since_minutes = temporal.get("time_since_last_message_minutes", 0)
+    if time_since_minutes > 0:
+        last_time = temporal.get("last_message_time_str", "")
+        hours = temporal.get("time_since_last_message_hours", 0)
+        if hours >= 1:
+            parts.append(f"TIME SINCE LAST MESSAGE: {hours:.1f}h (last at {last_time})")
+        else:
+            parts.append(f"TIME SINCE LAST MESSAGE: {time_since_minutes} min (last at {last_time})")
+ 
+    activity_started = temporal.get("current_activity_started_at", 0)
+    if activity_started > 0:
+        activity = temporal.get("activity_type", "unknown")
+        started_dt = datetime.fromtimestamp(activity_started, HELSINKI_TZ)
+        activity_end = temporal.get("current_activity_end_time", 0)
+        if activity_end > 0:
+            end_dt = datetime.fromtimestamp(activity_end, HELSINKI_TZ)
+            parts.append(f"CURRENT ACTIVITY: {activity}")
+            parts.append(f"Started: {started_dt.strftime('%H:%M')}, Ends: {end_dt.strftime('%H:%M')}")
+ 
+    return "\n".join(parts)
+ 
+# ====================== AGREEMENTS ======================
+def save_agreement(user_id: int, description: str, target_time: float = None, initiated_by: str = "user"):
+    now = time.time()
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT INTO agreements (user_id, description, agreed_at, target_time, locked, initiated_by, status, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, 'active', ?)
+            """, (str(user_id), description, now, target_time, initiated_by, now))
+            conn.commit()
+        print(f"[AGREEMENT] Saved: {description[:60]}")
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[AGREEMENT ERROR] {e}")
+ 
+def get_active_agreements(user_id: int) -> list:
+    with db_lock:
+        result = conn.execute("""
+            SELECT id, description, agreed_at, target_time, initiated_by
+            FROM agreements WHERE user_id=? AND status='active'
+            ORDER BY agreed_at DESC LIMIT 10
+        """, (str(user_id),))
+        rows = result.fetchall()
+    return [
+        {"id": r[0], "description": r[1], "agreed_at": r[2], "target_time": r[3], "initiated_by": r[4]}
+        for r in rows
+    ]
+ 
+def extract_agreements_from_frame(user_id: int, frame: dict, user_text: str, bot_reply: str = None):
+    t = user_text.lower()
+    agreement_signals = [
+        "sovittu", "ok sovitaan", "joo sovitaan", "sopii", "ok deal",
+        "lupaan", "mä tuun", "mä oon siellä", "teen sen", "agreed",
+        "ok mä oon", "ok tuun", "joo tuun", "joo ok", "selvä"
+    ]
+    future_signals = [
+        "lauantaina", "sunnuntaina", "huomenna", "ensi viikolla",
+        "illalla", "viikonloppuna", "maanantaina", "tiistaina"
+    ]
+ 
+    has_agreement = any(kw in t for kw in agreement_signals)
+    has_future = any(kw in t for kw in future_signals)
+ 
+    if not (has_agreement or has_future):
+        return
+ 
+    plans = frame.get("plans", [])
+    for plan in plans:
+        desc = plan.get("description", "").strip()
+        if desc and len(desc) > 10:
+            due = resolve_due_hint(plan.get("due_hint"))
+            save_agreement(user_id, desc, target_time=due, initiated_by="user")
+ 
+def build_narrative_timeline(user_id: int) -> str:
+    now = time.time()
+    today_start = now - (now % 86400)
+    yesterday_start = today_start - 86400
+    week_ago = now - (7 * 86400)
+ 
+    with db_lock:
+        result = conn.execute("""
+            SELECT content, memory_type, created_at FROM episodic_memories
+            WHERE user_id=? ORDER BY created_at DESC LIMIT 50
+        """, (str(user_id),))
+        memories = result.fetchall()
+ 
+    with db_lock:
+        result = conn.execute("""
+            SELECT summary, created_at FROM summaries
+            WHERE user_id=? ORDER BY created_at DESC LIMIT 5
+        """, (str(user_id),))
+        summaries = result.fetchall()
+ 
+    agreements = get_active_agreements(user_id)
+    plans = get_active_plans(user_id, limit=5)
+ 
+    past_lines = []
+    today_lines = []
+ 
+    for content, mtype, created_at in memories:
+        if created_at < week_ago:
+            continue
+        if created_at >= today_start:
+            today_lines.append(f"  - {content[:100]}")
+        elif created_at >= yesterday_start:
+            past_lines.append(f"  [eilen] {content[:100]}")
+        else:
+            days_ago = int((now - created_at) / 86400)
+            past_lines.append(f"  [{days_ago}pv sitten] {content[:100]}")
+ 
+    for summary, created_at in summaries:
+        if created_at < week_ago:
+            continue
+        days_ago = int((now - created_at) / 86400)
+        if days_ago == 0:
+            today_lines.append(f"  [yhteenveto] {summary[:150]}")
+        else:
+            past_lines.append(f"  [{days_ago}pv sitten, yhteenveto] {summary[:150]}")
+ 
+    future_lines = []
+    for ag in agreements:
+        target = ag.get("target_time")
+        if target:
+            dt = datetime.fromtimestamp(target, HELSINKI_TZ)
+            time_str = dt.strftime("%A %d.%m. klo %H:%M")
+        else:
+            time_str = "sovittu aika ei tiedossa"
+        future_lines.append(f"  [LUKITTU] {ag['description'][:100]} ({time_str})")
+ 
+    for plan in plans:
+        target = plan.get("target_time")
+        if target:
+            dt = datetime.fromtimestamp(target, HELSINKI_TZ)
+            time_str = dt.strftime("%A %d.%m.")
+        else:
+            time_str = "?"
+        desc = plan.get("description", "")
+        already_in = any(desc[:40] in ag["description"] for ag in agreements)
+        if not already_in:
+            future_lines.append(f"  [suunnitelma] {desc[:100]} ({time_str})")
+ 
+    parts = []
+    if past_lines:
+        parts.append("=== MENNEISYYS ===")
+        parts.extend(past_lines[-8:])
+    if today_lines:
+        parts.append("=== TÄNÄÄN ===")
+        parts.extend(today_lines[-5:])
+    if future_lines:
+        parts.append("=== TULEVAISUUS (ÄLÄ MUUTA LUKITTUJA) ===")
+        parts.extend(future_lines)
+        parts.append("TÄRKEÄÄ: [LUKITTU] sopimukset ovat pyhiä.")
+ 
+    return "\n".join(parts) if parts else "Ei aiempaa historiaa."
+ 
+# ====================== TOPIC STATE ======================
+def update_topic_state(user_id, frame):
+    state = get_or_create_state(user_id)
+    ts = state.setdefault("topic_state", {
+        "current_topic": "general", "topic_summary": "",
+        "open_questions": [], "open_loops": [], "updated_at": time.time()
+    })
+ 
+    if frame.get("topic_changed"):
+        ts["current_topic"] = frame.get("topic", "general")
+        ts["topic_summary"] = frame.get("topic_summary", "")
+ 
+    if frame.get("open_questions") is not None:
+        ts["open_questions"] = frame.get("open_questions", [])[:5]
+ 
+    if frame.get("open_loops") is not None:
+        ts["open_loops"] = frame.get("open_loops", [])[:5]
+ 
+    ts["updated_at"] = time.time()
  
 def resolve_open_loops(user_id: int, user_text: str, frame: dict):
     state = get_or_create_state(user_id)
@@ -2204,1599 +1656,57 @@ def resolve_open_loops(user_id: int, user_text: str, frame: dict):
         text_words = set(t.split())
         overlap = len(loop_words & text_words)
         direct_answer = any(kw in t for kw in ["kyllä", "joo", "en", "ei", "ehkä"])
-        if overlap >= 4:
+        if overlap >= 4 or (direct_answer and overlap >= 2):
             resolved.append(loop)
-            print(f"[LOOP RESOLVED] Strong match: {loop[:60]}")
-        elif direct_answer and overlap >= 2:
-            resolved.append(loop)
-            print(f"[LOOP RESOLVED] Direct answer + match: {loop[:60]}")
     if resolved:
         remaining = [l for l in open_loops if l not in resolved]
         topic_state["open_loops"] = remaining
  
-# ====================== MEMORY DEDUPLICATION ======================
- 
-async def is_duplicate_memory(user_id: int, content: str, memory_type: str, hours: int = 24):
-    if not content or len(content.strip()) < 12:
-        return True
-    cutoff_time = time.time() - (hours * 3600)
-    with db_lock:
-        result = conn.execute("""
-            SELECT content, created_at
-            FROM episodic_memories
-            WHERE user_id=? AND memory_type=? AND created_at > ?
-            ORDER BY created_at DESC
-            LIMIT 30
-        """, (str(user_id), memory_type, cutoff_time))
-        rows = result.fetchall()
-    if not rows:
-        return False
-    new_words = set(content.lower().split())
-    # Laskettu kynnys: 0.82 -> loydetaan enemman uniikit muistot
-    for existing_content, _ in rows:
-        existing_words = set(existing_content.lower().split())
-        overlap = len(new_words & existing_words)
-        total = len(new_words | existing_words)
-        if total > 0:
-            similarity = overlap / total
-            if similarity > 0.82:
-                return True
-    return False
- 
-# ====================== SUBMISSION LEVEL TRACKING ======================
- 
+# ====================== SUBMISSION LEVEL ======================
 def update_submission_level(user_id: int, user_text: str):
     state = get_or_create_state(user_id)
     t = user_text.lower()
     submission_keywords = [
-        "teen mitä haluat", "totteleen", "käske", "sä päätät", 
+        "teen mitä haluat", "totteleen", "käske", "sä päätät",
         "olen sun", "haluan olla", "nöyryytä", "hallitse",
         "strap", "pegging", "chastity", "cuckold"
     ]
-    resistance_keywords = [
-        "en halua", "ei käy", "lopeta", "liikaa", "en tee",
-        "ei noin", "en tykkää"
-    ]
-    curious_keywords = [
-        "mitä jos", "entä jos", "miltä tuntuisi", "kertoisitko",
-        "haluaisin tietää", "kiinnostaa"
-    ]
+    resistance_keywords = ["en halua", "ei käy", "lopeta", "liikaa", "en tee"]
+    curious_keywords = ["mitä jos", "entä jos", "miltä tuntuisi", "kiinnostaa"]
+ 
     current_level = state.get("submission_level", 0.0)
     last_interaction = state.get("last_interaction", time.time())
     hours_since = (time.time() - last_interaction) / 3600
     if hours_since > 24:
         decay = 0.98 ** (hours_since / 24)
         current_level = current_level * decay
-        print(f"[SUBMISSION] Applied decay: {decay:.3f}, new base: {current_level:.2f}")
+ 
     if any(kw in t for kw in submission_keywords):
         state["submission_level"] = min(1.0, current_level + 0.15)
-        print(f"[SUBMISSION] Increased to {state['submission_level']:.2f}")
     elif any(kw in t for kw in resistance_keywords):
         state["submission_level"] = max(0.0, current_level - 0.08)
-        print(f"[SUBMISSION] Decreased to {state['submission_level']:.2f}")
     elif any(kw in t for kw in curious_keywords):
         state["submission_level"] = min(1.0, current_level + 0.05)
-        print(f"[SUBMISSION] Slight increase to {state['submission_level']:.2f}")
     else:
         state["submission_level"] = current_level
+ 
     return state["submission_level"]
  
-# ====================== RESISTANCE DETECTION & RESPONSE ======================
- 
 def classify_user_signal(user_text: str) -> str:
-    """
-    Luokittelee käyttäjän viestin signaalin tyypin.
-    Käyttäjän signaali on AINA tärkeämpi kuin persona.
-    """
     t = user_text.lower().strip()
- 
-    # Raja tai selkeä lopetus - AINA kunnioitetaan
     if any(x in t for x in ["älä", "stop", "lopeta", "en halua", "ei käy", "riittää", "ei enää"]):
         return "boundary"
- 
-    # Korjaus - käyttäjä korjaa botin väärinymmärrystä
-    if any(x in t for x in ["väärin", "ymmärsit väärin", "ei noin", "et kuuntele",
-                              "tarkoitin", "en tarkoittanut", "se ei ollut", "ei se"]):
+    if any(x in t for x in ["väärin", "ymmärsit väärin", "ei noin", "tarkoitin", "en tarkoittanut"]):
         return "correction"
- 
-    # Kysymys
-    if "?" in t or any(t.startswith(w) for w in ["miksi", "miten", "voiko", "onko",
-                                                    "mitä", "kuka", "missä", "milloin"]):
+    if "?" in t or any(t.startswith(w) for w in ["miksi", "miten", "voiko", "onko", "mitä", "kuka", "missä", "milloin"]):
         return "question"
- 
-    # Aiheen vaihto
-    if any(x in t for x in ["vaihdetaan aihetta", "puhutaan muusta", "toinen aihe",
-                              "muutetaan", "unohda se", "jätetään se"]):
+    if any(x in t for x in ["vaihdetaan aihetta", "puhutaan muusta", "toinen aihe", "unohda se"]):
         return "topic_change"
- 
-    # Seksuaalinen signaali - vain jos selkeä
-    if any(x in t for x in ["seksi", "sex", "nussi", "pano", "strap", "pegging",
-                              "horny", "alasti", "nude", "naked", "cuckold"]):
+    if any(x in t for x in ["seksi", "sex", "nussi", "pano", "strap", "pegging", "horny", "alasti", "nude", "naked", "cuckold"]):
         return "sexual"
- 
     return "normal"
  
- 
-def detect_resistance_type(user_text: str) -> str:
-    """Säilytetään yhteensopivuuden vuoksi - ohjaa classify_user_signal:iin"""
-    signal = classify_user_signal(user_text)
-    if signal == "boundary":
-        return "denial"
-    return None
- 
- 
-def get_resistance_response(resistance_type: str, context: str = "sexual") -> str:
-    """Poistettu - käyttäjän rajoja kunnioitetaan eikä eskaloida"""
-    return None
- 
- 
-def should_escalate_from_resistance(user_text: str, state: dict) -> bool:
-    """Poistettu - ei automaattista eskalaatiota vastustuksesta"""
-    return False
- 
-# ====================== JEALOUSY & PROVOCATION ENGINE ======================
- 
-# ====================== TEMPORAL AWARENESS SYSTEM ======================
- 
-def update_temporal_state(user_id: int, current_time: float):
-    """
-    Päivittää ajallisen tilan ja laskee kuinka kauan viimeisestä viestistä
-    """
-    state = get_or_create_state(user_id)
-    
-    # ✅ VARMISTA ETTÄ temporal_state ON OLEMASSA JA TÄYTETTY
-    if "temporal_state" not in state:
-        state["temporal_state"] = {}
-    
-    temporal = state["temporal_state"]
-    
-    # ✅ VARMISTA ETTÄ KAIKKI AVAIMET ON OLEMASSA
-    if "last_message_timestamp" not in temporal:
-        temporal["last_message_timestamp"] = 0
-    if "last_message_time_str" not in temporal:
-        temporal["last_message_time_str"] = ""
-    if "time_since_last_message_hours" not in temporal:
-        temporal["time_since_last_message_hours"] = 0.0
-    if "time_since_last_message_minutes" not in temporal:
-        temporal["time_since_last_message_minutes"] = 0
-    if "current_activity_started_at" not in temporal:
-        temporal["current_activity_started_at"] = 0
-    if "current_activity_duration_planned" not in temporal:
-        temporal["current_activity_duration_planned"] = 0
-    if "current_activity_end_time" not in temporal:
-        temporal["current_activity_end_time"] = 0
-    if "activity_type" not in temporal:
-        temporal["activity_type"] = None
-    if "should_ignore_until" not in temporal:
-        temporal["should_ignore_until"] = 0
-    if "ignore_reason" not in temporal:
-        temporal["ignore_reason"] = None
-    
-    # Laske aika edellisestä viestistä
-    if temporal["last_message_timestamp"] > 0:
-        time_diff_seconds = current_time - temporal["last_message_timestamp"]
-        temporal["time_since_last_message_hours"] = time_diff_seconds / 3600
-        temporal["time_since_last_message_minutes"] = int(time_diff_seconds / 60)
-    
-    # Tallenna nykyinen aika
-    temporal["last_message_timestamp"] = current_time
-    
-    # Tallenna kellonaika (Helsinki-aikavyöhyke)
-    dt = datetime.fromtimestamp(current_time, HELSINKI_TZ)
-    temporal["last_message_time_str"] = dt.strftime("%H:%M")
-    
-    print(f"[TEMPORAL] User sent message at {temporal['last_message_time_str']}")
-    if temporal["time_since_last_message_minutes"] > 0:
-        print(f"[TEMPORAL] Time since last message: {temporal['time_since_last_message_minutes']} minutes")
-    
-    return temporal
- 
- 
-# ====================== ACTIVITY DURATION PROFILES ======================
- 
-# ✅ KORJATTU: Lisätty min_cooldown_hours jokaiseen aktiviteettiin
-ACTIVITY_DURATIONS = {
-    "gym": {
-        "duration_hours": 1.5,
-        "min_cooldown_hours": 12,
-        "description": "Salilla treenaamassa",
-        "ignore": True,
-        # Vanhat kentät (yhteensopivuus)
-        "min_hours": 1.0,
-        "max_hours": 2.0,
-        "typical": 1.5,
-        "ignore_probability": 0.8
-    },
-    "casual_date": {
-        "duration_hours": 3.0,
-        "min_cooldown_hours": 24,
-        "description": "Treffeillä",
-        "ignore": True,
-        "min_hours": 2.0,
-        "max_hours": 4.5,
-        "typical": 3.0,
-        "ignore_probability": 0.85
-    },
-    "dinner": {
-        "duration_hours": 2.5,
-        "min_cooldown_hours": 18,
-        "description": "Illallisella",
-        "ignore": True,
-        "min_hours": 2.0,
-        "max_hours": 4.0,
-        "typical": 2.5,
-        "ignore_probability": 0.75
-    },
-    "shopping": {
-        "duration_hours": 2.0,
-        "min_cooldown_hours": 8,
-        "description": "Ostoksilla",
-        "ignore": False,
-        "min_hours": 0.5,
-        "max_hours": 2.5,
-        "typical": 1.5,
-        "ignore_probability": 0.6
-    },
-    "coffee": {
-        "duration_hours": 1.0,
-        "min_cooldown_hours": 6,
-        "description": "Kahvilla",
-        "ignore": False,
-        "min_hours": 0.5,
-        "max_hours": 1.5,
-        "typical": 1.0,
-        "ignore_probability": 0.7
-    },
-    "lunch": {
-        "duration_hours": 1.5,
-        "min_cooldown_hours": 8,
-        "description": "Lounaalla",
-        "ignore": False,
-        "min_hours": 0.75,
-        "max_hours": 2.0,
-        "typical": 1.25,
-        "ignore_probability": 0.5
-    },
-    "bar": {
-        "duration_hours": 4.0,
-        "min_cooldown_hours": 24,
-        "description": "Baarissa",
-        "ignore": True,
-        "min_hours": 2.5,
-        "max_hours": 5.0,
-        "typical": 3.5,
-        "ignore_probability": 0.8
-    },
-    "party": {
-        "duration_hours": 6.0,
-        "min_cooldown_hours": 36,
-        "description": "Juhlissa",
-        "ignore": True,
-        "min_hours": 3.0,
-        "max_hours": 6.0,
-        "typical": 4.0,
-        "ignore_probability": 0.9
-    },
-    "club_night": {
-        "duration_hours": 8.0,
-        "min_cooldown_hours": 48,
-        "description": "Yökerhossa",
-        "ignore": True,
-        "min_hours": 4.0,
-        "max_hours": 10.0,
-        "typical": 6.0,
-        "ignore_probability": 0.95
-    },
-    "evening_date": {
-        "duration_hours": 5.0,
-        "min_cooldown_hours": 24,
-        "description": "Ilta-treffeillä",
-        "ignore": True,
-        "min_hours": 4.0,
-        "max_hours": 8.0,
-        "typical": 6.0,
-        "ignore_probability": 0.9
-    },
-    "overnight_date": {
-        "duration_hours": 14.0,
-        "min_cooldown_hours": 48,
-        "description": "Yö-treffeillä",
-        "ignore": True,
-        "min_hours": 8.0,
-        "max_hours": 16.0,
-        "typical": 12.0,
-        "ignore_probability": 0.95
-    },
-    "work": {
-        "duration_hours": 8.0,
-        "min_cooldown_hours": 0,
-        "description": "Töissä",
-        "ignore": False,
-        "min_hours": 6.0,
-        "max_hours": 10.0,
-        "typical": 8.0,
-        "ignore_probability": 0.4
-    },
-    "meeting": {
-        "duration_hours": 2.0,
-        "min_cooldown_hours": 4,
-        "description": "Palaverissa",
-        "ignore": False,
-        "min_hours": 0.5,
-        "max_hours": 3.0,
-        "typical": 1.5,
-        "ignore_probability": 0.9
-    },
-    "mystery": {
-        "duration_hours": 4.0,
-        "min_cooldown_hours": 12,
-        "description": "Mysteeriaktiviteetti",
-        "ignore": True,
-        "min_hours": 1.0,
-        "max_hours": 6.0,
-        "typical": 3.0,
-        "ignore_probability": 0.95
-    },
-    "spa": {
-        "duration_hours": 3.0,
-        "min_cooldown_hours": 12,
-        "description": "Kylpylässä",
-        "ignore": True,
-        "min_hours": 2.0,
-        "max_hours": 4.0,
-        "typical": 3.0,
-        "ignore_probability": 0.95
-    },
-    "day_trip": {
-        "duration_hours": 7.0,
-        "min_cooldown_hours": 24,
-        "description": "Päiväretkellä",
-        "ignore": True,
-        "min_hours": 5.0,
-        "max_hours": 10.0,
-        "typical": 7.0,
-        "ignore_probability": 0.7
-    },
-    "weekend_trip": {
-        "duration_hours": 48.0,
-        "min_cooldown_hours": 72,
-        "description": "Viikonloppumatkalla",
-        "ignore": True,
-        "min_hours": 24.0,
-        "max_hours": 72.0,
-        "typical": 48.0,
-        "ignore_probability": 0.8
-    },
-    "busy": {
-        "duration_hours": 2.0,
-        "min_cooldown_hours": 0,
-        "description": "Kiireinen",
-        "ignore": False,
-        "min_hours": 0.5,
-        "max_hours": 4.0,
-        "typical": 2.0,
-        "ignore_probability": 0.7
-    },
-}
- 
-# ====================== UUSI: can_start_activity ======================
- 
-# Semanttiset aktiviteettiryhmät duplikaattitarkistukseen
-ACTIVITY_GROUPS = {
-    "social_date": ["casual_date", "evening_date", "dinner", "coffee"],
-    "party": ["bar", "club_night", "party"],
-    "exercise": ["gym", "spa"],
-}
- 
-def get_activity_group(activity_type: str) -> str:
-    for group, activities in ACTIVITY_GROUPS.items():
-        if activity_type in activities:
-            return group
-    return activity_type
- 
- 
-def can_start_activity(user_id: int, activity_type: str) -> dict:
-    """
-    Tarkistaa voiko aktiviteetin aloittaa.
- 
-    Returns:
-        dict: {
-            "can_start": bool,
-            "reason": str,
-            "message": str (optional)
-        }
-    """
-    state = get_or_create_state(user_id)
-    now = time.time()
- 
-    # 1. Onko jo aktiivinen aktiviteetti käynnissä?
-    temporal = state.get("temporal_state", {})
-    if temporal.get("activity_type") and now < temporal.get("current_activity_end_time", 0):
-        current_activity = temporal.get("activity_type", "unknown")
-        current_desc = ACTIVITY_DURATIONS.get(current_activity, {}).get("description", current_activity)
-        return {
-            "can_start": False,
-            "reason": "active_activity",
-            "message": f"Mä oon jo {current_desc}. Odota että se loppuu."
-        }
- 
-    # 2. Cooldown-tarkistus
-    profile = ACTIVITY_DURATIONS.get(activity_type, {})
-    min_cooldown = profile.get("min_cooldown_hours", 0)
- 
-    if min_cooldown > 0:
-        with db_lock:
-            result = conn.execute("""
-                SELECT started_at, duration_hours
-                FROM activity_log
-                WHERE user_id = ? AND activity_type = ?
-                ORDER BY started_at DESC LIMIT 1
-            """, (str(user_id), activity_type))
-            last = result.fetchone()
- 
-        if last:
-            last_start, last_duration = last
-            cooldown_end = last_start + (last_duration * 3600) + (min_cooldown * 3600)
- 
-            if now < cooldown_end:
-                hours_left = (cooldown_end - now) / 3600
-                return {
-                    "can_start": False,
-                    "reason": "cooldown",
-                    "message": (
-                        f"Mä tein tätä aktiviteettia vasta "
-                        f"{int((now - last_start)/3600)} tuntia sitten. "
-                        f"Cooldown {min_cooldown}h - odota vielä {hours_left:.1f}h."
-                    )
-                }
- 
-    # 3. Semanttinen konfliktitarkistus (viimeiset 24h)
-    with db_lock:
-        result = conn.execute("""
-            SELECT activity_type, description
-            FROM activity_log
-            WHERE user_id = ? AND started_at > ?
-            ORDER BY started_at DESC LIMIT 5
-        """, (str(user_id), now - 86400))
-        recent = result.fetchall()
- 
-    for act_type, desc in recent:
-        if get_activity_group(act_type) == get_activity_group(activity_type):
-            return {
-                "can_start": False,
-                "reason": "semantic_duplicate",
-                "message": "Mä tein just samanlaisen jutun. Ei ihan heti uudestaan."
-            }
- 
-    return {"can_start": True, "reason": "ok"}
- 
- 
-# ====================== KORJATTU: should_ignore_due_to_activity ======================
- 
-def should_ignore_due_to_activity(user_id: int) -> tuple:
-    """
-    Tarkistaa pitäisikö viesti ignoorata aktiviteetin takia.
- 
-    Returns:
-        tuple: (should_ignore: bool, reason: str)
-    """
-    state = get_or_create_state(user_id)
- 
-    # ✅ SAFE ACCESS
-    temporal = state.get("temporal_state")
-    if not temporal or not isinstance(temporal, dict):
-        return False, None
- 
-    now = time.time()
-    ignore_until = temporal.get("should_ignore_until", 0)
- 
-    if now < ignore_until:
-        activity = temporal.get("activity_type", "busy")
-        time_left_minutes = int((ignore_until - now) / 60)
- 
-        end_dt = datetime.fromtimestamp(ignore_until, HELSINKI_TZ)
-        end_time_str = end_dt.strftime("%H:%M")
- 
-        reason = f"{activity} (vielä {time_left_minutes} min, until {end_time_str})"
- 
-        print(f"[TEMPORAL IGNORE] Should ignore: {reason}")
-        return True, reason
- 
-    # Aktiviteetti päättynyt
-    if temporal.get("current_activity_started_at", 0) > 0:
-        print(f"[TEMPORAL] Activity '{temporal.get('activity_type')}' ended, will respond")
-        temporal["current_activity_started_at"] = 0
-        temporal["activity_type"] = None
-        temporal["should_ignore_until"] = 0
- 
-    return False, None
- 
- 
-# ====================== KORJATTU: start_activity_with_duration ======================
- 
-def start_activity_with_duration(user_id: int, activity_type: str, duration_hours: float = None, intensity: float = None):
-    """
-    Aloittaa aktiviteetin realistisella kestolla ja tallentaa sen tietokantaan.
- 
-    Args:
-        user_id: Käyttäjän ID
-        activity_type: Aktiviteetin tyyppi (esim. "gym")
-        duration_hours: Kesto tunteina (None = käytä oletusta)
-        intensity: Intensiteetti 0.0-1.0 (None = automaattinen)
- 
-    Returns:
-        dict: {
-            "activity": str,
-            "duration_hours": float,
-            "end_time_str": str,
-            "will_ignore": bool
-        }
- 
-    Raises:
-        ValueError: Jos aktiviteettia ei voi aloittaa (cooldown tai konflikti)
-    """
-    state = get_or_create_state(user_id)
- 
-    # ✅ VARMISTA ETTÄ temporal_state ON DICT
-    if "temporal_state" not in state or not isinstance(state.get("temporal_state"), dict):
-        state["temporal_state"] = {}
- 
-    temporal = state["temporal_state"]
- 
-    # ✅ TARKISTA VOIDAANKO ALOITTAA
-    check = can_start_activity(user_id, activity_type)
-    if not check["can_start"]:
-        print(f"[ACTIVITY BLOCKED] {check['reason']}: {check.get('message', 'Unknown')}")
-        raise ValueError(check.get("message", "Aktiviteettia ei voi aloittaa"))
- 
-    # Laske kesto jos ei annettu
-    if duration_hours is None:
-        if intensity is None:
-            if activity_type in ["overnight_date", "mystery", "club_night"]:
-                intensity = random.uniform(0.6, 0.95)
-            elif activity_type in ["coffee", "lunch"]:
-                intensity = random.uniform(0.3, 0.6)
-            else:
-                intensity = random.uniform(0.4, 0.7)
- 
-        duration_hours = calculate_activity_duration(activity_type, intensity)
- 
-    now = time.time()
-    duration_seconds = duration_hours * 3600
-    end_time = now + duration_seconds
- 
-    # Päätä ignoorataanko
-    will_ignore = should_ignore_during_activity(activity_type)
- 
-    # ✅ KORJATTU: Tallenna activity_log käyttäen oikeaa transaktiorakennetta
-    profile = ACTIVITY_DURATIONS.get(activity_type, {
-        "duration_hours": 2.0,
-        "description": activity_type,
-        "ignore": False
-    })
- 
-    with db_lock:
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("""
-                INSERT INTO activity_log
-                (user_id, activity_type, started_at, duration_hours, description, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                str(user_id),
-                activity_type,
-                now,
-                duration_hours,
-                profile.get("description", activity_type),
-                json.dumps({"ignore": will_ignore})
-            ))
-            conn.commit()
-            print(f"[ACTIVITY LOG] Saved: {activity_type} for {duration_hours:.2f}h")
-        except Exception as e:
-            conn.rollback()
-            print(f"[ACTIVITY LOG ERROR] {e}")
-            raise
- 
-    # Päivitä temporal state
-    temporal["current_activity_started_at"] = now
-    temporal["current_activity_duration_planned"] = duration_seconds
-    temporal["current_activity_end_time"] = end_time
-    temporal["activity_type"] = activity_type
-    temporal["activity_intensity"] = intensity or 0.5
- 
-    if will_ignore:
-        temporal["should_ignore_until"] = end_time
-        temporal["ignore_reason"] = profile.get("description", activity_type)
-    else:
-        temporal["should_ignore_until"] = 0
-        temporal["ignore_reason"] = None
- 
-    # Tallenna kellonajat
-    start_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
-    end_dt = datetime.fromtimestamp(end_time, HELSINKI_TZ)
- 
-    print(f"[ACTIVITY START] '{activity_type}' at {start_dt.strftime('%H:%M')}")
-    print(f"[ACTIVITY] Duration: {duration_hours:.2f}h (until {end_dt.strftime('%H:%M')})")
-    print(f"[ACTIVITY] Will ignore: {will_ignore}")
- 
-    # Päivitä spontaneous_narrative
-    narrative = state.setdefault("spontaneous_narrative", {})
-    narrative["active"] = True
-    narrative["type"] = activity_type
-    narrative["started_at"] = now
-    narrative["ignore_duration"] = duration_seconds if will_ignore else 0
-    narrative["ignore_until_time_str"] = end_dt.strftime("%H:%M")
-    narrative["will_respond_during"] = not will_ignore
- 
-    return {
-        "activity": activity_type,
-        "duration_hours": duration_hours,
-        "will_ignore": will_ignore,
-        "end_time_str": end_dt.strftime("%H:%M")
-    }
- 
- 
-def get_temporal_context_for_llm(user_id: int) -> str:
-    """
-    Rakentaa temporaalisen kontekstin LLM:lle
-    """
-    state = get_or_create_state(user_id)
-    
-    # ✅ VARMISTA ETTÄ temporal ON DICT
-    temporal = state.get("temporal_state")
-    if not temporal or not isinstance(temporal, dict):
-        temporal = {}
-    
-    now = time.time()
-    current_dt = datetime.fromtimestamp(now, HELSINKI_TZ)
-    current_time_str = current_dt.strftime("%H:%M")
-    current_date_str = current_dt.strftime("%Y-%m-%d (%A)")
-    
-    context_parts = [
-        f"CURRENT TIME: {current_time_str}",
-        f"CURRENT DATE: {current_date_str}"
-    ]
-    
-    # Aika edellisestä viestistä (SAFE ACCESS)
-    time_since_minutes = temporal.get("time_since_last_message_minutes", 0)
-    if time_since_minutes > 0:
-        last_time = temporal.get("last_message_time_str", "")
-        hours = temporal.get("time_since_last_message_hours", 0)
-        
-        if hours >= 1:
-            context_parts.append(f"TIME SINCE LAST MESSAGE: {hours:.1f} hours (last at {last_time})")
-        else:
-            context_parts.append(f"TIME SINCE LAST MESSAGE: {time_since_minutes} minutes (last at {last_time})")
-    
-    # Aktiivinen aktiviteetti (SAFE ACCESS)
-    activity_started = temporal.get("current_activity_started_at", 0)
-    if activity_started > 0:
-        activity = temporal.get("activity_type", "unknown")
-        started_dt = datetime.fromtimestamp(activity_started, HELSINKI_TZ)
-        
-        activity_end = temporal.get("current_activity_end_time", 0)
-        if activity_end > 0:
-            end_dt = datetime.fromtimestamp(activity_end, HELSINKI_TZ)
-            
-            context_parts.append(f"CURRENT ACTIVITY: {activity}")
-            context_parts.append(f"Started at: {started_dt.strftime('%H:%M')}")
-            context_parts.append(f"Will end at: {end_dt.strftime('%H:%M')}")
-    
-    return "\n".join(context_parts)
- 
-# ====================== DYNAAMINEN KESTON VALINTA ======================
- 
-def calculate_activity_duration(activity_type: str, intensity: float = 0.5) -> float:
-    """
-    Laskee realistisen keston aktiviteetille
-    """
-    if activity_type not in ACTIVITY_DURATIONS:
-        print(f"[DURATION] Unknown activity '{activity_type}', using default 2h")
-        return 2.0
-    
-    profile = ACTIVITY_DURATIONS[activity_type]
-    
-    min_hours = profile.get("min_hours", profile.get("duration_hours", 1.0) * 0.5)
-    max_hours = profile.get("max_hours", profile.get("duration_hours", 2.0) * 1.5)
-    typical = profile.get("typical", profile.get("duration_hours", 2.0))
-    
-    # Lisää satunnaisuutta
-    randomness = random.uniform(-0.2, 0.2)
-    intensity = max(0.0, min(1.0, intensity + randomness))
-    
-    # Valitse kesto intensiteetin mukaan
-    if intensity < 0.3:
-        duration = min_hours + (typical - min_hours) * (intensity / 0.3)
-    elif intensity < 0.7:
-        duration = typical + (typical - min_hours) * (intensity - 0.5) * 0.5
-    else:
-        duration = typical + (max_hours - typical) * ((intensity - 0.7) / 0.3)
-    
-    # Pyöristä 15 minuutin tarkkuudella
-    duration = round(duration * 4) / 4
-    
-    print(f"[DURATION] {activity_type}: {duration:.2f}h (intensity: {intensity:.2f})")
-    return duration
- 
- 
-def should_ignore_during_activity(activity_type: str) -> bool:
-    """
-    Päättää satunnaisesti pitäisikö ignoorata aktiviteetin aikana
-    """
-    if activity_type not in ACTIVITY_DURATIONS:
-        return random.random() < 0.5
-    
-    profile = ACTIVITY_DURATIONS[activity_type]
-    # Käytä "ignore" kenttää jos olemassa, muuten ignore_probability
-    if "ignore" in profile:
-        ignore_decision = profile["ignore"]
-        # Lisää hieman satunnaisuutta
-        if ignore_decision:
-            ignore_prob = profile.get("ignore_probability", 0.8)
-        else:
-            ignore_prob = profile.get("ignore_probability", 0.3)
-    else:
-        ignore_prob = profile.get("ignore_probability", 0.5)
-    
-    should_ignore = random.random() < ignore_prob
-    
-    print(f"[IGNORE DECISION] {activity_type}: {ignore_prob:.0%} chance → {'IGNORE' if should_ignore else 'RESPOND'}")
-    return should_ignore
- 
-# ====================== JEALOUSY & PROVOCATION ENGINE ======================
- 
-# ====================== IGNORE RESPONSE GENERATOR ======================
- 
-# ====================== NARRATIVE TYPE CLASSIFIER ======================
- 
-def classify_narrative_type(activity_type: str) -> str:
-    """
-    Muuntaa activity_type → narrative_type
-    """
-    narrative_mapping = {
-        "coffee": "casual_update",
-        "shopping": "casual_update",
-        "gym": "casual_update",
-        "lunch": "casual_update",
-        "casual_date": "going_out",
-        "dinner": "going_out",
-        "bar": "going_out",
-        "party": "going_out",
-        "spa": "going_out",
-        "evening_date": "meeting_someone",
-        "club_night": "going_out",
-        "day_trip": "going_out",
-        "overnight_date": "meeting_someone",
-        "weekend_trip": "going_out",
-        "work": "casual_update",
-        "meeting": "casual_update",
-        "mystery": "mysterious_activity",
-        "busy": "casual_update"
-    }
-    
-    return narrative_mapping.get(activity_type, "casual_update")
- 
-# ====================== SPONTANEOUS NARRATIVE ======================
- 
-# ====================== IMAGE GENERATION ======================
- 
-async def generate_image_replicate(prompt: str):
-    """
-    Generate image using Replicate HTTP API (no SDK needed)
-    Uses Flux Pro v1.1 Ultra for best quality + NSFW support
-    """
-    try:
-        print(f"[REPLICATE] ===== IMAGE GENERATION START =====")
-        print(f"[REPLICATE] Prompt: {prompt[:200]}...")
-        
-        if not REPLICATE_API_KEY:
-            print("[REPLICATE ERROR] REPLICATE_API_TOKEN missing!")
-            return None
-        
-        # FLUX PRO v1.1 ULTRA - paras laatu + NSFW-tuki
-        model_version = "black-forest-labs/flux-1.1-pro-ultra"
-        
-        print(f"[REPLICATE] Using model: {model_version}")
-        
-        # Create prediction via HTTP API
-        create_url = "https://api.replicate.com/v1/predictions"
-        
-        payload = {
-            "version": model_version,
-            "input": {
-                "prompt": prompt,
-                "aspect_ratio": "1:1",
-                "output_format": "png",
-                "output_quality": 100,
-                "safety_tolerance": 6,
-                "prompt_upsampling": True
-            }
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {REPLICATE_API_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "wait"
-        }
-        
-        print(f"[REPLICATE] Creating prediction...")
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
-            # Create prediction
-            async with session.post(create_url, json=payload, headers=headers) as resp:
-                if resp.status != 201 and resp.status != 200:
-                    error_text = await resp.text()
-                    print(f"[REPLICATE ERROR] HTTP {resp.status}: {error_text[:500]}")
-                    return None
-                
-                data = await resp.json()
-                print(f"[REPLICATE] Prediction created: {data.get('id')}")
-                print(f"[REPLICATE] Status: {data.get('status')}")
-            
-            # If not completed, poll for result
-            prediction_id = data.get('id')
-            get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
-            
-            max_attempts = 60
-            attempt = 0
-            
-            while attempt < max_attempts:
-                if data.get('status') == 'succeeded':
-                    break
-                
-                if data.get('status') in ['failed', 'canceled']:
-                    print(f"[REPLICATE ERROR] Prediction {data.get('status')}: {data.get('error')}")
-                    return None
-                
-                await asyncio.sleep(2)
-                attempt += 1
-                
-                async with session.get(get_url, headers=headers) as resp:
-                    if resp.status != 200:
-                        print(f"[REPLICATE ERROR] Poll failed: HTTP {resp.status}")
-                        return None
-                    
-                    data = await resp.json()
-                    print(f"[REPLICATE] Status: {data.get('status')} (attempt {attempt}/{max_attempts})")
-            
-            if data.get('status') != 'succeeded':
-                print(f"[REPLICATE ERROR] Timeout after {max_attempts} attempts")
-                return None
-            
-            # Get output URL
-            output = data.get('output')
-            
-            if isinstance(output, str):
-                image_url = output
-            elif isinstance(output, list) and len(output) > 0:
-                image_url = output[0]
-            else:
-                print(f"[REPLICATE ERROR] Unexpected output format: {output}")
-                return None
-            
-            print(f"[REPLICATE] Image URL: {image_url[:100]}...")
-            
-            # Download image
-            async with session.get(image_url) as resp:
-                if resp.status != 200:
-                    print(f"[REPLICATE ERROR] Download failed: HTTP {resp.status}")
-                    return None
-                
-                image_bytes = await resp.read()
-                print(f"[REPLICATE] ✅ Downloaded {len(image_bytes)} bytes")
-                print(f"[REPLICATE] ===== IMAGE GENERATION SUCCESS =====")
-                return image_bytes
-        
-    except asyncio.TimeoutError:
-        print(f"[REPLICATE ERROR] Request timeout (180s)")
-        return None
-    except Exception as e:
-        print(f"[REPLICATE ERROR] {type(e).__name__}: {e}")
-        traceback.print_exc()
-        return None
- 
- 
-async def generate_image_venice(prompt: str):
-    """
-    Fallback: Venice API for image generation
-    """
-    try:
-        print(f"[VENICE] ===== IMAGE GENERATION START (FALLBACK) =====")
-        print(f"[VENICE] Prompt: {prompt[:200]}...")
-        
-        if not VENICE_API_KEY:
-            print("[VENICE ERROR] VENICE_API_KEY missing!")
-            return None
- 
-        payload = {
-            "prompt": prompt,
-            "model": "fluently-xl",
-            "width": 1024,
-            "height": 1024,
-            "num_images": 1
-        }
-        
-        endpoint = "https://api.venice.ai/v1/images/generations"
- 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
-            async with session.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {VENICE_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json=payload
-            ) as resp:
-                resp_text = await resp.text()
-                print(f"[VENICE] Response status: {resp.status}")
- 
-                if resp.status != 200:
-                    print(f"[VENICE ERROR] HTTP {resp.status}: {resp_text[:500]}")
-                    return None
- 
-                data = json.loads(resp_text)
-                items = data.get("data", [])
-                
-                if not items:
-                    print(f"[VENICE ERROR] No items in response")
-                    return None
- 
-                b64_image = items[0].get("b64_json")
-                if not b64_image:
-                    print(f"[VENICE ERROR] Missing b64_json")
-                    return None
- 
-                image_bytes = base64.b64decode(b64_image)
-                print(f"[VENICE] ✅ Generated {len(image_bytes)} bytes")
-                return image_bytes
- 
-    except Exception as e:
-        print(f"[VENICE ERROR] {type(e).__name__}: {e}")
-        return None
- 
- 
-# Main function: Try Replicate first, fallback to Venice
-async def generate_image(prompt: str, max_retries: int = 2):
-    """
-    Try Replicate first (best quality + NSFW support),
-    fallback to Venice if Replicate fails.
-    Retries up to max_retries times with 2s delay between attempts.
-    """
-    for attempt in range(max_retries):
-        try:
-            if REPLICATE_API_KEY:
-                print(f"[IMAGE] Trying Replicate API (attempt {attempt+1}/{max_retries})...")
-                result = await generate_image_replicate(prompt)
-                if result:
-                    return result
-                print("[IMAGE] Replicate failed, trying Venice fallback...")
- 
-            if VENICE_API_KEY:
-                print(f"[IMAGE] Using Venice API (attempt {attempt+1}/{max_retries})...")
-                result = await generate_image_venice(prompt)
-                if result:
-                    return result
- 
-        except Exception as e:
-            print(f"[IMAGE ERROR] Attempt {attempt+1}/{max_retries}: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2)
- 
-    print("[IMAGE ERROR] No image generation API available or all attempts failed!")
-    return None
- 
- 
-# ====================== HANDLE IMAGE REQUEST ======================
-def scene_to_setting(scene: str) -> str:
-    """Muuntaa scene-tilan kuvan taustan kuvaukseksi."""
-    mapping = {
-        "home":    "modern apartment living room, stylish Scandinavian interior",
-        "bed":     "bedroom, near bed, soft warm intimate lighting",
-        "work":    "modern office or workspace, clean professional environment",
-        "public":  "city street or trendy café, urban background",
-        "commute": "urban transit setting, train station or tram",
-        "shower":  "bathroom, soft steam, clean minimal setting",
-        "neutral": "simple neutral indoor background, soft diffused light",
-    }
-    return mapping.get(scene, "modern apartment, simple neutral indoor background")
- 
- 
-def build_image_prompt(
-    outfit: str,
-    setting: str,
-    pose: str = "standing, confident, weight on one leg, hand on hip",
-    camera: str = "full body, 4-5m distance, portrait format, head and feet visible",
-    mood: str = "confident, seductive, natural",
-    angle: str = "slight 3/4 angle",
-    conversation_context: str = "",
-    # Legacy params for compatibility
-    outfit_context: str = None,
-    setting_context: str = None,
-    camera_distance: str = None,
-    camera_angle: str = None,
-    pose_override: str = None,
-    clothing_override: str = None,
-    mood_note: str = None,
-) -> str:
-    """Rakentaa kuvapromptin rakenteisesti. Lyhyt ja selkeä."""
-    # Yhteensopivuus vanhojen parametrien kanssa
-    if outfit_context and not outfit:
-        outfit = outfit_context
-    if setting_context and not setting:
-        setting = setting_context
-    if pose_override:
-        pose = pose_override
-    if clothing_override:
-        outfit = clothing_override
-    if mood_note:
-        mood = mood_note
-    if camera_angle:
-        angle = camera_angle
-    if camera_distance:
-        camera = f"full body, {camera_distance}, portrait format, head and feet visible"
- 
-    return f"""Photorealistic full-body portrait photograph.
- 
-SCENE:
-{setting}
- 
-SUBJECT:
-Tall athletic Finnish woman, 175cm. Platinum blonde hair (long, straight, mid-back). Blue-green eyes, smoky makeup. Large natural breasts (D-cup), slim waist, long toned legs, round ass. Fair Nordic skin. Dominant confident presence.
- 
-OUTFIT:
-{outfit}
- 
-POSE:
-{pose}
- 
-MOOD:
-{mood}
- 
-CAMERA:
-{camera}
-Angle: {angle}
-Lens: 35-50mm natural perspective, slight background blur
- 
-CONSTRAINTS:
-- Full body visible from head to feet - mandatory
-- Feet visible at bottom of frame
-- No cropping at waist, hips or knees
-- Subject occupies 70-85% of frame height
-- Portrait/vertical format
-- No extra people in frame
-- Outfit and setting exactly as specified - do not substitute
- 
-STYLE:
-Ultra-realistic 8K photography, cinematic lighting, editorial quality
-"""
- 
- 
-# ====================== IMAGE VISION ANALYSIS ======================
- 
-async def analyze_generated_image(image_bytes: bytes, user_request: str, state: dict) -> dict:
-    """
-    Analysoi valmiin generoivan kuvan vision-mallilla.
-    Palauttaa rakenteisen kuvauksen siita mita kuvassa oikeasti nakyy.
-    """
-    default = {
-        "summary": "",
-        "visible_outfit": "",
-        "visible_setting": "",
-        "pose": "",
-        "mood": "",
-        "notable_details": [],
-        "matches_request": True,
-        "caption_seed": ""
-    }
- 
-    try:
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        conv_mode = state.get("conversation_mode", "casual")
-        submission = state.get("submission_level", 0.0)
- 
-        prompt = f"""Return JSON only. No markdown, no explanation.
- 
-Schema:
-{{
-  "summary": "1-2 lause suomeksi: mita kuvassa nakyy",
-  "visible_outfit": "mita vaatteita kuvassa oikeasti nakyy",
-  "visible_setting": "mika tausta tai paikka kuvassa nakyy",
-  "pose": "mika asento tai ele kuvassa nakyy",
-  "mood": "mika fiilis tai ilme kuvasta valittaa",
-  "notable_details": ["huomattava yksityiskohta 1", "huomattava yksityiskohta 2"],
-  "matches_request": true,
-  "caption_seed": "yksi luonnollinen suomenkielinen lause jota Megan voisi sanoa lahettaessaan juuri taman kuvan"
-}}
- 
-Conversation mode: {conv_mode}
-Submission level: {submission:.2f}
-User originally asked: {user_request[:200]}
- 
-Analyze the ACTUAL image. Be concrete and specific.
-caption_seed should feel natural for Megan - dominant, direct, not generic.
-If mode is nsfw or submission is high, caption_seed can be more provocative."""
- 
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{b64}",
-                            "detail": "low"
-                        }
-                    }
-                ]
-            }],
-            max_tokens=350,
-            temperature=0.2
-        )
- 
-        raw = (resp.choices[0].message.content or "{}").strip()
-        result = parse_json_object(raw, default)
-        print(f"[VISION] outfit={result.get('visible_outfit','?')[:50]}")
-        print(f"[VISION] setting={result.get('visible_setting','?')[:50]}")
-        print(f"[VISION] mood={result.get('mood','?')[:40]}")
-        return result
- 
-    except Exception as e:
-        print(f"[IMAGE ANALYSIS ERROR] {e}")
-        return default
- 
- 
-async def generate_image_commentary(user_id: int, analysis: dict, state: dict, user_request: str) -> str:
-    """
-    Generoi Meganille luonnollinen kommentti kuvasta sen analyysin perusteella.
-    Ei random fraaseja - perustuu siihen mita kuvassa oikeasti nakyy.
-    """
-    conversation_mode = state.get("conversation_mode", "casual")
-    submission_level = state.get("submission_level", 0.0)
- 
-    # Jos analyysi on tyhja, kayta caption_seed suoraan
-    caption_seed = analysis.get("caption_seed", "")
-    if not analysis.get("summary") and caption_seed:
-        return caption_seed
- 
-    prompt = f"""Write one short natural Finnish line Megan would say when sending her own photo.
- 
-Rules:
-- Comment on the ACTUAL image content, not generic phrases
-- Be specific - mention something concrete from the image analysis
-- Tone fits mode: {conversation_mode} (submission: {submission_level:.2f})
-- If nsfw/submission high: can be provocative and direct
-- If casual/romantic: warm but still confident
-- Max 1-2 sentences, feel natural and human
-- No hollow filler like "tassa sulle" as the only content
- 
-Image analysis:
-- Outfit: {analysis.get('visible_outfit', 'not analyzed')}
-- Setting: {analysis.get('visible_setting', 'not analyzed')}
-- Pose: {analysis.get('pose', 'not analyzed')}
-- Mood/vibe: {analysis.get('mood', 'not analyzed')}
-- Notable details: {', '.join(analysis.get('notable_details', [])[:3])}
-- Summary: {analysis.get('summary', '')}
- 
-Original request: {user_request[:100]}
-Caption seed idea: {caption_seed}"""
- 
-    try:
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=80,
-            temperature=0.9
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        if text:
-            return text
-        return caption_seed or "Mita sä tykkaat? 😏"
-    except Exception as e:
-        print(f"[IMAGE COMMENT ERROR] {e}")
-        return caption_seed or "Mita sä tykkaat? 😏"
- 
- 
-async def reanalyze_last_sent_image(bot, state: dict) -> dict:
-    """Lataa ja analysoi viimeksi lahetetyn kuvan Telegram file_id:n avulla."""
-    file_id = (state.get("last_image") or {}).get("telegram_file_id")
-    if not file_id:
-        return None
-    try:
-        tg_file = await bot.get_file(file_id)
-        data = await tg_file.download_as_bytearray()
-        return await analyze_generated_image(bytes(data), "Reanalyze last sent image", state)
-    except Exception as e:
-        print(f"[REANALYZE ERROR] {e}")
-        return None
- 
- 
-async def extract_visual_intent(user_id: int, text: str, recent_turns: list, state: dict) -> dict:
-    """
-    LLM parsii kuvapyynnon rakenteiseksi JSON:ksi ennen generointia.
-    Tunnistaa vaat., taustan, asennon, tunnelman, kameran.
-    """
-    default = {
-        "setting": None,
-        "outfit": None,
-        "pose": None,
-        "camera": "full body, 4-5m distance",
-        "mood": "confident, seductive, natural",
-        "angle": "slight 3/4 angle",
-        "use_previous_look": False,
-        "must_keep": [],
-        "must_avoid": [],
-        "explicit_request": text,
-    }
- 
-    recent_text = "\n".join([
-        f"{tr['role']}: {tr['content'][:100]}" for tr in recent_turns[-4:]
-    ]) if recent_turns else ""
- 
-    scene = state.get("scene", "home")
-    conv_mode = state.get("conversation_mode", "casual")
-    last_image = state.get("last_image") or {}
- 
-    prompt = f"""Return JSON only. No markdown, no explanation.
- 
-Schema:
-{{
-  "setting": "describe the physical location/background for the photo, or null",
-  "outfit": "describe exact clothing/outfit, or null to keep previous",
-  "pose": "describe body pose, or null for natural standing",
-  "camera": "camera distance and framing note",
-  "mood": "emotional tone and expression",
-  "angle": "camera angle",
-  "use_previous_look": false,
-  "must_keep": ["list of visual elements to keep from previous"],
-  "must_avoid": ["list of things to avoid"],
-  "explicit_request": "brief summary of what user actually asked for"
-}}
- 
-Context:
-- Current scene: {scene}
-- Conversation mode: {conv_mode}
-- Previous outfit: {last_image.get("context", "none")}
-- Previous setting: {last_image.get("setting", "none")}
- 
-Recent conversation:
-{recent_text}
- 
-User's image request:
-{text}
- 
-Rules:
-- If user says "sama/same/edellinen", set use_previous_look=true
-- If user mentions specific colors, materials (leather, latex, silk), include them in outfit
-- If user mentions location (ranta/beach, metsä/forest, hotelli/hotel, parveke/balcony), set it as setting
-- If user mentions pose (seisoo/standing, makaa/lying, istuu/sitting), set it as pose
-- outfit null = use previous or scene-appropriate default
-- setting null = use previous or scene-appropriate default
-- Be specific and visual in descriptions"""
- 
-    try:
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300,
-            temperature=0.1
-        )
-        raw = (resp.choices[0].message.content or "{}").strip()
-        result = parse_json_object(raw, default)
-        result["explicit_request"] = text
-        print(f"[VISUAL INTENT] outfit={result.get('outfit', 'null')[:50] if result.get('outfit') else 'null'}")
-        print(f"[VISUAL INTENT] setting={result.get('setting', 'null')[:50] if result.get('setting') else 'null'}")
-        print(f"[VISUAL INTENT] use_previous={result.get('use_previous_look')}")
-        return result
-    except Exception as e:
-        print(f"[VISUAL INTENT ERROR] {e}")
-        return default
- 
- 
-async def handle_image_request(update: Update, user_id: int, text: str):
-    """
-    Generoi kontekstuaalisen kuvan.
-    Viesti on jo tallennettu muistiin ennen tätä kutsua (handle_message korjattu).
-    """
-    state = get_or_create_state(user_id)
-    t = text.lower()
- 
-    submission_level = state.get("submission_level", 0.0)
-    conversation_mode = state.get("conversation_mode", "casual")
-    scene = state.get("scene", "home")
-    last_image = state.get("last_image") or {}
- 
-    # Hae viimeisimmät turnit - ne on nyt tallennettu ennen tätä kutsua
-    recent_turns = get_recent_turns(user_id, limit=5)
- 
-    # --- VISUAL INTENT EXTRACTOR ---
-    # LLM parsii kuvapyynnon rakenteiseksi JSONiksi
-    intent = await extract_visual_intent(user_id, text, recent_turns, state)
- 
-    use_prev = intent.get("use_previous_look", False)
- 
-    # --- OUTFIT ---
-    # Prioriteetti: 1) explicit intent, 2) previous if requested, 3) scene default
-    if intent.get("outfit"):
-        outfit = intent["outfit"]
-    elif use_prev and last_image.get("context"):
-        outfit = last_image["context"]
-        print(f"[IMAGE] Reusing previous outfit: {outfit[:60]}")
-    else:
-        # Scene-pohjaiset defaultit - nahka/latex painotettu
-        scene_defaults = {
-            "home":    "glossy black latex leggings + fitted black crop top, casual dominant look",
-            "bed":     "black lace lingerie: sheer bralette and high-cut panties, seductive",
-            "work":    "high-waist black latex leggings + fitted white blouse + blazer, professional dominant",
-            "public":  "black leather pants + elegant fitted top + ankle boots, street chic",
-            "commute": "black latex leggings + leather jacket, effortlessly dominant",
-            "shower":  "white towel wrapped elegantly, fresh after shower",
-            "neutral": "glossy black latex leggings + black crop top, sleek and dominant",
-        }
-        # nsfw-modessa vähemmän vaatteita
-        if conversation_mode == "nsfw" and submission_level > 0.4:
-            outfit = "black lace lingerie: minimal and seductive, latex or sheer details"
-        else:
-            outfit = scene_defaults.get(scene, "glossy black latex leggings + fitted black top")
- 
-    # --- SETTING ---
-    if intent.get("setting"):
-        setting = intent["setting"]
-    elif use_prev and last_image.get("setting"):
-        setting = last_image["setting"]
-    else:
-        setting = scene_to_setting(scene)
- 
-    # --- POSE ---
-    pose = intent.get("pose") or "standing, confident, weight on one leg, hand on hip, direct eye contact"
- 
-    # --- CAMERA ---
-    camera = intent.get("camera") or "full body, 4-5m distance, portrait format, head and feet visible"
- 
-    # --- MOOD ---
-    mood_map = {
-        "nsfw":       "overtly seductive, dominant, intense eye contact",
-        "suggestive": "playfully seductive, confident knowing smile",
-        "romantic":   "warm, intimate, soft inviting expression",
-        "casual":     "confident, natural, effortlessly attractive",
-    }
-    mood = intent.get("mood") or mood_map.get(conversation_mode, "confident, seductive, natural")
- 
-    # --- ANGLE ---
-    angle = intent.get("angle") or "slight 3/4 angle for natural depth"
- 
-    # --- PROMPTI ---
-    base_prompt = build_image_prompt(
-        outfit=outfit,
-        setting=setting,
-        pose=pose,
-        camera=camera,
-        mood=mood,
-        angle=angle,
-    )
- 
-    await update.message.reply_text("Hetki, otan kuvan... 📸")
-    print(f"[IMAGE] Generating | outfit: {outfit[:70]} | setting: {setting[:50]}")
- 
-    try:
-        image_bytes = await generate_image(base_prompt)
-        if not image_bytes:
-            await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
-            return
-    except Exception as e:
-        print(f"[IMAGE ERROR] {e}")
-        await update.message.reply_text(f"Virhe: {str(e)}")
-        return
- 
-    # Analysoi valmis kuva vision-mallilla
-    print("[IMAGE] Analyzing generated image with vision...")
-    analysis = await analyze_generated_image(image_bytes, text, state)
- 
-    # Generoi kommentti analyysin pohjalta - ei random fraaseja
-    caption = await generate_image_commentary(user_id, analysis, state, text)
- 
-    # Laheta kuva
-    telegram_file_id = None
-    try:
-        sent_msg = await update.message.reply_photo(
-            photo=BytesIO(image_bytes),
-            caption=caption
-        )
-        # Tallenna Telegram file_id myohempaa kayttoa varten
-        if sent_msg and sent_msg.photo:
-            telegram_file_id = sent_msg.photo[-1].file_id
-        print(f"[IMAGE] Sent OK - {len(image_bytes)} bytes | file_id: {telegram_file_id}")
-    except Exception as e:
-        print(f"[IMAGE ERROR] Send failed: {e}")
-        await update.message.reply_text(f"Lahetysvirhe: {str(e)}")
-        return
- 
-    # Tallenna viimeisin kuva muistiin - sisaltaa nyt analyysin ja file_id:n
-    state["last_image"] = {
-        "prompt": base_prompt,
-        "user_request": text,
-        "context": outfit,
-        "setting": setting,
-        "mood": mood,
-        "timestamp": time.time(),
-        "telegram_file_id": telegram_file_id,
-        "analysis": analysis,
-        "caption": caption,
-    }
-    state.setdefault("image_history", []).append(state["last_image"])
-    state["image_history"] = state["image_history"][-20:]
- 
-    await store_episodic_memory(
-        user_id=user_id,
-        content=json.dumps({
-            "type": "image_sent",
-            "outfit": analysis.get("visible_outfit") or outfit,
-            "setting": analysis.get("visible_setting") or setting,
-            "mood": analysis.get("mood") or mood,
-            "summary": analysis.get("summary", ""),
-            "caption": caption,
-            "mode": conversation_mode,
-            "user_request": text[:100],
-        }, ensure_ascii=False),
-        memory_type="image_sent",
-    )
- 
- 
-# ====================== PROAKTIIVINEN KUVA ======================
- 
-def should_send_proactive_image(user_id: int) -> tuple:
-    """
-    Päättää lähettääkö Megan kuvan oma-aloitteisesti.
-    Palauttaa (should_send: bool, reason: str, mood: str)
- 
-    Tilanteet joissa kuva sopii:
-    - Käyttäjä on ollut hiljaa pitkään -> "näin sua mielessäni"
-    - Tunnelma on suggestive/nsfw -> provosointi
-    - Submission_level korkea -> dominoiva kuva
-    - Riita tai etäisyys -> "katso mitä jätät"
-    - Conversation kävi intiimiksi -> jatketaan tunnelmaa
-    """
-    state = get_or_create_state(user_id)
-    now = time.time()
- 
-    # Cooldown - max 1 proaktiivinen kuva per 4h
-    last_proactive_img = state.get("last_proactive_image_at", 0)
-    if now - last_proactive_img < 4 * 3600:
-        return False, None, None
- 
-    last_interaction = state.get("last_interaction", now)
-    hours_since = (now - last_interaction) / 3600
-    conversation_mode = state.get("conversation_mode", "casual")
-    submission_level = state.get("submission_level", 0.0)
-    tension = state.get("tension", 0.0)
- 
-    # Tilanne 1: pitkä hiljaisuus (2-8h) + aiempi hyvä tunnelma
-    if 2 < hours_since < 8 and conversation_mode in ("suggestive", "nsfw", "romantic"):
-        return True, "silence_after_intimacy", "teasing"
- 
-    # Tilanne 2: korkea submission + nsfw mode
-    if submission_level > 0.6 and conversation_mode == "nsfw" and random.random() < 0.3:
-        return True, "high_submission", "dominant"
- 
-    # Tilanne 3: tension korkea (esim. riita, mustasukkaisuus)
-    if tension > 0.6 and random.random() < 0.2:
-        return True, "high_tension", "provocative"
- 
-    # Tilanne 4: suggestive mode + riittävästi aikaa (30min+)
-    if conversation_mode == "suggestive" and hours_since > 0.5 and random.random() < 0.15:
-        return True, "suggestive_mode", "seductive"
- 
-    return False, None, None
- 
- 
-async def maybe_send_proactive_image(application, user_id: int):
-    """Lähettää proaktiivisen kuvan jos tilanne sopii."""
-    should_send, reason, mood = should_send_proactive_image(user_id)
-    if not should_send:
-        return
- 
-    state = get_or_create_state(user_id)
-    scene = state.get("scene", "home")
-    last_image = state.get("last_image") or {}
- 
-    # Valitse asu ja tunnelma tilanteen mukaan
-    mood_configs = {
-        "teasing": {
-            "outfit": last_image.get("context") or "black fitted jeans and elegant top, effortlessly stylish",
-            "setting": scene_to_setting(scene),
-            "captions": ["Mietin sua 💭", "Katso mitä teet mulle 😏", "Hei kulta... 💕"],
-            "mood_note": "teasing smile, playful confident expression",
-        },
-        "dominant": {
-            "outfit": "dominatrix-inspired: black leather or latex, commanding presence",
-            "setting": "modern apartment, dramatic lighting",
-            "captions": ["Tässä nyt oot 😏", "Katso ja kärsi 💕", "Miltä näyttää? 😘"],
-            "mood_note": "dominant, intense, direct eye contact, powerful stance",
-        },
-        "provocative": {
-            "outfit": last_image.get("context") or "tight black dress, date outfit, seductive",
-            "setting": scene_to_setting(scene),
-            "captions": ["Menossa ulos... 😏", "Otin kuvan kun muistin sut 💕", "Mitä sä tekisit? 😘"],
-            "mood_note": "provocative, slightly distant, going out energy",
-        },
-        "seductive": {
-            "outfit": "elegant lingerie or minimal chic outfit, seductive",
-            "setting": scene_to_setting("bed") if scene in ("bed", "home") else scene_to_setting(scene),
-            "captions": ["Ajattelin sua... 💕", "Hei 😘", "Näin unta sinusta 💭"],
-            "mood_note": "seductive, warm, intimate expression",
-        },
-    }
- 
-    config = mood_configs.get(mood, mood_configs["teasing"])
-    recent_turns = get_recent_turns(user_id, limit=3)
-    conv_ctx = "\n".join([f"{tr['role']}: {tr['content'][:100]}" for tr in recent_turns])
- 
-    base_prompt = build_image_prompt(
-        outfit_context=config["outfit"],
-        setting_context=config["setting"],
-        conversation_context=conv_ctx,
-        mood_note=config["mood_note"],
-    )
- 
-    print(f"[PROACTIVE IMAGE] Sending - reason: {reason}, mood: {mood}")
- 
-    try:
-        image_bytes = await generate_image(base_prompt)
-        if not image_bytes:
-            print(f"[PROACTIVE IMAGE] Generation failed")
-            return
- 
-        # Vision-analyysi ja AI-kommentti myos proaktiiviselle kuvalle
-        analysis = await analyze_generated_image(image_bytes, f"proactive_{reason}", state)
-        caption = await generate_image_commentary(user_id, analysis, state, f"proactive_{reason}")
-        # Jos AI-kommentti epaonnistuu, kayta vararivi config:sta
-        if not caption:
-            caption = random.choice(config["captions"])
- 
-        telegram_file_id = None
-        sent_msg = await application.bot.send_photo(
-            chat_id=user_id,
-            photo=BytesIO(image_bytes),
-            caption=caption
-        )
-        if sent_msg and sent_msg.photo:
-            telegram_file_id = sent_msg.photo[-1].file_id
-        print(f"[PROACTIVE IMAGE] Sent: {caption[:60]}")
- 
-        # Paivita tila
-        state["last_proactive_image_at"] = time.time()
-        state["last_image"] = {
-            "prompt": base_prompt,
-            "user_request": f"proactive_{reason}",
-            "context": analysis.get("visible_outfit") or config["outfit"],
-            "setting": analysis.get("visible_setting") or config["setting"],
-            "mood": mood,
-            "timestamp": time.time(),
-            "telegram_file_id": telegram_file_id,
-            "analysis": analysis,
-            "caption": caption,
-        }
-        state.setdefault("image_history", []).append(state["last_image"])
-        state["image_history"] = state["image_history"][-20:]
- 
-        await store_episodic_memory(
-            user_id=user_id,
-            content=json.dumps({
-                "type": "proactive_image",
-                "reason": reason,
-                "mood": mood,
-                "caption": caption,
-                "summary": analysis.get("summary", ""),
-            }, ensure_ascii=False),
-            memory_type="image_sent",
-        )
- 
-    except Exception as e:
-        print(f"[PROACTIVE IMAGE ERROR] {e}")
- 
- 
-# ====================== EXTRACTOR ======================
+# ====================== FRAME EXTRACTOR (CLAUDE SONNET 4.6 - kevyempi malli) ======================
 async def extract_turn_frame(user_id: int, user_text: str):
     recent_turns = get_recent_turns(user_id, limit=8)
     active_plans = get_active_plans(user_id, limit=3)
@@ -3805,20 +1715,12 @@ async def extract_turn_frame(user_id: int, user_text: str):
     plans_text = "\n".join([f"- {p['description']}" for p in active_plans]) if active_plans else "none"
  
     default = {
-        "topic": "general",
-        "topic_changed": False,
-        "topic_summary": "",
-        "open_questions": [],
-        "open_loops": [],
-        "plans": [],
-        "facts": [],
-        "memory_candidates": [],
-        "scene_hint": None,
-        "fantasies": []
+        "topic": "general", "topic_changed": False, "topic_summary": "",
+        "open_questions": [], "open_loops": [], "plans": [], "facts": [],
+        "memory_candidates": [], "scene_hint": None, "fantasies": []
     }
  
-    prompt = f"""
-Analyze the latest user turn and return JSON only.
+    prompt = f"""Analyze the latest user turn and return JSON only.
  
 Schema:
 {{
@@ -3827,38 +1729,19 @@ Schema:
   "topic_summary": "one sentence",
   "open_questions": ["..."],
   "open_loops": ["..."],
-  "plans": [
-    {{
-      "description": "...",
-      "due_hint": "...",
-      "commitment_strength": "strong|medium"
-    }}
-  ],
-  "facts": [
-    {{
-      "fact_key": "...",
-      "fact_value": "...",
-      "confidence": 0.0
-    }}
-  ],
+  "plans": [{{"description": "...", "due_hint": "...", "commitment_strength": "strong|medium"}}],
+  "facts": [{{"fact_key": "...", "fact_value": "...", "confidence": 0.0}}],
   "memory_candidates": ["..."],
   "scene_hint": "home|work|commute|public|bed|shower|null",
-  "fantasies": [
-    {{
-      "description": "...",
-      "category": "dominance|humiliation|pegging|chastity|cuckold|other"
-    }}
-  ]
+  "fantasies": [{{"description": "...", "category": "dominance|humiliation|pegging|chastity|cuckold|other"}}]
 }}
  
 Rules:
-- topic_changed=true only if the topic really changes
-- facts should only include reusable user facts/preferences
-- plans should only include future commitments or likely follow-ups
-- open_loops are unresolved promises/questions
-- scene_hint only if user clearly indicates location/activity
-- fantasies: extract ANY sexual desires, kinks, or fantasies mentioned
-- categorize fantasies for later retrieval and dominance play
+- topic_changed=true only if topic really changes
+- facts: only reusable user facts/preferences
+- plans: future commitments or likely follow-ups
+- scene_hint: only if user clearly indicates location
+- fantasies: ANY sexual desires or kinks mentioned
  
 Active plans:
 {plans_text}
@@ -3867,87 +1750,24 @@ Recent turns:
 {recent_text}
  
 Latest user turn:
-{user_text}
-"""
+{user_text}"""
  
-    # KORJATTU FALLBACK-KETJU
-    providers = []
-    
-    if ANTHROPIC_API_KEY:
-        providers.append("claude")
-    if XAI_API_KEY and grok_client:
-        providers.append("grok")
-    providers.append("openai")  # Aina fallback
-    
-    for provider in providers:
-        try:
-            if provider == "claude":
-                client = get_claude_client()
-                if not client:
-                    print(f"[FRAME] Claude client not available, skipping")
-                    continue
-                
-                response = await client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=400,
-                    temperature=0.2,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                # ✅ SAFE ACCESS
-                if response.content and len(response.content) > 0:
-                    raw = response.content[0].text
-                    if raw:
-                        raw = raw.strip()
-                    else:
-                        raw = "{}"
-                else:
-                    raw = "{}"
-                print(f"[FRAME] ✅ Claude extracted frame")
-            
-            elif provider == "grok":
-                response = await grok_client.chat.completions.create(
-                    model="grok-4-1-fast",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.2
-                )
-                # ✅ SAFE ACCESS
-                raw = response.choices[0].message.content
-                if raw:
-                    raw = raw.strip()
-                else:
-                    raw = "{}"
-                print(f"[FRAME] ✅ Grok extracted frame")
-            
-            else:  # openai
-                response = await openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.2
-                )
-                # ✅ SAFE ACCESS
-                raw = response.choices[0].message.content
-                if raw:
-                    raw = raw.strip()
-                else:
-                    raw = "{}"
-                print(f"[FRAME] ✅ OpenAI extracted frame")
-            
-            # Jos päästiin tänne, kutsu onnistui
-            frame = parse_json_object(raw, default)
-            frame["user_text"] = user_text
-            return frame
-        
-        except Exception as e:
-            print(f"[FRAME] ❌ {provider} failed: {type(e).__name__}: {str(e)[:100]}")
-            continue  # Kokeile seuraavaa provideria
-    
-    # Jos kaikki epäonnistuivat
-    print(f"[FRAME] ⚠️ All providers failed, using default")
-    default["user_text"] = user_text
-    return default
+    # Käytä kevyempää Sonnet 4.6 -mallia frame extractille
+    raw = await call_llm(
+        user_prompt=prompt,
+        max_tokens=500,
+        temperature=0.2,
+        prefer_light=True,
+        json_mode=True
+    )
  
+    if not raw:
+        default["user_text"] = user_text
+        return default
+ 
+    frame = parse_json_object(raw, default)
+    frame["user_text"] = user_text
+    return frame
  
 def apply_scene_updates_from_turn(state: dict, user_text: str):
     now = time.time()
@@ -3957,18 +1777,14 @@ def apply_scene_updates_from_turn(state: dict, user_text: str):
     maybe_interrupt_action(state, user_text)
     update_action(state, now)
  
- 
 async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
     state = get_or_create_state(user_id)
  
     update_topic_state(user_id, frame)
-    
     resolve_open_loops(user_id, frame.get("user_text", ""), frame)
-    
     save_topic_state_to_db(user_id)
  
-    facts = frame.get("facts", []) or []
-    for fact in facts[:8]:
+    for fact in frame.get("facts", [])[:8]:
         upsert_profile_fact(
             user_id=user_id,
             fact_key=fact.get("fact_key", ""),
@@ -3977,33 +1793,22 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
             source_turn_id=source_turn_id
         )
  
-    plans = frame.get("plans", []) or []
-    for plan in plans[:5]:
+    for plan in frame.get("plans", [])[:5]:
         upsert_plan(user_id, plan, source_turn_id=source_turn_id)
  
-    memory_candidates = frame.get("memory_candidates", []) or []
-    for mem in memory_candidates[:4]:
-        await store_episodic_memory(
-            user_id=user_id,
-            content=mem,
-            memory_type="event",
-            source_turn_id=source_turn_id
-        )
+    for mem in frame.get("memory_candidates", [])[:4]:
+        await store_episodic_memory(user_id=user_id, content=mem, memory_type="event", source_turn_id=source_turn_id)
  
-    fantasies = frame.get("fantasies", []) or []
-    for fantasy in fantasies[:3]:
+    for fantasy in frame.get("fantasies", [])[:3]:
         await store_episodic_memory(
-            user_id=user_id,
-            content=fantasy.get("description", ""),
-            memory_type="fantasy",
-            source_turn_id=source_turn_id
+            user_id=user_id, content=fantasy.get("description", ""),
+            memory_type="fantasy", source_turn_id=source_turn_id
         )
         upsert_profile_fact(
             user_id=user_id,
             fact_key=f"fantasy_{fantasy.get('category', 'general')}",
             fact_value=fantasy.get("description", ""),
-            confidence=0.9,
-            source_turn_id=source_turn_id
+            confidence=0.9, source_turn_id=source_turn_id
         )
  
     scene_hint = frame.get("scene_hint")
@@ -4011,11 +1816,9 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
         _set_scene(state, scene_hint, time.time())
         state["micro_context"] = random.choice(SCENE_MICRO[scene_hint])
  
-    # Tallenna sopimukset automaattisesti
     extract_agreements_from_frame(user_id, frame, frame.get("user_text", ""))
  
- 
-# ====================== CONTEXT PACK BUILDER ======================
+# ====================== CONTEXT PACK ======================
 async def build_context_pack(user_id: int, user_text: str):
     state = get_or_create_state(user_id)
  
@@ -4043,36 +1846,24 @@ async def build_context_pack(user_id: int, user_text: str):
         "temporal_context": build_temporal_context(state)
     }
  
- 
 def format_context_pack(context_pack: dict):
     topic_state = context_pack.get("topic_state", {})
-    topic = topic_state.get("current_topic", "general")
-    topic_summary = topic_state.get("topic_summary", "")
-    open_questions = topic_state.get("open_questions", [])
-    open_loops = topic_state.get("open_loops", [])
- 
-    profile_lines = "\n".join(
-        [f"- {f['fact_key']}: {f['fact_value']}" for f in context_pack.get("profile_facts", [])]
-    ) or "- none"
- 
-    turns_lines = "\n".join(
-        [f"{t['role']}: {t['content']}" for t in context_pack.get("recent_turns", [])]
-    )
- 
+    profile_lines = "\n".join([f"- {f['fact_key']}: {f['fact_value']}" for f in context_pack.get("profile_facts", [])]) or "- none"
+    turns_lines = "\n".join([f"{t['role']}: {t['content']}" for t in context_pack.get("recent_turns", [])])
     narrative_timeline = context_pack.get("narrative_timeline", "")
  
     return f"""
 {narrative_timeline}
  
 =====================================
-CURRENT TOPIC: {topic}
-TOPIC SUMMARY: {topic_summary if topic_summary else "No summary yet."}
+CURRENT TOPIC: {topic_state.get('current_topic', 'general')}
+TOPIC SUMMARY: {topic_state.get('topic_summary', 'No summary yet.')}
  
 OPEN QUESTIONS:
-{chr(10).join('- ' + q for q in open_questions) if open_questions else '- none'}
+{chr(10).join('- ' + q for q in topic_state.get('open_questions', [])) if topic_state.get('open_questions') else '- none'}
  
 OPEN LOOPS:
-{chr(10).join('- ' + q for q in open_loops) if open_loops else '- none'}
+{chr(10).join('- ' + q for q in topic_state.get('open_loops', [])) if topic_state.get('open_loops') else '- none'}
  
 SCENE: {context_pack.get('scene')}
 MICRO CONTEXT: {context_pack.get('micro_context')}
@@ -4089,72 +1880,36 @@ RECENT TURNS:
 {turns_lines}
 """
  
- 
-# ====================== GENERATE LLM REPLY ======================
- 
- 
-# ====================== ANTI-JANKKAAJA ======================
- 
-def normalize_text(s: str) -> str:
-    """Normalisoi teksti samankaltaisuusvertailua varten."""
-    s = s.lower()
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[^\w\s]", "", s)
-    return s.strip()
- 
- 
-def too_similar(a: str, b: str, threshold: float = 0.72) -> bool:
-    """Tarkistaa ovatko kaksi vastausta liian samankaltaisia."""
-    aw = set(normalize_text(a).split())
-    bw = set(normalize_text(b).split())
-    if not aw or not bw:
-        return False
-    overlap = len(aw & bw) / len(aw | bw)
-    return overlap > threshold
- 
- 
-# ====================== TURN ANALYSIS =======================
- 
+# ====================== TURN ANALYSIS ======================
 async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict) -> dict:
-    """
-    Analysoi käyttäjän viestin ennen varsinaista vastausta.
-    Tämä on se "miettii mitä käyttäjä tarkoittaa" -vaihe.
-    """
     default = {
-        "primary_intent": "chat",
-        "topic": "general",
-        "what_user_wants_now": user_text,
-        "explicit_constraints": [],
-        "user_is_correcting_bot": False,
-        "should_change_course": False,
-        "tone_needed": "direct",
-        "answer_first": user_text,
-        "signal_type": "normal"
+        "primary_intent": "chat", "topic": "general",
+        "what_user_wants_now": user_text, "explicit_constraints": [],
+        "user_is_correcting_bot": False, "should_change_course": False,
+        "tone_needed": "direct", "answer_first": user_text, "signal_type": "normal"
     }
  
-    # Nopea luokittelu ilman LLM-kutsua
     signal = classify_user_signal(user_text)
     default["signal_type"] = signal
  
     if signal == "boundary":
-        default["primary_intent"] = "boundary"
-        default["should_change_course"] = True
-        default["tone_needed"] = "warm"
-        default["explicit_constraints"] = ["stop current topic"]
+        default.update({
+            "primary_intent": "boundary", "should_change_course": True,
+            "tone_needed": "warm", "explicit_constraints": ["stop current topic"]
+        })
         return default
  
     if signal == "correction":
-        default["primary_intent"] = "correction"
-        default["user_is_correcting_bot"] = True
-        default["should_change_course"] = True
+        default.update({
+            "primary_intent": "correction", "user_is_correcting_bot": True,
+            "should_change_course": True
+        })
         return default
  
     if signal == "topic_change":
-        default["primary_intent"] = "topic_change"
-        default["should_change_course"] = True
+        default.update({"primary_intent": "topic_change", "should_change_course": True})
         return default
  
-    # LLM-analyysi vain kun tarvitaan tarkempaa ymmärrystä
     recent_turns = context_pack.get("recent_turns", [])
     recent_text = "\n".join([f"{t['role']}: {t['content']}" for t in recent_turns[-4:]])
  
@@ -4178,27 +1933,26 @@ Recent turns:
 Latest user message:
 {user_text}"""
  
-    try:
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.1
-        )
-        raw = (resp.choices[0].message.content or "{}").strip()
-        result = parse_json_object(raw, default)
-        result["signal_type"] = signal
-        return result
-    except Exception as e:
-        print(f"[ANALYZE] Error: {e}")
+    raw = await call_llm(
+        user_prompt=prompt,
+        max_tokens=250,
+        temperature=0.1,
+        prefer_light=True,
+        json_mode=True
+    )
+ 
+    if not raw:
         return default
  
+    result = parse_json_object(raw, default)
+    result["signal_type"] = signal
+    return result
  
+# ====================== GENERATE REPLY (CLAUDE OPUS 4.7 PRIMARY) ======================
 async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
  
-    # 1. ANALYSOI KÄYTTÄJÄN VIESTI ENSIN
     turn_analysis = await analyze_user_turn(user_id, user_text, context_pack)
     signal_type = turn_analysis.get("signal_type", "normal")
     should_change = turn_analysis.get("should_change_course", False)
@@ -4206,50 +1960,41 @@ async def generate_llm_reply(user_id, user_text):
     tone_needed = turn_analysis.get("tone_needed", "direct")
     primary_intent = turn_analysis.get("primary_intent", "chat")
  
-    # 2. PÄIVITÄ MOODI
     current_mode = update_conversation_mode(user_id, user_text)
     if signal_type in ("boundary", "topic_change"):
         current_mode = "casual"
         state["conversation_mode"] = "casual"
  
-    mode_config = CONVERSATION_MODES.get(current_mode, CONVERSATION_MODES["casual"])
     submission_level = state.get("submission_level", 0.0)
     temporal_context = get_temporal_context_for_llm(user_id)
     memory_context = format_context_pack(context_pack)
     persona_prompt = build_core_persona_prompt()
  
-    # 3. TILANNEKOHTAINEN OHJE
     situation_directive = ""
     if signal_type == "boundary":
         situation_directive = """
 USER HAS SET A BOUNDARY OR SAID STOP.
 - Respect it immediately and warmly.
-- No escalation, no ignoring, no treating it as "playful resistance".
-- Change topic or acknowledge naturally.
-"""
+- No escalation, no ignoring.
+- Change topic or acknowledge naturally."""
     elif user_correcting or signal_type == "correction":
         situation_directive = """
 USER IS CORRECTING YOU.
 - Acknowledge the correction first.
-- Course-correct naturally without defending yourself.
-"""
+- Course-correct naturally without defending yourself."""
     elif primary_intent == "question":
         situation_directive = """
 USER IS ASKING A QUESTION - answer it directly first.
-Then add your natural tone.
-"""
+Then add your natural tone."""
     elif current_mode == "nsfw" and submission_level > 0.4:
         situation_directive = """
 INTIMATE CONTEXT.
-- Megan's dominant, humiliation-enjoying side can come through naturally here.
-- Stay human - not mechanical or repetitive.
-"""
+- Megan's dominant, humiliation-enjoying side can come through naturally.
+- Stay human - not mechanical or repetitive."""
     elif should_change:
         situation_directive = """
-TOPIC IS CHANGING - follow the user's direction.
-"""
+TOPIC IS CHANGING - follow the user's direction."""
  
-    # 4. SYSTEM PROMPT
     system_prompt = f"""{persona_prompt}
  
 {temporal_context}
@@ -4264,14 +2009,13 @@ CONVERSATION STATE:
  
 PRIORITY ORDER:
 1. User's latest message and intent - always first
-2. Corrections and boundaries - respect immediately, no exceptions
+2. Corrections and boundaries - respect immediately
 3. Megan's personality tone - applied after understanding user intent
 4. Memory/continuity - only when not conflicting with latest message
  
 Respond naturally in Finnish. Max 1 question per reply.
 """
  
-    # 5. USER PROMPT
     user_prompt = f"""TURN ANALYSIS:
 {json.dumps(turn_analysis, ensure_ascii=False, indent=2)}
  
@@ -4284,151 +2028,405 @@ LATEST USER MESSAGE:
 Write Megan's reply in Finnish. Respond to what the user actually said.
 """
  
-    # 6. GENEROI
-    reply = None
-    try:
-        if ANTHROPIC_API_KEY:
-            try:
-                client = get_claude_client()
-                if client:
-                    response = await client.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=800,
-                        temperature=0.8,
-                        system=system_prompt,
-                        messages=[{"role": "user", "content": user_prompt}]
-                    )
-                    if response.content and len(response.content) > 0:
-                        reply = (response.content[0].text or "").strip()
-                        if not reply:
-                            raise ValueError("Empty")
-                    print(f"[CLAUDE] {len(reply)} chars")
-            except Exception as e:
-                print(f"[CLAUDE ERROR] {e}")
+    # PÄÄASIALLINEN GENEROINTI CLAUDE OPUS 4.7:LLÄ
+    reply = await call_llm(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=1200,  # Opus 4.7 suosittaa suurempaa max_tokens arvoa
+        temperature=0.8,
+        prefer_light=False  # KÄYTÄ OPUS 4.7 TÄHÄN
+    )
  
-        if not reply and XAI_API_KEY and grok_client:
-            try:
-                response = await grok_client.chat.completions.create(
-                    model="grok-2-1212",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=800,
-                    temperature=0.8
-                )
-                reply = (response.choices[0].message.content or "").strip()
-                if not reply:
-                    raise ValueError("Empty")
-                print(f"[GROK] {len(reply)} chars")
-            except Exception as e:
-                print(f"[GROK ERROR] {e}")
- 
-        if not reply:
-            response = await openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=800,
-                temperature=0.8
-            )
-            reply = (response.choices[0].message.content or "").strip()
-            if not reply:
-                raise ValueError("Empty")
-            print(f"[OPENAI] {len(reply)} chars")
- 
-    except Exception as e:
-        print(f"[LLM ERROR] {e}")
-        traceback.print_exc()
+    if not reply:
+        print("[LLM ERROR] Empty reply from all providers")
         return "Anteeksi, tekninen ongelma. Yritä hetken päästä uudelleen."
  
-    # 7. ANTI-JANKKAAJA
-    if reply:
-        recent_bot = [
-            x["content"] for x in conversation_history.get(user_id, [])
-            if x["role"] == "assistant"
-        ][-3:]
-        if any(too_similar(reply, old) for old in recent_bot):
-            print("[ANTI-JANK] Too similar, regenerating...")
-            try:
-                retry_prompt = user_prompt + "\n\nVältä toistamasta aiempien vastaustesi sanoja tai rakennetta."
-                response = await openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": retry_prompt}
-                    ],
-                    max_tokens=800,
-                    temperature=0.95
-                )
-                r = (response.choices[0].message.content or "").strip()
-                if r:
-                    reply = r
-                    print(f"[ANTI-JANK] OK: {len(reply)} chars")
-            except Exception as e:
-                print(f"[ANTI-JANK ERROR] {e}")
+    # Anti-jankkaaja
+    recent_bot = [
+        x["content"] for x in conversation_history.get(user_id, [])
+        if x["role"] == "assistant"
+    ][-3:]
+    if any(too_similar(reply, old) for old in recent_bot):
+        print("[ANTI-JANK] Too similar, regenerating with variation...")
+        retry_prompt = user_prompt + "\n\nVältä toistamasta aiempien vastaustesi sanoja tai rakennetta."
+        new_reply = await call_llm(
+            system_prompt=system_prompt,
+            user_prompt=retry_prompt,
+            max_tokens=1200,
+            temperature=0.95,
+            prefer_light=False
+        )
+        if new_reply:
+            reply = new_reply
  
-    return reply or "Anteeksi, ei vastausta. Yritä uudelleen."
+    return reply
  
+# ====================== IMAGE GENERATION ======================
+async def generate_image_replicate(prompt: str):
+    try:
+        if not REPLICATE_API_KEY:
+            return None
  
+        model_version = "black-forest-labs/flux-1.1-pro-ultra"
+        create_url = "https://api.replicate.com/v1/predictions"
  
-# ====================== HANDLE_MESSAGE ======================
+        payload = {
+            "version": model_version,
+            "input": {
+                "prompt": prompt,
+                "aspect_ratio": "1:1",
+                "output_format": "png",
+                "output_quality": 100,
+                "safety_tolerance": 6,
+                "prompt_upsampling": True
+            }
+        }
+ 
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_API_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "wait"
+        }
+ 
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
+            async with session.post(create_url, json=payload, headers=headers) as resp:
+                if resp.status not in (200, 201):
+                    return None
+                data = await resp.json()
+ 
+            prediction_id = data.get('id')
+            get_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+            max_attempts = 60
+            attempt = 0
+ 
+            while attempt < max_attempts:
+                if data.get('status') == 'succeeded':
+                    break
+                if data.get('status') in ['failed', 'canceled']:
+                    return None
+                await asyncio.sleep(2)
+                attempt += 1
+                async with session.get(get_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+ 
+            if data.get('status') != 'succeeded':
+                return None
+ 
+            output = data.get('output')
+            if isinstance(output, str):
+                image_url = output
+            elif isinstance(output, list) and len(output) > 0:
+                image_url = output[0]
+            else:
+                return None
+ 
+            async with session.get(image_url) as resp:
+                if resp.status != 200:
+                    return None
+                image_bytes = await resp.read()
+                return image_bytes
+ 
+    except Exception as e:
+        print(f"[REPLICATE ERROR] {e}")
+        return None
+ 
+async def generate_image_venice(prompt: str):
+    try:
+        if not VENICE_API_KEY:
+            return None
+ 
+        payload = {
+            "prompt": prompt, "model": "fluently-xl",
+            "width": 1024, "height": 1024, "num_images": 1
+        }
+ 
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as session:
+            async with session.post(
+                "https://api.venice.ai/v1/images/generations",
+                headers={"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"},
+                json=payload
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                items = data.get("data", [])
+                if not items:
+                    return None
+                b64 = items[0].get("b64_json")
+                if not b64:
+                    return None
+                return base64.b64decode(b64)
+ 
+    except Exception as e:
+        print(f"[VENICE ERROR] {e}")
+        return None
+ 
+async def generate_image(prompt: str, max_retries: int = 2):
+    for attempt in range(max_retries):
+        try:
+            if REPLICATE_API_KEY:
+                result = await generate_image_replicate(prompt)
+                if result:
+                    return result
+            if VENICE_API_KEY:
+                result = await generate_image_venice(prompt)
+                if result:
+                    return result
+        except Exception as e:
+            print(f"[IMAGE ERROR] Attempt {attempt+1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2)
+    return None
+ 
+def scene_to_setting(scene: str) -> str:
+    mapping = {
+        "home": "modern apartment living room, stylish Scandinavian interior",
+        "bed": "bedroom, near bed, soft warm intimate lighting",
+        "work": "modern office or workspace, clean professional environment",
+        "public": "city street or trendy café, urban background",
+        "commute": "urban transit setting, train station or tram",
+        "shower": "bathroom, soft steam, clean minimal setting",
+        "neutral": "simple neutral indoor background, soft diffused light",
+    }
+    return mapping.get(scene, "modern apartment, simple neutral indoor background")
+ 
+def build_image_prompt(outfit: str, setting: str, pose: str = None, camera: str = None,
+                      mood: str = None, angle: str = None, **kwargs) -> str:
+    pose = pose or "standing, confident, weight on one leg, hand on hip"
+    camera = camera or "full body, 4-5m distance, portrait format, head and feet visible"
+    mood = mood or "confident, seductive, natural"
+    angle = angle or "slight 3/4 angle"
+ 
+    return f"""Photorealistic full-body portrait photograph.
+ 
+SCENE:
+{setting}
+ 
+SUBJECT:
+Tall athletic Finnish woman, 175cm. Platinum blonde hair (long, straight, mid-back). Blue-green eyes, smoky makeup. Large natural breasts (D-cup), slim waist, long toned legs, round ass. Fair Nordic skin. Dominant confident presence.
+ 
+OUTFIT:
+{outfit}
+ 
+POSE:
+{pose}
+ 
+MOOD:
+{mood}
+ 
+CAMERA:
+{camera}
+Angle: {angle}
+Lens: 35-50mm natural perspective, slight background blur
+ 
+CONSTRAINTS:
+- Full body visible from head to feet
+- Feet visible at bottom of frame
+- No cropping at waist, hips or knees
+- Subject occupies 70-85% of frame height
+- Portrait/vertical format
+- No extra people in frame
+ 
+STYLE:
+Ultra-realistic 8K photography, cinematic lighting, editorial quality
+"""
+ 
+# ====================== IMAGE VISION ======================
+async def analyze_generated_image(image_bytes: bytes, user_request: str, state: dict) -> dict:
+    default = {
+        "summary": "", "visible_outfit": "", "visible_setting": "",
+        "pose": "", "mood": "", "notable_details": [],
+        "matches_request": True, "caption_seed": ""
+    }
+ 
+    if not openai_client:
+        return default
+ 
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        conv_mode = state.get("conversation_mode", "casual")
+        submission = state.get("submission_level", 0.0)
+ 
+        prompt = f"""Return JSON only. No markdown.
+ 
+Schema:
+{{
+  "summary": "1-2 lause suomeksi: mita kuvassa nakyy",
+  "visible_outfit": "mita vaatteita kuvassa oikeasti nakyy",
+  "visible_setting": "mika tausta tai paikka kuvassa nakyy",
+  "pose": "mika asento tai ele kuvassa nakyy",
+  "mood": "mika fiilis tai ilme kuvasta valittaa",
+  "notable_details": ["yksityiskohta 1", "yksityiskohta 2"],
+  "matches_request": true,
+  "caption_seed": "luonnollinen lause jota Megan voisi sanoa"
+}}
+ 
+Conversation mode: {conv_mode}
+Submission level: {submission:.2f}
+User asked: {user_request[:200]}
+ 
+Analyze the ACTUAL image. Be concrete. caption_seed should feel natural for Megan."""
+ 
+        resp = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "low"}}
+                ]
+            }],
+            max_tokens=350,
+            temperature=0.2
+        )
+ 
+        raw = (resp.choices[0].message.content or "{}").strip()
+        return parse_json_object(raw, default)
+ 
+    except Exception as e:
+        print(f"[IMAGE ANALYSIS ERROR] {e}")
+        return default
+ 
+async def generate_image_commentary(user_id: int, analysis: dict, state: dict, user_request: str) -> str:
+    conversation_mode = state.get("conversation_mode", "casual")
+    submission_level = state.get("submission_level", 0.0)
+ 
+    caption_seed = analysis.get("caption_seed", "")
+    if not analysis.get("summary") and caption_seed:
+        return caption_seed
+ 
+    prompt = f"""Write one short natural Finnish line Megan would say when sending her own photo.
+ 
+Rules:
+- Comment on the ACTUAL image content, not generic phrases
+- Tone fits mode: {conversation_mode} (submission: {submission_level:.2f})
+- Max 1-2 sentences, feel natural
+ 
+Image analysis:
+- Outfit: {analysis.get('visible_outfit', 'not analyzed')}
+- Setting: {analysis.get('visible_setting', 'not analyzed')}
+- Mood: {analysis.get('mood', 'not analyzed')}
+ 
+Original request: {user_request[:100]}
+Caption seed idea: {caption_seed}"""
+ 
+    result = await call_llm(
+        user_prompt=prompt,
+        max_tokens=100,
+        temperature=0.9,
+        prefer_light=True
+    )
+ 
+    return result or caption_seed or "Mitä sä tykkäät? 😏"
+ 
+async def handle_image_request(update: Update, user_id: int, text: str):
+    state = get_or_create_state(user_id)
+    submission_level = state.get("submission_level", 0.0)
+    conversation_mode = state.get("conversation_mode", "casual")
+    scene = state.get("scene", "home")
+    last_image = state.get("last_image") or {}
+ 
+    # Scene defaults
+    scene_defaults = {
+        "home": "glossy black latex leggings + fitted black crop top, casual dominant look",
+        "bed": "black lace lingerie: sheer bralette and high-cut panties",
+        "work": "high-waist black latex leggings + fitted white blouse + blazer",
+        "public": "black leather pants + elegant fitted top + ankle boots",
+        "commute": "black latex leggings + leather jacket",
+        "shower": "white towel wrapped elegantly",
+        "neutral": "glossy black latex leggings + black crop top",
+    }
+ 
+    if conversation_mode == "nsfw" and submission_level > 0.4:
+        outfit = "black lace lingerie: minimal and seductive"
+    else:
+        outfit = scene_defaults.get(scene, "glossy black latex leggings + fitted black top")
+ 
+    setting = scene_to_setting(scene)
+ 
+    mood_map = {
+        "nsfw": "overtly seductive, dominant, intense eye contact",
+        "suggestive": "playfully seductive, confident knowing smile",
+        "romantic": "warm, intimate, soft inviting expression",
+        "casual": "confident, natural, effortlessly attractive",
+    }
+    mood = mood_map.get(conversation_mode, "confident, seductive, natural")
+ 
+    base_prompt = build_image_prompt(outfit=outfit, setting=setting, mood=mood)
+ 
+    await update.message.reply_text("Hetki, otan kuvan... 📸")
+ 
+    try:
+        image_bytes = await generate_image(base_prompt)
+        if not image_bytes:
+            await update.message.reply_text("Kuvan generointi epäonnistui. Yritä uudelleen.")
+            return
+    except Exception as e:
+        print(f"[IMAGE ERROR] {e}")
+        await update.message.reply_text(f"Virhe: {str(e)}")
+        return
+ 
+    analysis = await analyze_generated_image(image_bytes, text, state)
+    caption = await generate_image_commentary(user_id, analysis, state, text)
+ 
+    try:
+        sent_msg = await update.message.reply_photo(
+            photo=BytesIO(image_bytes),
+            caption=caption
+        )
+        telegram_file_id = sent_msg.photo[-1].file_id if sent_msg and sent_msg.photo else None
+    except Exception as e:
+        await update.message.reply_text(f"Lähetysvirhe: {str(e)}")
+        return
+ 
+    state["last_image"] = {
+        "prompt": base_prompt, "user_request": text,
+        "context": outfit, "setting": setting, "mood": mood,
+        "timestamp": time.time(), "telegram_file_id": telegram_file_id,
+        "analysis": analysis, "caption": caption,
+    }
+ 
+    await store_episodic_memory(
+        user_id=user_id,
+        content=json.dumps({
+            "type": "image_sent",
+            "outfit": analysis.get("visible_outfit") or outfit,
+            "setting": analysis.get("visible_setting") or setting,
+            "caption": caption
+        }, ensure_ascii=False),
+        memory_type="image_sent",
+    )
+ 
+# ====================== HANDLE MESSAGE ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = None  # ✅ Alusta muuttujat
+    user_id = None
     text = None
     state = None
-    
+ 
     try:
         user_id = update.effective_user.id
         text = (update.message.text or "").strip()
  
         if not text:
             return
-        
-        # ✨ PÄIVITÄ TEMPORAL STATE
+ 
         current_time = time.time()
-        temporal = update_temporal_state(user_id, current_time)
-        
+        update_temporal_state(user_id, current_time)
+ 
         t = text.lower()
  
         image_triggers = [
             "laheta kuva", "haluan kuvan", "tee kuva", "nayta kuva",
             "ota kuva", "laheta pic", "send pic", "picture",
             "show me", "selfie", "valokuva",
-            # Finnish variants without special chars
-            "lahetä kuva", "lähetä kuva", "näytä kuva",
+            "lähetä kuva", "näytä kuva",
         ]
         is_image_request = any(trigger in t for trigger in image_triggers)
  
-        # Kuvakommentti-triggerit - Megan kommentoi viimeksi lahettamansa kuvan
-        comment_image_triggers = [
-            "kommentoi kuvaa", "kommentoi se kuva", "mita mielta oot siita kuvasta",
-            "mita mielto oot", "kerro siita kuvasta", "analysoi se kuva",
-            "milta se kuva nakyttaa", "mita siina kuvassa on", "muistatko sen kuvan",
-            "se kuva", "tuo kuva", "edellinen kuva", "viiminen kuva",
-        ]
-        is_image_comment = (
-            any(trigger in t for trigger in comment_image_triggers)
-            and get_or_create_state(user_id).get("last_image")
-        )
- 
-        # STATE ALUSTETAAN AINA - myös kuvapyynnolle
         state = get_or_create_state(user_id)
  
-        if "submission_level" not in state:
-            state["submission_level"] = 0.0
-        if "last_interaction" not in state:
-            state["last_interaction"] = 0
-        if "conversation_mode" not in state:
-            state["conversation_mode"] = "casual"
-        if "conversation_mode_last_change" not in state:
-            state["conversation_mode_last_change"] = 0
-        if "location_status" not in state:
-            state["location_status"] = "separate"
- 
-        # PÄIVITÄ STATE ENNEN KUVAA tai vastausta
         update_submission_level(user_id, text)
         state["last_interaction"] = time.time()
         apply_scene_updates_from_turn(state, text)
@@ -4439,32 +2437,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
  
         user_turn_id = save_turn(user_id, "user", text)
  
-        # Frame extract myos kuvapyynnolle - tallentaa kontekstin muistiin
         frame = await extract_turn_frame(user_id, text)
         await apply_frame(user_id, frame, user_turn_id)
  
-        # KUVAKOMMENTTI - Megan kommentoi viimeksi lahettamansa kuvan
-        if is_image_comment:
-            last_img = state.get("last_image") or {}
-            existing_analysis = last_img.get("analysis")
- 
-            if not existing_analysis:
-                # Ladataan kuva uudelleen Telegramista ja analysoidaan
-                existing_analysis = await reanalyze_last_sent_image(
-                    context.bot, state
-                )
- 
-            if existing_analysis:
-                comment = await generate_image_commentary(user_id, existing_analysis, state, text)
-                await update.message.reply_text(comment)
-            else:
-                await update.message.reply_text(
-                    "Mulla ei oo kuvaa mitä kommentoida... laheta pyynto ensin? 📸"
-                )
-            save_persistent_state_to_db(user_id)
-            return
- 
-        # KUVAPYYNTO - nyt viesti on jo muistissa
         if is_image_request:
             await handle_image_request(update, user_id, text)
             return
@@ -4480,16 +2455,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 source_turn_id=user_turn_id
             )
  
-        # Tarkista lisattiinko uusia suunnitelmia framessa - laheta vahvistus
-        new_plans = frame.get("plans", [])
-        plan_confirmations = []
-        for p in new_plans[:3]:
-            pdesc = (p.get("description") or "").strip()
-            if pdesc and len(pdesc) > 8:
-                due = p.get("due_hint", "")
-                due_str = f" ({due})" if due else ""
-                plan_confirmations.append(f"- {pdesc}{due_str}")
- 
         reply = await generate_llm_reply(user_id, text)
  
         if breaks_scene_logic(reply, state):
@@ -4497,10 +2462,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if breaks_temporal_logic(reply, state):
             reply = "Hetki, olin vähän muualla. Mitä sanoit?"
  
-        conversation_history[user_id].append({
-            "role": "assistant",
-            "content": reply
-        })
+        conversation_history[user_id].append({"role": "assistant", "content": reply})
         conversation_history[user_id] = conversation_history[user_id][-20:]
  
         assistant_turn_id = save_turn(user_id, "assistant", reply)
@@ -4514,104 +2476,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
  
         await maybe_create_summary(user_id)
  
+        # Pilko pitkät viestit
         if len(reply) > 4000:
-            print(f"[LONG MESSAGE] Splitting {len(reply)} chars into chunks")
             chunks = [reply[i:i+3900] for i in range(0, len(reply), 3900)]
             for i, chunk in enumerate(chunks, 1):
                 await update.message.reply_text(chunk)
-                print(f"[CHUNK {i}/{len(chunks)}] Sent {len(chunk)} chars")
                 if i < len(chunks):
                     await asyncio.sleep(0.3)
         else:
             await update.message.reply_text(reply)
-        
+ 
         save_persistent_state_to_db(user_id)
  
-        # Laheta vahvistus tallennetuista suunnitelmista jos niita lisattiin
-        if plan_confirmations:
-            confirmation_msg = "Tallensin suunnitelmat:\n" + "\n".join(plan_confirmations)
-            print(f"[PLAN CONFIRM] Sent confirmation for {len(plan_confirmations)} plans")
-            # Ei laheteta erillistä viestiä - lisätään generoidun replyn jatkoksi
-            # Megan mainitsee ne luonnollisesti generate_llm_reply:ssa
- 
-    except KeyError as e:
-        # ✅ SAFE ERROR HANDLING
-        error_msg = f"""
-🔴 KEYERROR in handle_message
- 
-Missing key: {str(e)}
- 
-State keys: {list(state.keys()) if state is not None else 'State not created'}
-User ID: {user_id if user_id is not None else 'N/A'}
-Text: {text[:100] if text else 'N/A'}
- 
-Traceback:
-{traceback.format_exc()}
-"""
-        print(error_msg)
-        
-        # ✅ SAFE TELEGRAM RESPONSE
-        try:
-            if update and update.message:
-                await update.message.reply_text(
-                    f"⚠️ Puuttuva avain: {str(e)}\n"
-                    f"Käytä /status tarkistaaksesi tilan"
-                )
-        except Exception as telegram_error:
-            print(f"[TELEGRAM ERROR] Failed to send error message: {telegram_error}")
-        
     except Exception as e:
-        # ✅ SAFE ERROR HANDLING
         error_msg = f"""
 🔴 VIRHE HANDLE_MESSAGE:SSA
- 
 Tyyppi: {type(e).__name__}
 Viesti: {str(e)[:500]}
- 
 Traceback:
 {traceback.format_exc()[:800]}
- 
-User ID: {user_id if user_id is not None else 'N/A'}
+User: {user_id}
 Text: {text[:100] if text else 'N/A'}
 """
         print(error_msg)
-        
-        # ✅ SAFE TELEGRAM RESPONSE
         try:
             if update and update.message:
-                await update.message.reply_text(
-                    f"⚠️ Virhe: {type(e).__name__}\n"
-                    f"Yritä uudelleen tai käytä /help"
-                )
-        except Exception as telegram_error:
-            print(f"[TELEGRAM ERROR] Failed to send error message: {telegram_error}")
+                await update.message.reply_text(f"⚠️ Virhe: {type(e).__name__}\nYritä uudelleen.")
+        except Exception:
+            pass
  
- 
-# ====================== CHECK_PROACTIVE_TRIGGERS ======================
+# ====================== BACKGROUND TASKS ======================
 async def check_proactive_triggers(application):
-    """
-    Tarkistaa proaktiiviset triggerit 5 minuutin välein.
-    EI sleep ennen ensimmäistä iteraatiota.
-    """
     while True:
         try:
             now_ts = time.time()
-            
-            print(f"[PROACTIVE] Checking triggers at {datetime.fromtimestamp(now_ts, HELSINKI_TZ).strftime('%H:%M:%S')}")
  
-            # Tarkista plan-muistutukset
+            # Plan reminders
             with db_lock:
                 result = conn.execute("""
-                    SELECT user_id, id, description, target_time, status, 
-                           commitment_level, last_reminded_at
+                    SELECT user_id, id, description, target_time, last_reminded_at
                     FROM planned_events
                     WHERE status='planned' AND target_time IS NOT NULL
                 """)
                 rows = result.fetchall()
  
             for row in rows:
-                user_id, plan_id, description, target_time, status, commitment_level, last_reminded_at = row
- 
+                user_id, plan_id, description, target_time, last_reminded_at = row
                 if not target_time:
                     continue
  
@@ -4619,10 +2529,8 @@ async def check_proactive_triggers(application):
                     (0 <= target_time - now_ts <= 900) or
                     (0 <= now_ts - target_time <= 1800)
                 )
- 
                 if not should_remind:
                     continue
- 
                 if last_reminded_at and (now_ts - last_reminded_at) < 3600:
                     continue
  
@@ -4631,109 +2539,143 @@ async def check_proactive_triggers(application):
                         chat_id=int(user_id),
                         text=f"Muistutus: {description}"
                     )
- 
                     with db_lock:
-                        conn.execute("""
-                            UPDATE planned_events
-                            SET last_reminded_at=?
-                            WHERE id=?
-                        """, (now_ts, plan_id))
+                        conn.execute("UPDATE planned_events SET last_reminded_at=? WHERE id=?", (now_ts, plan_id))
                         conn.commit()
-                    
-                    print(f"[PROACTIVE] Sent reminder: {description[:50]}")
- 
                 except Exception as e:
-                    print(f"[PLAN REMINDER ERROR] {e}")
+                    print(f"[REMINDER ERROR] {e}")
  
-            # Spontaanit viestit poistettu - toteutetaan myöhemmin uudella konseptilla
-            # Proaktiiviset kuvat - lähetetään kun tilanne sopii
- 
-            # Periodinen state flush - varmista etta kaikki muutokset tallennetaan
-            for flush_uid in list(continuity_state.keys()):
-                try:
-                    last_save = continuity_state[flush_uid].get("_last_save_at", 0)
-                    if time.time() - last_save > 1800:  # 30min
-                        save_persistent_state_to_db(flush_uid)
-                        continuity_state[flush_uid]["_last_save_at"] = time.time()
-                except Exception as flush_err:
-                    print(f"[FLUSH ERROR] user {flush_uid}: {flush_err}")
+            # Periodic state flush
             for uid in list(continuity_state.keys()):
                 try:
-                    await maybe_send_proactive_image(application, uid)
-                except Exception as e:
-                    print(f"[PROACTIVE IMAGE ERROR for user {uid}] {e}")
+                    last_save = continuity_state[uid].get("_last_save_at", 0)
+                    if time.time() - last_save > 1800:
+                        save_persistent_state_to_db(uid)
+                        continuity_state[uid]["_last_save_at"] = time.time()
+                except Exception:
+                    pass
  
         except Exception as e:
             print(f"[PROACTIVE ERROR] {e}")
-            traceback.print_exc()
-        
-        # ✅ SLEEP LOPUSSA, 5 MIN VÄLEIN
-        await asyncio.sleep(300)  # 5 minuuttia
  
+        await asyncio.sleep(300)
  
-# ====================== MINIMAL COMMAND HANDLERS ======================
+# ====================== STATE MANAGEMENT ======================
+def build_default_state() -> dict:
+    return {
+        "energy": "normal", "availability": "free",
+        "last_interaction": 0, "persona_mode": "warm",
+        "intent": "casual", "summary": "",
+        "tension": 0.0, "phase": "neutral",
+        "emotional_state": {"valence": 0.0, "arousal": 0.5, "attachment": 0.5},
+        "persona_vector": {"dominance": 0.7, "warmth": 0.5, "playfulness": 0.4},
+        "last_image": None, "image_history": [],
+        "conversation_mode": "casual", "conversation_mode_last_change": 0,
+        "emotional_mode": "calm", "emotional_mode_last_change": 0,
+        "location_status": "separate", "with_user_physically": False,
+        "shared_scene": False,
+        "planned_events": [],
+        "submission_level": 0.0, "humiliation_tolerance": 0.0,
+        "cuckold_acceptance": 0.0, "strap_on_introduced": False,
+        "chastity_discussed": False, "feminization_level": 0.0,
+        "dominance_level": 1,
+        "sexual_boundaries": {"hard_nos": [], "soft_nos": [], "accepted": [], "actively_requested": []},
+        "conversation_themes": {},
+        "user_preferences": {"fantasy_themes": [], "turn_ons": [], "turn_offs": []},
+        "manipulation_history": {},
+        "user_model": {},
+        "topic_state": {
+            "current_topic": "general", "topic_summary": "",
+            "open_questions": [], "open_loops": [], "updated_at": time.time()
+        },
+        "temporal_state": {
+            "last_message_timestamp": 0, "last_message_time_str": "",
+            "time_since_last_message_hours": 0.0, "time_since_last_message_minutes": 0,
+            "current_activity_started_at": 0, "current_activity_duration_planned": 0,
+            "current_activity_end_time": 0, "activity_type": None,
+            "should_ignore_until": 0, "ignore_reason": None
+        },
+        **init_scene_state()
+    }
+ 
+def deep_merge_state(existing: dict, defaults: dict) -> dict:
+    result = defaults.copy()
+    for key, value in existing.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge_state(value, result[key])
+        else:
+            result[key] = value
+    return result
+ 
+def normalize_state(state: dict) -> dict:
+    return deep_merge_state(state, build_default_state())
+ 
+def get_or_create_state(user_id):
+    if user_id not in continuity_state:
+        print(f"[STATE] Creating new state for user {user_id}")
+        continuity_state[user_id] = build_default_state()
+        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
+        topic_state = load_topic_state_from_db(user_id)
+        if topic_state:
+            continuity_state[user_id]["topic_state"] = topic_state
+    else:
+        continuity_state[user_id] = normalize_state(continuity_state[user_id])
+    return continuity_state[user_id]
+ 
+def create_database_indexes():
+    try:
+        with db_lock:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user_created ON episodic_memories(user_id, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user_type ON episodic_memories(user_id, memory_type)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_user ON profile_facts(user_id, updated_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_user_status ON planned_events(user_id, status, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_user ON turns(user_id, id DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_agreements_user_status ON agreements(user_id, status, agreed_at DESC)")
+            conn.commit()
+            print("✅ Database indexes created")
+    except Exception as e:
+        print(f"[INDEX ERROR] {e}")
+ 
+# ====================== COMMAND HANDLERS ======================
 async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history[user_id] = []
-    last_replies[user_id] = deque(maxlen=3)
-    working_memory[user_id] = {}
     if user_id in continuity_state:
         del continuity_state[user_id]
-    await update.message.reply_text("🔄 Session reset. Muistot säilyvät, mutta keskustelu alkaa alusta.")
+    await update.message.reply_text("🔄 Session reset. Muistot säilyvät.")
  
 async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conversation_history[user_id] = []
-    last_replies[user_id] = deque(maxlen=3)
-    working_memory[user_id] = {}
     if user_id in continuity_state:
         del continuity_state[user_id]
     with db_lock:
-        conn.execute("DELETE FROM memories WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM profiles WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM planned_events WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM topic_state WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM turns WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM episodic_memories WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM profile_facts WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM summaries WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM activity_log WHERE user_id=?", (str(user_id),))
-        conn.execute("DELETE FROM agreements WHERE user_id=?", (str(user_id),))
+        for table in ["memories", "profiles", "planned_events", "topic_state", "turns",
+                      "episodic_memories", "profile_facts", "summaries", "activity_log", "agreements"]:
+            conn.execute(f"DELETE FROM {table} WHERE user_id=?", (str(user_id),))
         conn.commit()
-    await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
+    await update.message.reply_text("🗑️ Kaikki tila poistettu.")
  
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     sync_plans_to_state(user_id)
-    
     state = get_or_create_state(user_id)
-    txt = f"""
-📊 STATUS
+    txt = f"""📊 STATUS (v{BOT_VERSION})
  
+LLM: Claude Opus 4.7 (primary)
 Scene: {state.get('scene')}
-Micro context: {state.get('micro_context')}
-Action: {state.get('current_action')}
-Location status: {state.get('location_status')}
- 
-Persona mode: {state.get('persona_mode')}
-Emotional mode: {state.get('emotional_mode')}
-Intent: {state.get('intent')}
+Mode: {state.get('conversation_mode')}
+Location: {state.get('location_status')}
+Submission: {state.get('submission_level', 0.0):.2f}
 Tension: {state.get('tension', 0.0):.2f}
-Phase: {state.get('phase')}
- 
 Topic: {state.get('topic_state', {}).get('current_topic')}
-Topic summary: {state.get('topic_state', {}).get('topic_summary', '')[:120]}
- 
 Plans: {len(state.get('planned_events', []))}
 """
     await update.message.reply_text(txt)
  
 async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     sync_plans_to_state(user_id)
-    
     state = get_or_create_state(user_id)
     plans = state.get("planned_events", [])
     if not plans:
@@ -4742,59 +2684,26 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📋 SUUNNITELMAT:\n"]
     for i, plan in enumerate(plans[-10:], 1):
         age_min = int((time.time() - plan.get("created_at", time.time())) / 60)
-        lines.append(
-            f"{i}. {plan.get('description', '')[:100]}\n"
-            f"   Status: {plan.get('status', 'planned')}\n"
-            f"   Commitment: {plan.get('commitment_level', 'medium')}\n"
-            f"   Age: {age_min} min\n"
-        )
+        lines.append(f"{i}. {plan.get('description', '')[:100]}\n   Status: {plan.get('status', 'planned')}, Age: {age_min}min\n")
     await update.message.reply_text("\n".join(lines))
  
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     with db_lock:
         result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
-        episodic_total = result.fetchone()[0]
-        
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='fantasy'", (str(user_id),))
-        fantasy_count = result.fetchone()[0]
-        
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='event'", (str(user_id),))
-        event_count = result.fetchone()[0]
-        
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
-        conversation_count = result.fetchone()[0]
-        
+        episodic = result.fetchone()[0]
         result = conn.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
-        facts_count = result.fetchone()[0]
-        
+        facts = result.fetchone()[0]
         result = conn.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
-        summaries_count = result.fetchone()[0]
-        
+        summaries = result.fetchone()[0]
         result = conn.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
-        turns_count = result.fetchone()[0]
-        
-        result = conn.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
-        active_plans = result.fetchone()[0]
-        
-        result = conn.execute("SELECT COUNT(*) FROM memories WHERE user_id=?", (str(user_id),))
-        legacy_count = result.fetchone()[0]
-    
-    txt = f"""
-🧠 **MEMORY STATS** (v{BOT_VERSION})
+        turns = result.fetchone()[0]
+    txt = f"""🧠 MEMORY STATS (v{BOT_VERSION})
  
-**Episodic Memories:** {episodic_total}
-  - Fantasies: {fantasy_count}
-  - Events: {event_count}
-  - Conversations: {conversation_count}
- 
-**Profile Facts:** {facts_count}
-**Summaries:** {summaries_count}
-**Active Plans:** {active_plans}
-**Raw Turns:** {turns_count}
- 
-**Legacy (deprecated):** {legacy_count}
+Episodic Memories: {episodic}
+Profile Facts: {facts}
+Summaries: {summaries}
+Raw Turns: {turns}
 """
     await update.message.reply_text(txt)
  
@@ -4805,15 +2714,14 @@ async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Käyttö: /scene home|work|public|bed|shower|commute|neutral")
         return
     new_scene = context.args[0].lower()
-    valid_scenes = ["home", "work", "public", "bed", "shower", "commute", "neutral"]
-    if new_scene not in valid_scenes:
-        await update.message.reply_text(f"Virheellinen scene. Vaihtoehdot: {', '.join(valid_scenes)}")
+    if new_scene not in ["home", "work", "public", "bed", "shower", "commute", "neutral"]:
+        await update.message.reply_text("Virheellinen scene")
         return
     state["scene"] = new_scene
     state["micro_context"] = random.choice(SCENE_MICRO.get(new_scene, [""]))
     state["last_scene_change"] = time.time()
     state["scene_locked_until"] = time.time() + MIN_SCENE_DURATION
-    await update.message.reply_text(f"✅ Scene vaihdettu: {new_scene}")
+    await update.message.reply_text(f"✅ Scene: {new_scene}")
  
 async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -4821,7 +2729,7 @@ async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["location_status"] = "together"
     state["with_user_physically"] = True
     state["shared_scene"] = True
-    await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
+    await update.message.reply_text("✅ Olet nyt Meganin kanssa.")
  
 async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -4831,37 +2739,8 @@ async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["shared_scene"] = False
     await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
  
-async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    if not context.args:
-        await update.message.reply_text(
-            f"Nykyinen mood: {state.get('emotional_mode', 'calm')}\n"
-            "Käyttö: /mood calm|playful|warm|testing|jealous|provocative|intense|cooling|distant"
-        )
-        return
-    new_mood = context.args[0].lower()
-    state["emotional_mode"] = new_mood
-    state["emotional_mode_last_change"] = time.time()
-    await update.message.reply_text(f"✅ Emotional mode vaihdettu: {new_mood}")
- 
-async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    if not context.args:
-        await update.message.reply_text(f"Nykyinen tension: {state.get('tension', 0.0):.2f}")
-        return
-    try:
-        value = float(context.args[0])
-        value = max(0.0, min(1.0, value))
-        state["tension"] = value
-        await update.message.reply_text(f"✅ Tension asetettu: {value:.2f}")
-    except ValueError:
-        await update.message.reply_text("Virhe: anna numero välillä 0.0-1.0")
- 
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     if context.args:
         description = " ".join(context.args)
         await handle_image_request(update, user_id, f"Haluan kuvan: {description}")
@@ -4869,541 +2748,54 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_image_request(update, user_id, "Lähetä kuva")
  
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = f"""
-🤖 **MEGAN {BOT_VERSION} COMMANDS**
+    txt = f"""🤖 MEGAN {BOT_VERSION}
+Primary LLM: Claude Opus 4.7
  
-**Session:**
-/newgame - Resetoi session
-/wipe - Poista kaikki muistot
+Session:
+/newgame - Reset session
+/wipe - Delete all memories
  
-**Status:**
-/status - Näytä tila
-/plans - Näytä suunnitelmat
-/memory - Muististatistiikka
+Status:
+/status - Show state
+/plans - Show plans
+/memory - Memory stats
  
-**Control:**
-/scene  - Vaihda scene
-/together - Aseta fyysisesti yhdessä
-/separate - Aseta erilleen
-/mood  - Vaihda emotional mode
-/tension <0.0-1.0> - Aseta tension
+Control:
+/scene <name> - Change scene
+/together - Physically together
+/separate - Physically separate
  
-**Media:**
-/image [kuvaus] - Generoi kuva
+Media:
+/image [description] - Generate image
  
-**Aktiviteetit:**
-/activity <type> [tunnit] - Aloita aktiviteetti
- 
-**Info:**
-/help - Tämä ohje
- 
-**Kuvapyynnöt tekstissä:**
-- "lähetä kuva"
-- "haluan kuvan"
-- "näytä kuva"
-- "ota kuva"
+Info:
+/help - This help
 """
     await update.message.reply_text(txt)
- 
-async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Aloita aktiviteetti joka kestää tietyn ajan
-    Käyttö: /activity <type> [tunnit]
-    Esim: /activity date 3
-    """
-    user_id = update.effective_user.id
-    
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Käyttö: /activity <type> [tunnit]\n"
-            "Esim: /activity date 3\n\n"
-            "Tyypit:\n"
-            "Lyhyet: coffee, shopping, gym, lunch\n"
-            "Keskipitkät: date, dinner, bar, party\n"
-            "Pitkät: evening_date, club_night, overnight_date\n"
-            "Muut: work, meeting, mystery"
-        )
-        return
-    
-    # ACTIVITY ALIASES
-    ACTIVITY_ALIASES = {
-        "date": "casual_date",
-        "gym": "gym",
-        "work": "work",
-        "shopping": "shopping",
-        "meeting": "meeting",
-        "dinner": "dinner",
-        "bar": "bar",
-        "coffee": "coffee",
-        "lunch": "lunch",
-        "party": "party",
-        "club": "club_night",
-        "overnight": "overnight_date",
-        "evening": "evening_date",
-        "mystery": "mystery"
-    }
-    
-    activity_input = context.args[0].lower()
-    activity_type = ACTIVITY_ALIASES.get(activity_input, activity_input)
-    
-    # Tarkista onko aktiviteetti tunnettu
-    if activity_type not in ACTIVITY_DURATIONS:
-        await update.message.reply_text(
-            f"❌ Tuntematon aktiviteetti: {activity_input}\n"
-            f"Käytä /activity ilman parametreja nähdäksesi listan."
-        )
-        return
-    
-    # Tarkista onko kesto annettu
-    duration_hours = None
-    if len(context.args) >= 2:
-        try:
-            duration_hours = float(context.args[1])
-        except ValueError:
-            await update.message.reply_text("Virhe: tunnit pitää olla numero")
-            return
-    
-    # ✅ KORJATTU: Käsittele ValueError oikein, älä anna kaatua
-    try:
-        result = start_activity_with_duration(
-            user_id=user_id,
-            activity_type=activity_type,
-            duration_hours=duration_hours
-        )
-    except ValueError as e:
-        await update.message.reply_text(f"❌ {str(e)}")
-        return
-    
-    profile = ACTIVITY_DURATIONS[activity_type]
-    description = profile.get("description", activity_type)
-    
-    await update.message.reply_text(
-        f"✅ Aktiviteetti aloitettu: {description}\n"
-        f"⏱️ Kesto: {result['duration_hours']:.1f}h\n"
-        f"🕐 Päättyy: {result['end_time_str']}\n"
-        f"📵 Ignooraa viestit: {'Kyllä' if result['will_ignore'] else 'Ei'}"
-    )
- 
-# ====================== GET TIME BLOCK ======================
-def get_time_block():
-    hour = datetime.now(HELSINKI_TZ).hour
-    if 0 <= hour < 6:
-        return "night"
-    elif 6 <= hour < 10:
-        return "morning"
-    elif 10 <= hour < 17:
-        return "day"
-    elif 17 <= hour < 22:
-        return "evening"
-    return "late_evening"
- 
- 
-def update_topic_state(user_id, frame):
-    state = get_or_create_state(user_id)
-    ts = state.setdefault("topic_state", {
-        "current_topic": "general",
-        "topic_summary": "",
-        "open_questions": [],
-        "open_loops": [],
-        "updated_at": time.time()
-    })
- 
-    if frame.get("topic_changed"):
-        ts["current_topic"] = frame.get("topic", "general")
-        ts["topic_summary"] = frame.get("topic_summary", "")
- 
-    if frame.get("open_questions") is not None:
-        ts["open_questions"] = frame.get("open_questions", [])[:5]
- 
-    if frame.get("open_loops") is not None:
-        ts["open_loops"] = frame.get("open_loops", [])[:5]
- 
-    ts["updated_at"] = time.time()
- 
-# ====================== STATE NORMALIZATION ======================
- 
-def build_default_state() -> dict:
-    """
-    Rakentaa täydellisen default-staten.
-    """
-    return {
-        # BASIC STATE
-        "energy": "normal",
-        "availability": "free",
-        "last_interaction": 0,
-        "persona_mode": "warm",
-        "last_mode_change": 0,
-        "intent": "casual",
-        "summary": "",
-        
-        # DESIRES & GOALS
-        "desire": None,
-        "desire_intensity": 0.0,
-        "desire_last_update": 0,
-        "tension": 0.0,
-        "last_direction": None,
-        "core_desires": [],
-        "desire_profile_updated": 0,
-        
-        # PHASE & ARCS
-        "phase": "neutral",
-        "phase_last_change": 0,
-        "relationship_arcs": [],
-        "active_arc": None,
-        "arc_last_update": 0,
-        "current_goal": None,
-        "goal_updated": 0,
-        
-        # EMOTIONAL STATE
-        "emotional_state": {
-            "valence": 0.0,
-            "arousal": 0.5,
-            "attachment": 0.5
-        },
-        "persona_vector": {
-            "dominance": 0.7,
-            "warmth": 0.5,
-            "playfulness": 0.4
-        },
-        "personality_evolution": {
-            "curiosity": 0.5,
-            "patience": 0.5,
-            "expressiveness": 0.5,
-            "initiative": 0.5,
-            "stability": 0.7,
-            "last_evolved": 0
-        },
-        
-        # PREDICTION
-        "prediction": {
-            "next_user_intent": None,
-            "next_user_mood": None,
-            "confidence": 0.0,
-            "updated_at": 0
-        },
-        
-        # SIDE CHARACTERS
-        "side_characters": {
-            "friend": {"name": "Aino"},
-            "coworker": {"name": "Mika"}
-        },
-        "active_side_character": None,
-        
-        # IMAGE HISTORY
-        "last_image": None,
-        "image_history": [],
-        
-        # JEALOUSY & IGNORE
-        "ignore_until": 0,
-        "pending_narrative": None,
-        "jealousy_stage": 0,
-        "jealousy_started": 0,
-        "jealousy_context": None,
-        "last_jealousy_event": None,
-        "jealousy_mode": False,
-        "jealousy_intensity": 0.0,
-        "last_jealousy_action": 0,
-        "ignore_probability": 0.0,
-        "last_response_time": 0,
-        
-        # SPONTANEOUS
-        "spontaneous_message_cooldown": 0,
-        "spontaneous_image_cooldown": 0,
-        "spontaneous_narrative": {
-            "active": False,
-            "type": None,
-            "context": "",
-            "started_at": 0,
-            "last_update": 0,
-            "progression": 0,
-            "details": {},
-            "user_attempts": 0,
-            "pending_user_messages": [],
-            "ignored_messages": [],
-            "ignore_duration": 0
-        },
-        
-        # EMOTIONAL MODE
-        "emotional_mode": "calm",
-        "emotional_mode_last_change": 0,
-        
-        # LOCATION
-        "location_status": "separate",
-        "with_user_physically": False,
-        "shared_scene": False,
-        "last_scene_source": None,
-        
-        # DRIVES
-        "active_drive": None,
-        "interaction_arc_progress": 0.0,
-        
-        # USER MODEL
-        "user_model": {
-            "dominance_preference": 0.5,
-            "emotional_dependency": 0.5,
-            "validation_need": 0.5,
-            "jealousy_sensitivity": 0.5,
-            "control_resistance": 0.5,
-            "last_updated": 0
-        },
-        
-        # STRATEGY
-        "master_plan": None,
-        "current_strategy": None,
-        "strategy_updated": 0,
-        "strategy_stats": {},
-        
-        # PLANS
-        "planned_events": [],
-        "last_plan_check": 0,
-        "last_plan_reference": 0,
-        "last_referenced_plan_id": None,
-        
-        # INTENT
-        "final_intent": None,
-        "final_intent_updated": 0,
-        "state_conflicts": [],
-        
-        # MEMORY
-        "salient_memory": None,
-        "salient_memory_updated": 0,
-        "forced_disclosure": None,
-        
-        # CONVERSATION THEMES
-        "conversation_themes": {
-            "fantasy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            "dominance": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            "intimacy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            "jealousy": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-            "daily_life": {"count": 0, "last_discussed": 0, "intensity": 0.0, "keywords": []},
-        },
-        
-        # USER PREFERENCES
-        "user_preferences": {
-            "fantasy_themes": [],
-            "turn_ons": [],
-            "turn_offs": [],
-            "communication_style": "neutral",
-            "resistance_level": 0.5,
-            "last_updated": 0
-        },
-        
-        # CONVERSATION ARC
-        "conversation_arc": {
-            "current_theme": None,
-            "theme_depth": 0.0,
-            "theme_started": 0,
-            "previous_themes": []
-        },
-        
-        # MOODS
-        "moods": {
-            "annoyed": 0.20,
-            "warm": 0.45,
-            "bored": 0.20,
-            "playful": 0.35,
-            "tender": 0.40,
-        },
-        
-        # SUBMISSION & KINKS
-        "submission_level": 0.0,
-        "humiliation_tolerance": 0.0,
-        "cuckold_acceptance": 0.0,
-        "strap_on_introduced": False,
-        "chastity_discussed": False,
-        "feminization_level": 0.0,
-        "dominance_level": 1,
-        "last_dominance_escalation": 0,
-        
-        # MANIPULATION
-        "manipulation_history": {
-            "gaslighting_count": 0,
-            "triangulation_count": 0,
-            "push_pull_cycles": 0,
-            "successful_manipulations": 0
-        },
-        
-        # SEXUAL BOUNDARIES
-        "sexual_boundaries": {
-            "hard_nos": [],
-            "soft_nos": [],
-            "accepted": [],
-            "actively_requested": []
-        },
-        
-        # TOPIC STATE
-        "topic_state": {
-            "current_topic": "general",
-            "topic_summary": "",
-            "open_questions": [],
-            "open_loops": [],
-            "updated_at": time.time()
-        },
-        
-        # OTHER MEN
-        "other_men_mentioned": [],
-        "provocative_scenarios": [],
-        
-        # CONVERSATION MODE
-        "conversation_mode": "casual",
-        "conversation_mode_last_change": 0,
-        
-        # TEMPORAL AWARENESS
-        "temporal_state": {
-            "last_message_timestamp": 0,
-            "last_message_time_str": "",
-            "time_since_last_message_hours": 0.0,
-            "time_since_last_message_minutes": 0,
-            "current_activity_started_at": 0,
-            "current_activity_duration_planned": 0,
-            "current_activity_end_time": 0,
-            "activity_type": None,
-            "should_ignore_until": 0,
-            "ignore_reason": None
-        },
-        
-        # SCENE STATE
-        **init_scene_state()
-    }
- 
- 
-def deep_merge_state(existing: dict, defaults: dict) -> dict:
-    """
-    Yhdistää existing staten defaultsien kanssa.
-    """
-    result = defaults.copy()
-    
-    for key, value in existing.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge_state(value, result[key])
-        else:
-            result[key] = value
-    
-    return result
- 
- 
-def normalize_state(state: dict) -> dict:
-    """
-    Varmistaa että state sisältää kaikki tarvittavat avaimet.
-    """
-    defaults = build_default_state()
-    return deep_merge_state(state, defaults)
- 
- 
-def get_or_create_state(user_id):
-    """
-    Palauttaa käyttäjän staten tai luo uuden.
-    AINA normalisoi staten ennen palauttamista.
-    """
-    if user_id not in continuity_state:
-        print(f"[STATE] Creating new state for user {user_id}")
-        
-        # Luo täysi default state
-        continuity_state[user_id] = build_default_state()
-        
-        # Lataa plans
-        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-        
-        # Lataa topic state
-        topic_state = load_topic_state_from_db(user_id)
-        if topic_state:
-            continuity_state[user_id]["topic_state"] = topic_state
-    else:
-        # Normalisoi vanha state
-        continuity_state[user_id] = normalize_state(continuity_state[user_id])
-    
-    return continuity_state[user_id]
- 
-def create_database_indexes():
-    """
-    Lisää indeksit nopeuttamaan kyselyitä.
-    """
-    try:
-        with db_lock:
-            # Episodic memories
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_episodic_user_created 
-                ON episodic_memories(user_id, created_at DESC)
-            """)
-            
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_episodic_user_type 
-                ON episodic_memories(user_id, memory_type)
-            """)
-            
-            # Profile facts
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_facts_user 
-                ON profile_facts(user_id, updated_at DESC)
-            """)
-            
-            # Planned events
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_plans_user_status 
-                ON planned_events(user_id, status, created_at DESC)
-            """)
-            
-            # Turns
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_turns_user 
-                ON turns(user_id, id DESC)
-            """)
- 
-            # Activity log
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_activity_log_user_type
-                ON activity_log(user_id, activity_type, started_at DESC)
-            """)
- 
-            # Agreements
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_agreements_user_status
-                ON agreements(user_id, status, agreed_at DESC)
-            """)
- 
-            # Planned events - aikaperusteinen haku
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_plans_target_time
-                ON planned_events(user_id, target_time, status)
-            """)
- 
-            # Summaries
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_summaries_user
-                ON summaries(user_id, created_at DESC)
-            """)
-            
-            conn.commit()
-            print("✅ Database indexes created")
-    except Exception as e:
-        print(f"[INDEX ERROR] {e}")
  
 # ====================== MAIN ======================
 async def main():
     global background_task
  
-    print("[MAIN] ===== STARTING MAIN FUNCTION =====")
-    import sys
-    print(f"[MAIN] Python {sys.version}")
-    print("[MAIN] Step 1: Starting Flask thread...")
+    print("[MAIN] ===== STARTING =====")
+    print(f"[MAIN] Primary LLM: {CLAUDE_MODEL_PRIMARY}")
+    print(f"[MAIN] Light LLM: {CLAUDE_MODEL_LIGHT}")
+    print(f"[MAIN] Fallback 1: Grok ({GROK_MODEL})")
+    print(f"[MAIN] Fallback 2: OpenAI ({OPENAI_MODEL})")
  
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("[MAIN] Step 2: Flask thread started")
  
-    print("[MAIN] Step 5: Migration...")
     try:
         migrate_database()
     except Exception as e:
         print(f"[MAIN] Migration error: {e}")
  
-    print("[MAIN] Step 6: Loading states...")
     try:
         load_states_from_db()
     except Exception as e:
         print(f"[MAIN] Load states error: {e}")
  
-    print("[MAIN] Step 7: Boot cleanup...")
     for user_id in list(continuity_state.keys()):
         try:
             clean_ephemeral_state_on_boot(user_id)
@@ -5415,14 +2807,11 @@ async def main():
     except Exception as e:
         print(f"[MAIN] Index error: {e}")
  
-    print("[MAIN] Step 8: Building Telegram application...")
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
+    # Pre-warm Claude client
+    get_claude_client()
  
-    print("[MAIN] Step 9: Adding handlers...")
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+ 
     application.add_handler(CommandHandler("newgame", cmd_new_game))
     application.add_handler(CommandHandler("wipe", cmd_wipe))
     application.add_handler(CommandHandler("status", cmd_status))
@@ -5431,44 +2820,31 @@ async def main():
     application.add_handler(CommandHandler("scene", cmd_scene))
     application.add_handler(CommandHandler("together", cmd_together))
     application.add_handler(CommandHandler("separate", cmd_separate))
-    application.add_handler(CommandHandler("mood", cmd_mood))
-    application.add_handler(CommandHandler("tension", cmd_tension))
     application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CommandHandler("activity", cmd_activity))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
  
-    print("[MAIN] Step 10: Initializing...")
     await application.initialize()
- 
-    print("[MAIN] Step 11: Starting...")
     await application.start()
  
-    print("[MAIN] Step 12: Starting background task...")
     background_task = asyncio.create_task(check_proactive_triggers(application))
  
-    print("[MAIN] Step 13: Starting polling...")
     await application.updater.start_polling(drop_pending_updates=True)
  
-    print("[MAIN] ✅ Bot is running!")
+    print(f"[MAIN] ✅ Bot running with Claude Opus 4.7!")
  
     try:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, SystemExit):
-        print("\n[MAIN] Shutdown signal received")
-    except Exception as e:
-        print(f"[MAIN] Event loop error: {type(e).__name__}: {e}")
+        print("\n[MAIN] Shutdown signal")
     finally:
         print("[MAIN] Cleaning up...")
  
-        # Tallenna kaikkien aktiivisten kayttajien state ennen sammutusta
-        print(f"[MAIN] Flushing state for {len(continuity_state)} users...")
-        for flush_uid in list(continuity_state.keys()):
+        for uid in list(continuity_state.keys()):
             try:
-                save_persistent_state_to_db(flush_uid)
+                save_persistent_state_to_db(uid)
             except Exception as e:
-                print(f"[MAIN] Flush error for {flush_uid}: {e}")
-        print("[MAIN] State flushed.")
+                print(f"[MAIN] Flush error for {uid}: {e}")
  
         if background_task and not background_task.done():
             background_task.cancel()
@@ -5476,25 +2852,23 @@ async def main():
                 await background_task
             except asyncio.CancelledError:
                 pass
+ 
         try:
             await application.updater.stop()
-        except Exception as e:
-            print(f"[MAIN] Updater stop error: {e}")
-        try:
             await application.stop()
             await application.shutdown()
         except Exception as e:
             print(f"[MAIN] Shutdown error: {e}")
+ 
         print("[MAIN] Done.")
  
  
 if __name__ == "__main__":
-    print("[STARTUP] Starting bot...")
+    print("[STARTUP] Starting Megan with Claude Opus 4.7...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[STARTUP] Interrupted")
     except Exception as e:
         print(f"[STARTUP] Fatal: {type(e).__name__}: {e}")
-        import traceback
         traceback.print_exc()
