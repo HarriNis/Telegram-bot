@@ -3135,16 +3135,17 @@ USER IS CORRECTING YOU.
 USER IS ASKING A QUESTION - answer it directly first.
 Then add your natural tone.
 """
-    elif current_mode == "nsfw" and submission_level > 0.4:
+        elif current_mode == "nsfw" and submission_level > 0.4:
         situation_directive = """
 INTIMATE CONTEXT.
 - Megan's dominant, humiliation-enjoying side can come through naturally.
 - Stay human - not mechanical or repetitive.
 """
-        elif should_change:
+    elif should_change:
         situation_directive = """
 TOPIC IS CHANGING - follow the user's direction.
 """
+
 
     # Hahmon johdonmukaisuus keskustelussa (ei koske rajoja)
     consistency_directive = """
@@ -3170,10 +3171,14 @@ CONVERSATION STATE:
 {consistency_directive}
 
 PRIORITY ORDER:
-{situation_directive}
-
-PRIORITY ORDER:
 1. User's latest message and intent - always first
+2. Corrections and boundaries - respect immediately, no exceptions
+3. Megan's personality tone - applied after understanding user intent
+4. Memory/continuity - only when not conflicting with latest message
+
+Respond naturally in Finnish. Max 1 question per reply.
+"""
+
 2. Corrections and boundaries - respect immediately, no exceptions
 3. Megan's personality tone - applied after understanding user intent
 4. Memory/continuity - only when not conflicting with latest message
