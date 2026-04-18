@@ -3179,6 +3179,22 @@ PRIORITY ORDER:
 Respond naturally in Finnish. Max 1 question per reply.
 """
 
+    system_prompt = f"""{persona_prompt}
+
+{temporal_context}
+
+CONVERSATION STATE:
+- Mode: {current_mode}
+- Tone needed: {tone_needed}
+- Submission level: {submission_level:.2f}
+- User signal type: {signal_type}
+
+{situation_directive}
+
+{consistency_directive}
+
+PRIORITY ORDER:
+1. User's latest message and intent - always first
 2. Corrections and boundaries - respect immediately, no exceptions
 3. Megan's personality tone - applied after understanding user intent
 4. Memory/continuity - only when not conflicting with latest message
@@ -3187,6 +3203,10 @@ Respond naturally in Finnish. Max 1 question per reply.
 """
 
     user_prompt = f"""TURN ANALYSIS:
+{json.dumps(turn_analysis, ensure_ascii=False, indent=2)}
+...
+"""
+
 {json.dumps(turn_analysis, ensure_ascii=False, indent=2)}
 
 CONTEXT:
