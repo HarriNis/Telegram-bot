@@ -1,16 +1,18 @@
 """
-Megan Telegram Bot - v8.3.2-memory-speaker-fix
+Megan Telegram Bot - v8.3.3-sticky-memory-location-lock
 Pääasiallinen LLM: Claude Opus 4.7 (claude-opus-4-7)
 NSFW-hybrid: Claude (character lock + muu logiikka) + Grok (eksplisiittinen NSFW-vastaus)
 
-Muutokset v8.3.1 → v8.3.2 (MUISTIN SPEAKER-FIX):
-- Muisti: user/megan-vuorot tallennetaan ERIKSEEN (ei enää combined blob)
-- retrieve_relevant_memories: megan_utterance saa NEGATIIVISEN painon (-0.30)
-- extract_turn_frame: prompti estää Meganin komentojen tulkitsemisen käyttäjän faktoina
-- build_narrative_timeline: jokainen muisto prefixataan puhujatiedolla
-- maybe_create_summary: käyttää "Käyttäjä"/"Megan" nimiä role-termien sijaan
-- resolve_plan_reference: vaatii eksplisiittisiä completion-avainsanoja
-- Muu logiikka (scene, activities, kuvat, NSFW-hybrid) PIDETTY TÄSMÄLLEEN SAMANA
+Muutokset v8.3.2 → v8.3.3 (STICKY MEMORY + LOCATION LOCK):
+- A) location_status säilyy pysyvästi omassa taulussa (location_state)
+     - force_scene_from_text EI vaihda scenea jos together
+     - Boot ei resetoi defaultiksi - lukee viimeisimmän DB-arvon
+- B) sticky_memories-taulu: fantasiat, preferenssit ja hard_commitmentit
+     - Ladataan AINA context-pakkiin ohi embedding-haun
+     - Ei recency-decay, ei similarity-kynnys
+- C) get_active_plans(limit=10), aina näkyvillä contextissa
+- UUSI: /fantasies-komento debuggaamista varten
+- Muut muutokset (speaker-fix v8.3.2, NSFW-hybrid v8.3.1) PIDETTY SAMANA
 """
 
 import os
@@ -37,8 +39,8 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.2-memory-speaker-fix"
-print(f"🚀 Megan {BOT_VERSION} käynnistyy... (Claude + Grok NSFW-hybrid + memory speaker fix)")
+BOT_VERSION = "8.3.3-sticky-memory-location-lock"
+print(f"🚀 Megan {BOT_VERSION} käynnistyy... (sticky memory + location lock)")
 
 # ====================== MODEL CONFIG ======================
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-7"      # Pääasiallinen (character lock)
@@ -517,7 +519,16 @@ def force_scene_from_text(state, text, now):
     Lisätty ensimmäisen persoonan tarkistus - jos teksti näyttää Meganille
     osoitetulta komennolta ("mene suihkuun") ilman käyttäjän omaa first-person
     -indikaattoria, ei päivitetä scene-tilaa.
+
+    KORJATTU v8.3.3 (korjaus A): Jos location_status == "together",
+    scene-vaihtoa ei tehdä tekstin perusteella. Vain /separate tai /scene
+    voi vaihtaa scenen together-tilassa.
     """
+    # v8.3.3: Älä vaihda scenea jos ollaan yhdessä
+    if state.get("location_status") == "together":
+        print(f"[SCENE] Skipping text-based scene change: location_status=together (use /separate first)")
+        return False
+
     t = text.lower()
 
     # Käskymuoto Meganille (ilman first-person indikaattoria) → älä päivitä scenea
@@ -842,8 +853,41 @@ CREATE TABLE IF NOT EXISTS agreements (
 )
 """)
 
+# v8.3.3: Oma taulu location_statusille (korjaus A)
+# Syy: aiemmin location_status eli vain profiles-taulun JSON-blobissa
+# ja saattoi kadota normalize_state / deep_merge_state -operaatioissa.
+conn.execute("""
+CREATE TABLE IF NOT EXISTS location_state (
+    user_id TEXT PRIMARY KEY,
+    location_status TEXT DEFAULT 'separate',
+    with_user_physically INTEGER DEFAULT 0,
+    shared_scene INTEGER DEFAULT 0,
+    last_changed_at REAL,
+    last_changed_by TEXT DEFAULT 'default'
+)
+""")
+
+# v8.3.3: Sticky memories -taulu (korjaus B)
+# Nämä ladataan AINA context-pakkiin ohi embedding-haun.
+# Ei recency-decay, ei similarity-kynnys - pysyvät kunnes käyttäjä poistaa.
+# Tyypit: fantasy, preference, hard_commitment, important_fact
+conn.execute("""
+CREATE TABLE IF NOT EXISTS sticky_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    sticky_type TEXT,
+    content TEXT,
+    category TEXT,
+    created_at REAL,
+    last_referenced_at REAL DEFAULT 0,
+    reference_count INTEGER DEFAULT 0,
+    source_turn_id INTEGER,
+    active INTEGER DEFAULT 1
+)
+""")
+
 conn.commit()
-print("✅ Database initialized with FULL schema")
+print("✅ Database initialized with FULL schema (+ location_state + sticky_memories)")
 
 def migrate_database():
     print("[MIGRATION] Starting database migration...")
@@ -1627,6 +1671,188 @@ def extract_agreements_from_frame(user_id: int, frame: dict, user_text: str, bot
         if desc and len(desc) > 10:
             due = resolve_due_hint(plan.get("due_hint"))
             save_agreement(user_id, desc, target_time=due, initiated_by="user")
+
+# ====================== LOCATION STATE (v8.3.3 korjaus A) ======================
+def save_location_state(user_id: int, location_status: str,
+                        with_user_physically: bool = None,
+                        shared_scene: bool = None,
+                        changed_by: str = "user"):
+    """
+    v8.3.3: Tallennetaan location_status pysyvästi omaan tauluunsa.
+    Tämä varmistaa että tila EI nollaannu normalize_state / boot -operaatioissa.
+    """
+    now = time.time()
+    if with_user_physically is None:
+        with_user_physically = (location_status == "together")
+    if shared_scene is None:
+        shared_scene = (location_status == "together")
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT OR REPLACE INTO location_state
+                (user_id, location_status, with_user_physically, shared_scene,
+                 last_changed_at, last_changed_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(user_id), location_status,
+                  1 if with_user_physically else 0,
+                  1 if shared_scene else 0,
+                  now, changed_by))
+            conn.commit()
+        # Päivitä myös in-memory state
+        if user_id in continuity_state:
+            continuity_state[user_id]["location_status"] = location_status
+            continuity_state[user_id]["with_user_physically"] = bool(with_user_physically)
+            continuity_state[user_id]["shared_scene"] = bool(shared_scene)
+        print(f"[LOCATION] Saved: user={user_id} status={location_status} by={changed_by}")
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[LOCATION ERROR] {e}")
+
+def load_location_state(user_id: int) -> dict:
+    """
+    v8.3.3: Lataa location_status DB:stä. Palauttaa defaultin VAIN jos rivi puuttuu.
+    """
+    with db_lock:
+        result = conn.execute("""
+            SELECT location_status, with_user_physically, shared_scene,
+                   last_changed_at, last_changed_by
+            FROM location_state WHERE user_id=?
+        """, (str(user_id),))
+        row = result.fetchone()
+    if not row:
+        return {
+            "location_status": "separate",
+            "with_user_physically": False,
+            "shared_scene": False,
+            "last_changed_at": 0,
+            "last_changed_by": "default"
+        }
+    return {
+        "location_status": row[0] or "separate",
+        "with_user_physically": bool(row[1]),
+        "shared_scene": bool(row[2]),
+        "last_changed_at": row[3] or 0,
+        "last_changed_by": row[4] or "default"
+    }
+
+def apply_location_state_to_memory(user_id: int):
+    """
+    v8.3.3: Kutsutaan get_or_create_state:n yhteydessä -
+    varmistaa että in-memory state heijastaa DB-totuutta.
+    """
+    loc = load_location_state(user_id)
+    if user_id in continuity_state:
+        continuity_state[user_id]["location_status"] = loc["location_status"]
+        continuity_state[user_id]["with_user_physically"] = loc["with_user_physically"]
+        continuity_state[user_id]["shared_scene"] = loc["shared_scene"]
+
+# ====================== STICKY MEMORIES (v8.3.3 korjaus B) ======================
+async def add_sticky_memory(user_id: int, content: str, sticky_type: str = "fantasy",
+                             category: str = "general", source_turn_id: int = None):
+    """
+    v8.3.3: Lisää sticky-muisto joka ladataan AINA contextiin.
+    sticky_type: fantasy, preference, hard_commitment, important_fact
+    Ei embedding-hakua, ei recency-decaytä - pysyy kunnes poistetaan.
+    """
+    if not content or len(content.strip()) < 5:
+        return
+    # Duplikaattien esto: älä lisää samaa sisältöä uudestaan
+    content_normalized = content.lower().strip()
+    with db_lock:
+        result = conn.execute("""
+            SELECT id, content FROM sticky_memories
+            WHERE user_id=? AND sticky_type=? AND active=1
+        """, (str(user_id), sticky_type))
+        existing = result.fetchall()
+    for row in existing:
+        existing_normalized = row[1].lower().strip()
+        # Jos overlap > 75%, pidä vanha
+        ew = set(existing_normalized.split())
+        nw = set(content_normalized.split())
+        if ew and nw:
+            overlap = len(ew & nw) / max(len(ew | nw), 1)
+            if overlap > 0.75:
+                print(f"[STICKY] Duplicate, skipping: {content[:60]}")
+                return
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT INTO sticky_memories
+                (user_id, sticky_type, content, category, created_at, source_turn_id, active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+            """, (str(user_id), sticky_type, content, category, time.time(), source_turn_id))
+            conn.commit()
+        print(f"[STICKY] Added {sticky_type}/{category}: {content[:60]}")
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[STICKY ERROR] {e}")
+
+def get_sticky_memories(user_id: int, sticky_type: str = None, limit: int = 50) -> list:
+    """
+    v8.3.3: Hakee sticky-muistot. Jos sticky_type=None, palauttaa kaikki.
+    """
+    with db_lock:
+        if sticky_type:
+            result = conn.execute("""
+                SELECT id, sticky_type, content, category, created_at, reference_count
+                FROM sticky_memories
+                WHERE user_id=? AND sticky_type=? AND active=1
+                ORDER BY created_at DESC LIMIT ?
+            """, (str(user_id), sticky_type, limit))
+        else:
+            result = conn.execute("""
+                SELECT id, sticky_type, content, category, created_at, reference_count
+                FROM sticky_memories
+                WHERE user_id=? AND active=1
+                ORDER BY created_at DESC LIMIT ?
+            """, (str(user_id), limit))
+        rows = result.fetchall()
+    return [
+        {"id": r[0], "sticky_type": r[1], "content": r[2], "category": r[3],
+         "created_at": r[4], "reference_count": r[5]}
+        for r in rows
+    ]
+
+def deactivate_sticky_memory(user_id: int, sticky_id: int):
+    """v8.3.3: Deaktivoi (ei poista kokonaan) sticky-muisto."""
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE sticky_memories SET active=0 WHERE id=? AND user_id=?",
+                         (sticky_id, str(user_id)))
+            conn.commit()
+        print(f"[STICKY] Deactivated id={sticky_id}")
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[STICKY ERROR] {e}")
+
+def format_sticky_for_context(stickies: list) -> str:
+    """v8.3.3: Muotoilee sticky-muistot LLM:n prompttiin."""
+    if not stickies:
+        return ""
+    by_type = {}
+    for s in stickies:
+        by_type.setdefault(s["sticky_type"], []).append(s)
+    type_labels = {
+        "fantasy": "KÄYTTÄJÄN FANTASIAT (muista aina)",
+        "preference": "KÄYTTÄJÄN VAHVAT PREFERENSSIT",
+        "hard_commitment": "SITOVAT SOPIMUKSET (älä riko)",
+        "important_fact": "TÄRKEÄT FAKTAT KÄYTTÄJÄSTÄ",
+    }
+    parts = []
+    for stype, items in by_type.items():
+        label = type_labels.get(stype, stype.upper())
+        parts.append(f"\n=== {label} ===")
+        for it in items[:20]:
+            cat = it.get("category", "")
+            cat_str = f" [{cat}]" if cat and cat != "general" else ""
+            parts.append(f"- {it['content'][:200]}{cat_str}")
+    return "\n".join(parts)
 
 def build_narrative_timeline(user_id: int) -> str:
     """
@@ -2928,11 +3154,40 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
             fact_value=fantasy.get("description", ""),
             confidence=0.9, source_turn_id=source_turn_id
         )
+        # v8.3.3 korjaus B: fantasiat myös sticky-muistoiksi - näkyvät AINA
+        await add_sticky_memory(
+            user_id=user_id,
+            content=fantasy.get("description", ""),
+            sticky_type="fantasy",
+            category=fantasy.get("category", "general"),
+            source_turn_id=source_turn_id
+        )
+
+    # v8.3.3 korjaus B: vahvat preferenssit myös sticky-muistoiksi
+    # Katsotaan tallennettuja faktoja - korkean confidencen preferenssit → sticky
+    for fact in facts[:8]:
+        conf = float(fact.get("confidence", 0.7))
+        key = (fact.get("fact_key", "") or "").lower()
+        value = fact.get("fact_value", "")
+        if conf >= 0.85 and any(marker in key for marker in [
+            "preference", "like", "love", "favorite", "hate", "dislike",
+            "tykkää", "rakastaa", "suosikki", "inhoaa"
+        ]):
+            await add_sticky_memory(
+                user_id=user_id,
+                content=f"{key}: {value}",
+                sticky_type="preference",
+                category="strong_preference",
+                source_turn_id=source_turn_id
+            )
 
     scene_hint = frame.get("scene_hint")
-    if scene_hint in SCENE_MICRO:
+    # v8.3.3 korjaus A: älä päivitä scenea jos ollaan together
+    if scene_hint in SCENE_MICRO and state.get("location_status") != "together":
         _set_scene(state, scene_hint, time.time())
         state["micro_context"] = random.choice(SCENE_MICRO[scene_hint])
+    elif scene_hint and state.get("location_status") == "together":
+        print(f"[FRAME] Skipping scene_hint={scene_hint} - location_status=together")
 
     extract_agreements_from_frame(user_id, frame, frame.get("user_text", ""))
 
@@ -2941,11 +3196,14 @@ async def build_context_pack(user_id: int, user_text: str):
     state = get_or_create_state(user_id)
     recent_turns = get_recent_turns(user_id, limit=8)
     relevant_memories = await retrieve_relevant_memories(user_id, user_text, limit=5)
-    active_plans = get_active_plans(user_id, limit=4)
+    # v8.3.3 korjaus C: 4 → 10 aktiivista suunnitelmaa näkyville
+    active_plans = get_active_plans(user_id, limit=10)
     profile_facts = get_profile_facts(user_id, limit=8)
     summaries = get_recent_summaries(user_id, limit=2)
     agreements = get_active_agreements(user_id)
     narrative_timeline = build_narrative_timeline(user_id)
+    # v8.3.3 korjaus B: lataa sticky-muistot aina contextiin
+    sticky_memories = get_sticky_memories(user_id, limit=50)
     return {
         "topic_state": state.get("topic_state", {}),
         "scene": state.get("scene", "neutral"),
@@ -2959,13 +3217,15 @@ async def build_context_pack(user_id: int, user_text: str):
         "summaries": summaries,
         "agreements": agreements,
         "narrative_timeline": narrative_timeline,
-        "temporal_context": build_temporal_context(state)
+        "temporal_context": build_temporal_context(state),
+        "sticky_memories": sticky_memories,
     }
 
 def format_context_pack(context_pack: dict):
     """
     KORJATTU v8.3.2: Muistot ja keskusteluvuorot näyttävät selvästi puhujan.
     Type-labelit auttavat LLM:ää erottamaan kuka teki mitä.
+    KORJATTU v8.3.3: sticky-muistot ja aktiiviset suunnitelmat näkyvät AINA.
     """
     topic_state = context_pack.get("topic_state", {})
     topic = topic_state.get("current_topic", "general")
@@ -2977,14 +3237,12 @@ def format_context_pack(context_pack: dict):
         [f"- {f['fact_key']}: {f['fact_value']}" for f in context_pack.get("profile_facts", [])]
     ) or "- none"
 
-    # KORJATTU v8.3.2: käytetään Käyttäjä/Megan nimiä ei role-termejä
     turns_lines_list = []
     for t in context_pack.get("recent_turns", []):
         speaker = "Käyttäjä" if t['role'] == 'user' else "Megan"
         turns_lines_list.append(f"{speaker}: {t['content']}")
     turns_lines = "\n".join(turns_lines_list)
 
-    # KORJATTU v8.3.2: muistot näytetään selkein tyyppi-labelein
     type_labels = {
         "user_fact": "FAKTA KÄYTTÄJÄSTÄ",
         "user_action": "KÄYTTÄJÄ TEKI/SANOI",
@@ -3009,8 +3267,78 @@ def format_context_pack(context_pack: dict):
 
     narrative_timeline = context_pack.get("narrative_timeline", "")
 
+    # v8.3.3 korjaus B: sticky-muistot näkyvät AINA, ohi embedding-haun
+    sticky_memories = context_pack.get("sticky_memories", []) or []
+    sticky_block = ""
+    if sticky_memories:
+        sticky_formatted = format_sticky_for_context(sticky_memories)
+        sticky_block = f"""
+
+=====================================
+🔒 PYSYVÄT MUISTOT (näkyvät aina - älä unohda näitä):
+=====================================
+{sticky_formatted}
+
+HUOM: Nämä ovat käyttäjän VAHVISTETTUJA fantasioita, preferenssejä ja
+sitovia sopimuksia. Voit viitata niihin luontevasti. Jos käyttäjä mainitsee
+jonkin näistä aiheista, muista että tämä ei ole uusi asia - olette keskustelleet
+siitä aiemmin.
+"""
+
+    # v8.3.3 korjaus C: aktiiviset suunnitelmat näkyvät AINA
+    active_plans = context_pack.get("active_plans", []) or []
+    plans_block = ""
+    if active_plans:
+        plan_lines = []
+        for p in active_plans[:10]:
+            target = p.get("target_time")
+            if target:
+                try:
+                    dt = datetime.fromtimestamp(target, HELSINKI_TZ)
+                    time_str = dt.strftime("%A %d.%m. klo %H:%M")
+                except Exception:
+                    time_str = "aika tuntematon"
+            else:
+                time_str = "ei aikaa"
+            commitment = p.get("commitment_level", "medium")
+            plan_lines.append(f"- [{commitment}] {p['description'][:120]} ({time_str})")
+        plans_block = f"""
+
+=====================================
+📅 AKTIIVISET SUUNNITELMAT (muista kun relevanttia):
+=====================================
+{chr(10).join(plan_lines)}
+"""
+
+    # v8.3.3: lukitut sopimukset selkeästi näkyviin
+    agreements = context_pack.get("agreements", []) or []
+    agreements_block = ""
+    if agreements:
+        ag_lines = []
+        for ag in agreements[:5]:
+            target = ag.get("target_time")
+            if target:
+                try:
+                    dt = datetime.fromtimestamp(target, HELSINKI_TZ)
+                    time_str = dt.strftime("%A %d.%m. klo %H:%M")
+                except Exception:
+                    time_str = "aika tuntematon"
+            else:
+                time_str = "sovittu aika ei tiedossa"
+            ag_lines.append(f"- [LUKITTU] {ag['description'][:120]} ({time_str})")
+        agreements_block = f"""
+
+=====================================
+🔐 SOPIMUKSET (ÄLÄ muuta, ÄLÄ ehdota muuttamista):
+=====================================
+{chr(10).join(ag_lines)}
+"""
+
     return f"""
 {narrative_timeline}
+{sticky_block}
+{plans_block}
+{agreements_block}
 
 =====================================
 CURRENT TOPIC: {topic}
@@ -4061,8 +4389,17 @@ def get_or_create_state(user_id):
         topic_state = load_topic_state_from_db(user_id)
         if topic_state:
             continuity_state[user_id]["topic_state"] = topic_state
+        # v8.3.3 korjaus A: lataa location_status pysyvästä taulusta
+        apply_location_state_to_memory(user_id)
     else:
         continuity_state[user_id] = normalize_state(continuity_state[user_id])
+        # v8.3.3: Varmista että normalize_state EI nollaa location_statusia.
+        # DB-arvo voittaa aina jos rivi on olemassa (last_changed_at > 0).
+        loc = load_location_state(user_id)
+        if loc["last_changed_at"] > 0:
+            continuity_state[user_id]["location_status"] = loc["location_status"]
+            continuity_state[user_id]["with_user_physically"] = loc["with_user_physically"]
+            continuity_state[user_id]["shared_scene"] = loc["shared_scene"]
     return continuity_state[user_id]
 
 def create_database_indexes():
@@ -4199,6 +4536,21 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = conn.execute("SELECT COUNT(*) FROM agreements WHERE user_id=? AND status='active'", (str(user_id),))
         agreements_count = result.fetchone()[0]
 
+        # v8.3.3: sticky-muistojen tilastot
+        result = conn.execute("SELECT COUNT(*) FROM sticky_memories WHERE user_id=? AND active=1", (str(user_id),))
+        sticky_total = result.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM sticky_memories WHERE user_id=? AND active=1 AND sticky_type='fantasy'", (str(user_id),))
+        sticky_fantasy = result.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM sticky_memories WHERE user_id=? AND active=1 AND sticky_type='preference'", (str(user_id),))
+        sticky_preference = result.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM sticky_memories WHERE user_id=? AND active=1 AND sticky_type='hard_commitment'", (str(user_id),))
+        sticky_commitment = result.fetchone()[0]
+        result = conn.execute("SELECT COUNT(*) FROM sticky_memories WHERE user_id=? AND active=1 AND sticky_type='important_fact'", (str(user_id),))
+        sticky_fact = result.fetchone()[0]
+
+        # v8.3.3: location-tilan info
+        loc = load_location_state(user_id)
+
         now = time.time()
         result = conn.execute("""
             SELECT COUNT(*) FROM episodic_memories
@@ -4218,6 +4570,11 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (str(user_id), now - (30 * 86400)))
         older = result.fetchone()[0]
 
+    loc_changed_str = "ei koskaan"
+    if loc.get("last_changed_at", 0) > 0:
+        dt = datetime.fromtimestamp(loc["last_changed_at"], HELSINKI_TZ)
+        loc_changed_str = dt.strftime("%Y-%m-%d %H:%M")
+
     txt = f"""
 🧠 MEMORY STATS (v{BOT_VERSION})
 
@@ -4236,6 +4593,17 @@ Episodic Memories: {episodic_total}
 
   Legacy (v8.3.1 ja aiemmat):
   - Combined "conversation_event": {conversation_count}
+
+🔒 Sticky memories (v8.3.3 - näkyvät aina contextissa): {sticky_total}
+  - Fantasies: {sticky_fantasy}
+  - Preferences: {sticky_preference}
+  - Hard commitments: {sticky_commitment}
+  - Important facts: {sticky_fact}
+
+📍 Location state (v8.3.3):
+  - Status: {loc.get('location_status')}
+  - With user physically: {loc.get('with_user_physically')}
+  - Last changed: {loc_changed_str} (by {loc.get('last_changed_by', 'unknown')})
 
 Age distribution:
   - Last 7 days: {last_week}
@@ -4279,17 +4647,30 @@ async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-    state["location_status"] = "together"
-    state["with_user_physically"] = True
-    state["shared_scene"] = True
-    await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
+    # v8.3.3 korjaus A: tallennetaan location_state pysyvästi DB:hen
+    save_location_state(
+        user_id=user_id,
+        location_status="together",
+        with_user_physically=True,
+        shared_scene=True,
+        changed_by="cmd_together"
+    )
+    await update.message.reply_text(
+        "✅ Olet nyt fyysisesti Meganin kanssa.\n"
+        "(Tila säilyy kunnes käytät /separate - Megan ei lähde 'töihin' tai 'kaupungille' puheen perusteella.)"
+    )
 
 async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
-    state["location_status"] = "separate"
-    state["with_user_physically"] = False
-    state["shared_scene"] = False
+    # v8.3.3 korjaus A: tallennetaan location_state pysyvästi DB:hen
+    save_location_state(
+        user_id=user_id,
+        location_status="separate",
+        with_user_physically=False,
+        shared_scene=False,
+        changed_by="cmd_separate"
+    )
     await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
 
 async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4389,6 +4770,109 @@ async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📵 Ignooraa viestit: {'Kyllä' if result['will_ignore'] else 'Ei'}"
     )
 
+async def cmd_fantasies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.3: Näytä käyttäjän fantasiat joita Megan muistaa."""
+    user_id = update.effective_user.id
+    fantasies = get_sticky_memories(user_id, sticky_type="fantasy", limit=50)
+    if not fantasies:
+        await update.message.reply_text(
+            "💭 Ei tallennettuja fantasioita vielä.\n"
+            "Fantasiat tallentuvat automaattisesti kun keskustelet niistä Meganin kanssa."
+        )
+        return
+    lines = [f"💭 FANTASIAT ({len(fantasies)} kpl):\n"]
+    by_cat = {}
+    for f in fantasies:
+        cat = f.get("category", "general")
+        by_cat.setdefault(cat, []).append(f)
+    for cat, items in by_cat.items():
+        lines.append(f"\n📂 {cat.upper()}:")
+        for item in items:
+            created_dt = datetime.fromtimestamp(item["created_at"], HELSINKI_TZ)
+            age_days = int((time.time() - item["created_at"]) / 86400)
+            age_str = f"{age_days}pv sitten" if age_days > 0 else "tänään"
+            lines.append(f"  [#{item['id']}] {item['content'][:150]} ({age_str})")
+    lines.append("\n💡 Poista fantasian numerolla: /forget_sticky <id>")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n...(lyhennetty)"
+    await update.message.reply_text(text)
+
+async def cmd_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.3: Näytä kaikki pysyvät sticky-muistot (fantasiat, preferenssit, sopimukset)."""
+    user_id = update.effective_user.id
+    all_sticky = get_sticky_memories(user_id, limit=100)
+    if not all_sticky:
+        await update.message.reply_text("🔒 Ei pysyviä muistoja.")
+        return
+    by_type = {}
+    for s in all_sticky:
+        by_type.setdefault(s["sticky_type"], []).append(s)
+    type_labels = {
+        "fantasy": "💭 FANTASIAT",
+        "preference": "⭐ PREFERENSSIT",
+        "hard_commitment": "🔐 SITOVAT SOPIMUKSET",
+        "important_fact": "📌 TÄRKEÄT FAKTAT",
+    }
+    lines = [f"🔒 PYSYVÄT MUISTOT ({len(all_sticky)} kpl):\n"]
+    for stype, items in by_type.items():
+        label = type_labels.get(stype, stype.upper())
+        lines.append(f"\n{label} ({len(items)}):")
+        for item in items[:15]:
+            lines.append(f"  [#{item['id']}] {item['content'][:130]}")
+    lines.append("\n💡 Poista: /forget_sticky <id>")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3950] + "\n...(lyhennetty)"
+    await update.message.reply_text(text)
+
+async def cmd_forget_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.3: Poista (deaktivoi) sticky-muisto numerolla."""
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text(
+            "Käyttö: /forget_sticky <id>\n"
+            "Näe ID:t komennoilla /fantasies tai /sticky"
+        )
+        return
+    try:
+        sticky_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ ID:n pitää olla numero")
+        return
+    deactivate_sticky_memory(user_id, sticky_id)
+    await update.message.reply_text(f"✅ Sticky-muisto #{sticky_id} deaktivoitu.")
+
+async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.3: Manuaalinen sticky-muiston lisäys.
+    Käyttö: /add_sticky <tyyppi> <sisältö>
+    Tyypit: fantasy, preference, hard_commitment, important_fact
+    """
+    user_id = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Käyttö: /add_sticky <tyyppi> <sisältö>\n"
+            "Tyypit: fantasy, preference, hard_commitment, important_fact\n"
+            "Esim: /add_sticky fantasy Haluaisin kokeilla latex-asuja"
+        )
+        return
+    sticky_type = context.args[0].lower()
+    valid_types = ["fantasy", "preference", "hard_commitment", "important_fact"]
+    if sticky_type not in valid_types:
+        await update.message.reply_text(
+            f"❌ Virheellinen tyyppi. Vaihtoehdot: {', '.join(valid_types)}"
+        )
+        return
+    content = " ".join(context.args[1:])
+    await add_sticky_memory(
+        user_id=user_id,
+        content=content,
+        sticky_type=sticky_type,
+        category="manual",
+        source_turn_id=None
+    )
+    await update.message.reply_text(f"✅ Lisätty {sticky_type}: {content[:100]}")
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION} COMMANDS
@@ -4396,6 +4880,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Primary LLM: Claude Opus 4.7 (character lock)
 NSFW-hybrid: Grok käytössä kun mode=nsfw tai submission > 0.6
 Memory fix v8.3.2: speaker-separated storage
+Sticky memory v8.3.3: fantasiat & preferenssit säilyvät pysyvästi
 
 Session:
 /newgame - Resetoi session
@@ -4403,13 +4888,19 @@ Session:
 
 Status:
 /status - Näytä tila
-/plans - Näytä suunnitelmat
-/memory - Muististatistiikka (näyttää user/megan erottelun)
+/plans - Näytä suunnitelmat (top 10)
+/memory - Muististatistiikka
+/fantasies - Näytä tallennetut fantasiat (v8.3.3)
+/sticky - Näytä kaikki pysyvät muistot (v8.3.3)
+
+Sticky-muistit:
+/add_sticky <tyyppi> <sisältö> - Lisää pysyvä muisto
+/forget_sticky <id> - Poista pysyvä muisto
 
 Control:
 /scene <tyyppi> - Vaihda scene
-/together - Aseta fyysisesti yhdessä
-/separate - Aseta erilleen
+/together - Aseta fyysisesti yhdessä (säilyy pysyvästi)
+/separate - Aseta erilleen (säilyy pysyvästi)
 /mood <tyyppi> - Vaihda emotional mode
 /tension <0.0-1.0> - Aseta tension
 
@@ -4492,826 +4983,11 @@ async def main():
     application.add_handler(CommandHandler("tension", cmd_tension))
     application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("activity", cmd_activity))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("[MAIN] Step 9: Initializing...")
-    await application.initialize()
-
-    print("[MAIN] Step 10: Starting...")
-    await application.start()
-
-    print("[MAIN] Step 11: Background task...")
-    background_task = asyncio.create_task(check_proactive_triggers(application))
-
-    print("[MAIN] Step 12: Polling...")
-    await application.updater.start_polling(drop_pending_updates=True)
-
-    print(f"[MAIN] ✅ Bot running with Claude Opus 4.7 + Grok NSFW-hybrid + memory speaker fix!")
-
-    try:
-        await asyncio.Event().wait()
-    except (KeyboardInterrupt, SystemExit):
-        print("\n[MAIN] Shutdown signal received")
-    except Exception as e:
-        print(f"[MAIN] Event loop error: {type(e).__name__}: {e}")
-    finally:
-        print("[MAIN] Cleaning up...")
-
-        print(f"[MAIN] Flushing state for {len(continuity_state)} users...")
-        for flush_uid in list(continuity_state.keys()):
-            try:
-                save_persistent_state_to_db(flush_uid)
-            except Exception as e:
-                print(f"[MAIN] Flush error for {flush_uid}: {e}")
-        print("[MAIN] State flushed.")
-
-        if background_task and not background_task.done():
-            background_task.cancel()
-            try:
-                await background_task
-            except asyncio.CancelledError:
-                pass
-        try:
-            await application.updater.stop()
-        except Exception as e:
-            print(f"[MAIN] Updater stop error: {e}")
-        try:
-            await application.stop()
-            await application.shutdown()
-        except Exception as e:
-            print(f"[MAIN] Shutdown error: {e}")
-        print("[MAIN] Done.")
-
-
-if __name__ == "__main__":
-    print("[STARTUP] Starting Megan with Claude Opus 4.7 + Grok NSFW-hybrid + memory speaker fix...")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[STARTUP] Interrupted")
-    except Exception as e:
-        print(f"[STARTUP] Fatal: {type(e).__name__}: {e}")
-        traceback.print_exc()
-
-# ====================== HANDLE MESSAGE ======================
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    KORJATTU v8.3.2: Käyttäjän ja Meganin vuorot tallennetaan ERIKSEEN
-    muistoihin, ei enää combined "User: X\\nAssistant: Y" -blobina.
-    Tämä on KESKEINEN puhuja-sekaannuksen korjaus.
-    """
-    user_id = None
-    text = None
-    state = None
-
-    try:
-        user_id = update.effective_user.id
-        text = (update.message.text or "").strip()
-
-        if not text:
-            return
-
-        current_time = time.time()
-        update_temporal_state(user_id, current_time)
-
-        t = text.lower()
-
-        image_triggers = [
-            "laheta kuva", "haluan kuvan", "tee kuva", "nayta kuva",
-            "ota kuva", "laheta pic", "send pic", "picture",
-            "show me", "selfie", "valokuva",
-            "lähetä kuva", "näytä kuva",
-        ]
-        is_image_request = any(trigger in t for trigger in image_triggers)
-
-        comment_image_triggers = [
-            "kommentoi kuvaa", "kommentoi se kuva", "mita mielta oot siita kuvasta",
-            "mita mielto oot", "kerro siita kuvasta", "analysoi se kuva",
-            "milta se kuva nakyttaa", "mita siina kuvassa on", "muistatko sen kuvan",
-            "se kuva", "tuo kuva", "edellinen kuva", "viiminen kuva",
-        ]
-        is_image_comment = (
-            any(trigger in t for trigger in comment_image_triggers)
-            and get_or_create_state(user_id).get("last_image")
-        )
-
-        state = get_or_create_state(user_id)
-
-        if "submission_level" not in state:
-            state["submission_level"] = 0.0
-        if "last_interaction" not in state:
-            state["last_interaction"] = 0
-        if "conversation_mode" not in state:
-            state["conversation_mode"] = "casual"
-        if "conversation_mode_last_change" not in state:
-            state["conversation_mode_last_change"] = 0
-        if "location_status" not in state:
-            state["location_status"] = "separate"
-
-        update_submission_level(user_id, text)
-        state["last_interaction"] = time.time()
-        apply_scene_updates_from_turn(state, text)
-
-        conversation_history.setdefault(user_id, [])
-        conversation_history[user_id].append({"role": "user", "content": text})
-        conversation_history[user_id] = conversation_history[user_id][-20:]
-
-        user_turn_id = save_turn(user_id, "user", text)
-
-        frame = await extract_turn_frame(user_id, text)
-        await apply_frame(user_id, frame, user_turn_id)
-
-        # KORJATTU v8.3.2: Tallenna KÄYTTÄJÄN viesti omana muistona
-        # (ei yhdistetyllä "User: X\nAssistant: Y" -formaatilla)
-        if len(text) >= 12:
-            await store_episodic_memory(
-                user_id=user_id,
-                content=f"Käyttäjä sanoi: {text}",
-                memory_type="user_utterance",
-                source_turn_id=user_turn_id
-            )
-
-        if is_image_comment:
-            last_img = state.get("last_image") or {}
-            existing_analysis = last_img.get("analysis")
-            if not existing_analysis:
-                existing_analysis = await reanalyze_last_sent_image(context.bot, state)
-            if existing_analysis:
-                comment = await generate_image_commentary(user_id, existing_analysis, state, text)
-                await update.message.reply_text(comment)
-            else:
-                await update.message.reply_text(
-                    "Mulla ei oo kuvaa mitä kommentoida... lähetä pyyntö ensin? 📸"
-                )
-            save_persistent_state_to_db(user_id)
-            return
-
-        if is_image_request:
-            await handle_image_request(update, user_id, text)
-            return
-
-        plan_action = resolve_plan_reference(user_id, text)
-        if plan_action:
-            action = plan_action["action"]
-            plan_desc = plan_action["plan"]["description"][:80]
-            # KORJATTU v8.3.2: merkitään että tämä on KÄYTTÄJÄN teko
-            await store_episodic_memory(
-                user_id=user_id,
-                content=f"Käyttäjä: plan '{plan_desc}' merkitty tilaan '{action}'",
-                memory_type="plan_update",
-                source_turn_id=user_turn_id
-            )
-
-        reply = await generate_llm_reply(user_id, text)
-
-        if breaks_scene_logic(reply, state):
-            reply = "Hetki, kadotin ajatuksen. Sano uudelleen."
-        if breaks_temporal_logic(reply, state):
-            reply = "Hetki, olin vähän muualla. Mitä sanoit?"
-
-        conversation_history[user_id].append({"role": "assistant", "content": reply})
-        conversation_history[user_id] = conversation_history[user_id][-20:]
-
-        assistant_turn_id = save_turn(user_id, "assistant", reply)
-
-        # KORJATTU v8.3.2: Tallenna MEGANIN vastaus OMANA muistona
-        # (ei yhdistettynä käyttäjän viestin kanssa)
-        # Megan_utterance saa negatiivisen painon retrieve_relevant_memories:ssa
-        # jotta sitä ei haeta "faktana käyttäjästä"
-        if len(reply) >= 12:
-            await store_episodic_memory(
-                user_id=user_id,
-                content=f"Megan sanoi: {reply}",
-                memory_type="megan_utterance",
-                source_turn_id=assistant_turn_id
-            )
-
-        await maybe_create_summary(user_id)
-
-        if len(reply) > 4000:
-            print(f"[LONG MESSAGE] Splitting {len(reply)} chars")
-            chunks = [reply[i:i+3900] for i in range(0, len(reply), 3900)]
-            for i, chunk in enumerate(chunks, 1):
-                await update.message.reply_text(chunk)
-                if i < len(chunks):
-                    await asyncio.sleep(0.3)
-        else:
-            await update.message.reply_text(reply)
-
-        save_persistent_state_to_db(user_id)
-
-    except KeyError as e:
-        error_msg = f"""
-🔴 KEYERROR in handle_message
-Missing key: {str(e)}
-State keys: {list(state.keys()) if state is not None else 'State not created'}
-User: {user_id if user_id is not None else 'N/A'}
-Text: {text[:100] if text else 'N/A'}
-Traceback:
-{traceback.format_exc()}
-"""
-        print(error_msg)
-        try:
-            if update and update.message:
-                await update.message.reply_text(
-                    f"⚠️ Puuttuva avain: {str(e)}\nKäytä /status tarkistaaksesi tilan"
-                )
-        except Exception as telegram_error:
-            print(f"[TELEGRAM ERROR] {telegram_error}")
-
-    except Exception as e:
-        error_msg = f"""
-🔴 VIRHE HANDLE_MESSAGE:SSA
-Tyyppi: {type(e).__name__}
-Viesti: {str(e)[:500]}
-Traceback:
-{traceback.format_exc()[:800]}
-User: {user_id if user_id is not None else 'N/A'}
-Text: {text[:100] if text else 'N/A'}
-"""
-        print(error_msg)
-        try:
-            if update and update.message:
-                await update.message.reply_text(
-                    f"⚠️ Virhe: {type(e).__name__}\nYritä uudelleen tai käytä /help"
-                )
-        except Exception as telegram_error:
-            print(f"[TELEGRAM ERROR] {telegram_error}")
-
-# ====================== BACKGROUND TASKS ======================
-async def check_proactive_triggers(application):
-    while True:
-        try:
-            now_ts = time.time()
-            print(f"[PROACTIVE] Check at {datetime.fromtimestamp(now_ts, HELSINKI_TZ).strftime('%H:%M:%S')}")
-            with db_lock:
-                result = conn.execute("""
-                    SELECT user_id, id, description, target_time, status,
-                           commitment_level, last_reminded_at
-                    FROM planned_events
-                    WHERE status='planned' AND target_time IS NOT NULL
-                """)
-                rows = result.fetchall()
-            for row in rows:
-                user_id, plan_id, description, target_time, status, commitment_level, last_reminded_at = row
-                if not target_time:
-                    continue
-                should_remind = (
-                    (0 <= target_time - now_ts <= 900) or
-                    (0 <= now_ts - target_time <= 1800)
-                )
-                if not should_remind:
-                    continue
-                if last_reminded_at and (now_ts - last_reminded_at) < 3600:
-                    continue
-                try:
-                    await application.bot.send_message(
-                        chat_id=int(user_id),
-                        text=f"Muistutus: {description}"
-                    )
-                    with db_lock:
-                        conn.execute("UPDATE planned_events SET last_reminded_at=? WHERE id=?",
-                                     (now_ts, plan_id))
-                        conn.commit()
-                    print(f"[PROACTIVE] Sent reminder: {description[:50]}")
-                except Exception as e:
-                    print(f"[REMINDER ERROR] {e}")
-
-            for flush_uid in list(continuity_state.keys()):
-                try:
-                    last_save = continuity_state[flush_uid].get("_last_save_at", 0)
-                    if time.time() - last_save > 1800:
-                        save_persistent_state_to_db(flush_uid)
-                        continuity_state[flush_uid]["_last_save_at"] = time.time()
-                except Exception as flush_err:
-                    print(f"[FLUSH ERROR] {flush_uid}: {flush_err}")
-
-            for uid in list(continuity_state.keys()):
-                try:
-                    await maybe_send_proactive_image(application, uid)
-                except Exception as e:
-                    print(f"[PROACTIVE IMAGE ERROR for {uid}] {e}")
-
-        except Exception as e:
-            print(f"[PROACTIVE ERROR] {e}")
-            traceback.print_exc()
-
-        await asyncio.sleep(300)
-
-# ====================== STATE MANAGEMENT ======================
-def build_default_state() -> dict:
-    return {
-        "energy": "normal",
-        "availability": "free",
-        "last_interaction": 0,
-        "persona_mode": "warm",
-        "emotional_mode": "calm",
-        "emotional_mode_last_change": 0,
-        "intent": "casual",
-        "tension": 0.0,
-        "phase": "neutral",
-        "summary": "",
-        "last_image": None,
-        "image_history": [],
-        "last_proactive_image_at": 0,
-        "location_status": "separate",
-        "with_user_physically": False,
-        "shared_scene": False,
-        "last_scene_source": None,
-        "user_model": {
-            "dominance_preference": 0.5,
-            "emotional_dependency": 0.5,
-            "validation_need": 0.5,
-            "jealousy_sensitivity": 0.5,
-            "control_resistance": 0.5,
-            "last_updated": 0
-        },
-        "planned_events": [],
-        "last_referenced_plan_id": None,
-        "conversation_themes": {},
-        "user_preferences": {
-            "fantasy_themes": [],
-            "turn_ons": [],
-            "turn_offs": [],
-            "communication_style": "neutral",
-            "resistance_level": 0.5,
-            "last_updated": 0
-        },
-        "manipulation_history": {},
-        "submission_level": 0.0,
-        "humiliation_tolerance": 0.0,
-        "cuckold_acceptance": 0.0,
-        "strap_on_introduced": False,
-        "chastity_discussed": False,
-        "feminization_level": 0.0,
-        "dominance_level": 1,
-        "sexual_boundaries": {
-            "hard_nos": [],
-            "soft_nos": [],
-            "accepted": [],
-            "actively_requested": []
-        },
-        "topic_state": {
-            "current_topic": "general",
-            "topic_summary": "",
-            "open_questions": [],
-            "open_loops": [],
-            "updated_at": time.time()
-        },
-        "conversation_mode": "casual",
-        "conversation_mode_last_change": 0,
-        "temporal_state": {
-            "last_message_timestamp": 0,
-            "last_message_time_str": "",
-            "time_since_last_message_hours": 0.0,
-            "time_since_last_message_minutes": 0,
-            "current_activity_started_at": 0,
-            "current_activity_duration_planned": 0,
-            "current_activity_end_time": 0,
-            "activity_type": None,
-            "should_ignore_until": 0,
-            "ignore_reason": None
-        },
-        **init_scene_state()
-    }
-
-def deep_merge_state(existing: dict, defaults: dict) -> dict:
-    result = defaults.copy()
-    for key, value in existing.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge_state(value, result[key])
-        else:
-            result[key] = value
-    return result
-
-def normalize_state(state: dict) -> dict:
-    return deep_merge_state(state, build_default_state())
-
-def get_or_create_state(user_id):
-    if user_id not in continuity_state:
-        print(f"[STATE] Creating new state for user {user_id}")
-        continuity_state[user_id] = build_default_state()
-        continuity_state[user_id]["planned_events"] = load_plans_from_db(user_id)
-        topic_state = load_topic_state_from_db(user_id)
-        if topic_state:
-            continuity_state[user_id]["topic_state"] = topic_state
-    else:
-        continuity_state[user_id] = normalize_state(continuity_state[user_id])
-    return continuity_state[user_id]
-
-def create_database_indexes():
-    try:
-        with db_lock:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user_created ON episodic_memories(user_id, created_at DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user_type ON episodic_memories(user_id, memory_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user_created_type ON episodic_memories(user_id, created_at DESC, memory_type)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_user ON profile_facts(user_id, updated_at DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_user_status ON planned_events(user_id, status, created_at DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_user ON turns(user_id, id DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_log_user_type ON activity_log(user_id, activity_type, started_at DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_agreements_user_status ON agreements(user_id, status, agreed_at DESC)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_target_time ON planned_events(user_id, target_time, status)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_summaries_user ON summaries(user_id, created_at DESC)")
-            conn.commit()
-            print("✅ Database indexes created (v8.3.2 optimized)")
-    except Exception as e:
-        print(f"[INDEX ERROR] {e}")
-
-# ====================== COMMAND HANDLERS ======================
-async def cmd_new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conversation_history[user_id] = []
-    last_replies[user_id] = deque(maxlen=3)
-    working_memory[user_id] = {}
-    if user_id in continuity_state:
-        del continuity_state[user_id]
-    await update.message.reply_text("🔄 Session reset. Muistot säilyvät, mutta keskustelu alkaa alusta.")
-
-async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conversation_history[user_id] = []
-    last_replies[user_id] = deque(maxlen=3)
-    working_memory[user_id] = {}
-    if user_id in continuity_state:
-        del continuity_state[user_id]
-    with db_lock:
-        for table in ["memories", "profiles", "planned_events", "topic_state", "turns",
-                      "episodic_memories", "profile_facts", "summaries", "activity_log", "agreements"]:
-            conn.execute(f"DELETE FROM {table} WHERE user_id=?", (str(user_id),))
-        conn.commit()
-    await update.message.reply_text("🗑️ Kaikki muistot ja tila poistettu. Täysi uusi alku.")
-
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    sync_plans_to_state(user_id)
-    state = get_or_create_state(user_id)
-    txt = f"""
-📊 STATUS (v{BOT_VERSION})
-
-Primary LLM: {CLAUDE_MODEL_PRIMARY} (character lock)
-NSFW-hybrid: Grok käytössä kun mode=nsfw tai submission > 0.6
-Muistin puhuja-fix: ON (v8.3.2)
-
-Scene: {state.get('scene')}
-Micro context: {state.get('micro_context')}
-Action: {state.get('current_action')}
-Location status: {state.get('location_status')}
-
-Persona mode: {state.get('persona_mode')}
-Emotional mode: {state.get('emotional_mode')}
-Intent: {state.get('intent')}
-Tension: {state.get('tension', 0.0):.2f}
-Phase: {state.get('phase')}
-Submission: {state.get('submission_level', 0.0):.2f}
-
-Conversation mode: {state.get('conversation_mode')}
-Topic: {state.get('topic_state', {}).get('current_topic')}
-Topic summary: {state.get('topic_state', {}).get('topic_summary', '')[:120]}
-
-Plans: {len(state.get('planned_events', []))}
-
-Memory config:
-- Search window: {MEMORY_SEARCH_WINDOW_DAYS} days
-- Max search rows: {MEMORY_SEARCH_MAX_ROWS}
-- Dedup threshold: {MEMORY_DEDUP_THRESHOLD:.0%}
-"""
-    await update.message.reply_text(txt)
-
-async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    sync_plans_to_state(user_id)
-    state = get_or_create_state(user_id)
-    plans = state.get("planned_events", [])
-    if not plans:
-        await update.message.reply_text("📋 Ei suunnitelmia.")
-        return
-    lines = ["📋 SUUNNITELMAT:\n"]
-    for i, plan in enumerate(plans[-10:], 1):
-        age_min = int((time.time() - plan.get("created_at", time.time())) / 60)
-        lines.append(
-            f"{i}. {plan.get('description', '')[:100]}\n"
-            f"   Status: {plan.get('status', 'planned')}\n"
-            f"   Commitment: {plan.get('commitment_level', 'medium')}\n"
-            f"   Age: {age_min} min\n"
-        )
-    await update.message.reply_text("\n".join(lines))
-
-async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    with db_lock:
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=?", (str(user_id),))
-        episodic_total = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='fantasy'", (str(user_id),))
-        fantasy_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='event'", (str(user_id),))
-        event_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='conversation_event'", (str(user_id),))
-        conversation_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='user_utterance'", (str(user_id),))
-        user_utt_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='megan_utterance'", (str(user_id),))
-        megan_utt_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='user_fact'", (str(user_id),))
-        user_fact_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='user_action'", (str(user_id),))
-        user_action_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM episodic_memories WHERE user_id=? AND memory_type='image_sent'", (str(user_id),))
-        image_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM profile_facts WHERE user_id=?", (str(user_id),))
-        facts_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM summaries WHERE user_id=?", (str(user_id),))
-        summaries_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),))
-        turns_count = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status IN ('planned', 'in_progress')", (str(user_id),))
-        active_plans = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM planned_events WHERE user_id=? AND status='completed'", (str(user_id),))
-        completed_plans = result.fetchone()[0]
-        result = conn.execute("SELECT COUNT(*) FROM agreements WHERE user_id=? AND status='active'", (str(user_id),))
-        agreements_count = result.fetchone()[0]
-
-        now = time.time()
-        result = conn.execute("""
-            SELECT COUNT(*) FROM episodic_memories
-            WHERE user_id=? AND created_at > ?
-        """, (str(user_id), now - (7 * 86400)))
-        last_week = result.fetchone()[0]
-
-        result = conn.execute("""
-            SELECT COUNT(*) FROM episodic_memories
-            WHERE user_id=? AND created_at > ? AND created_at <= ?
-        """, (str(user_id), now - (30 * 86400), now - (7 * 86400)))
-        last_month = result.fetchone()[0]
-
-        result = conn.execute("""
-            SELECT COUNT(*) FROM episodic_memories
-            WHERE user_id=? AND created_at <= ?
-        """, (str(user_id), now - (30 * 86400)))
-        older = result.fetchone()[0]
-
-    txt = f"""
-🧠 MEMORY STATS (v{BOT_VERSION})
-
-Episodic Memories: {episodic_total}
-  By speaker/type (v8.3.2 speaker-separated):
-  - [KÄYTTÄJÄ] user_utterance: {user_utt_count}
-  - [MEGAN] megan_utterance: {megan_utt_count}
-  - [FAKTA] user_fact: {user_fact_count}
-  - [TEKO] user_action: {user_action_count}
-  - Fantasies: {fantasy_count}
-  - Events: {event_count}
-  - Images: {image_count}
-  - Legacy conversation_event: {conversation_count}
-
-Age distribution:
-  - Last 7 days: {last_week}
-  - 7-30 days: {last_month}
-  - Older than 30 days: {older}
-
-Profile Facts: {facts_count}
-Summaries: {summaries_count}
-
-Plans:
-  - Active: {active_plans}
-  - Completed: {completed_plans}
-
-Agreements (locked): {agreements_count}
-Raw Turns: {turns_count}
-
-Search config:
-  - Window: {MEMORY_SEARCH_WINDOW_DAYS}d, max {MEMORY_SEARCH_MAX_ROWS} rows
-  - Dedup: {MEMORY_DEDUP_THRESHOLD:.0%}
-  - megan_utterance weight: -0.30 (filtered out from fact retrieval)
-"""
-    await update.message.reply_text(txt)
-
-async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    if not context.args:
-        await update.message.reply_text("Käyttö: /scene home|work|public|bed|shower|commute|neutral")
-        return
-    new_scene = context.args[0].lower()
-    valid_scenes = ["home", "work", "public", "bed", "shower", "commute", "neutral"]
-    if new_scene not in valid_scenes:
-        await update.message.reply_text(f"Virheellinen scene. Vaihtoehdot: {', '.join(valid_scenes)}")
-        return
-    state["scene"] = new_scene
-    state["micro_context"] = random.choice(SCENE_MICRO.get(new_scene, [""]))
-    state["last_scene_change"] = time.time()
-    state["scene_locked_until"] = time.time() + MIN_SCENE_DURATION
-    await update.message.reply_text(f"✅ Scene vaihdettu: {new_scene}")
-
-async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    state["location_status"] = "together"
-    state["with_user_physically"] = True
-    state["shared_scene"] = True
-    await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
-
-async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    state["location_status"] = "separate"
-    state["with_user_physically"] = False
-    state["shared_scene"] = False
-    await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
-
-async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    if not context.args:
-        await update.message.reply_text(
-            f"Nykyinen mood: {state.get('emotional_mode', 'calm')}\n"
-            "Käyttö: /mood calm|playful|warm|testing|jealous|provocative|intense|cooling|distant"
-        )
-        return
-    new_mood = context.args[0].lower()
-    state["emotional_mode"] = new_mood
-    state["emotional_mode_last_change"] = time.time()
-    await update.message.reply_text(f"✅ Emotional mode vaihdettu: {new_mood}")
-
-async def cmd_tension(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    if not context.args:
-        await update.message.reply_text(f"Nykyinen tension: {state.get('tension', 0.0):.2f}")
-        return
-    try:
-        value = float(context.args[0])
-        value = max(0.0, min(1.0, value))
-        state["tension"] = value
-        await update.message.reply_text(f"✅ Tension asetettu: {value:.2f}")
-    except ValueError:
-        await update.message.reply_text("Virhe: anna numero välillä 0.0-1.0")
-
-async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if context.args:
-        description = " ".join(context.args)
-        await handle_image_request(update, user_id, f"Haluan kuvan: {description}")
-    else:
-        await handle_image_request(update, user_id, "Lähetä kuva")
-
-async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if len(context.args) < 1:
-        await update.message.reply_text(
-            "Käyttö: /activity <tyyppi> [tunnit]\n"
-            "Esim: /activity date 3\n\n"
-            "Tyypit:\n"
-            "Lyhyet: coffee, shopping, gym, lunch\n"
-            "Keskipitkät: date, dinner, bar, party\n"
-            "Pitkät: evening_date, club_night, overnight_date\n"
-            "Muut: work, meeting, mystery, spa, day_trip"
-        )
-        return
-    ACTIVITY_ALIASES = {
-        "date": "casual_date", "gym": "gym", "work": "work",
-        "shopping": "shopping", "meeting": "meeting", "dinner": "dinner",
-        "bar": "bar", "coffee": "coffee", "lunch": "lunch", "party": "party",
-        "club": "club_night", "overnight": "overnight_date",
-        "evening": "evening_date", "mystery": "mystery", "spa": "spa"
-    }
-    activity_input = context.args[0].lower()
-    activity_type = ACTIVITY_ALIASES.get(activity_input, activity_input)
-    if activity_type not in ACTIVITY_DURATIONS:
-        await update.message.reply_text(
-            f"❌ Tuntematon aktiviteetti: {activity_input}\n"
-            f"Käytä /activity ilman parametreja nähdäksesi listan."
-        )
-        return
-    duration_hours = None
-    if len(context.args) >= 2:
-        try:
-            duration_hours = float(context.args[1])
-        except ValueError:
-            await update.message.reply_text("Virhe: tunnit pitää olla numero")
-            return
-    try:
-        result = start_activity_with_duration(
-            user_id=user_id,
-            activity_type=activity_type,
-            duration_hours=duration_hours
-        )
-    except ValueError as e:
-        await update.message.reply_text(f"❌ {str(e)}")
-        return
-    profile = ACTIVITY_DURATIONS[activity_type]
-    description = profile.get("description", activity_type)
-    await update.message.reply_text(
-        f"✅ Aktiviteetti aloitettu: {description}\n"
-        f"⏱️ Kesto: {result['duration_hours']:.1f}h\n"
-        f"🕐 Päättyy: {result['end_time_str']}\n"
-        f"📵 Ignooraa viestit: {'Kyllä' if result['will_ignore'] else 'Ei'}"
-    )
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = f"""
-🤖 MEGAN {BOT_VERSION} COMMANDS
-
-Primary LLM: Claude Opus 4.7 (character lock)
-NSFW-hybrid: Grok käytössä kun mode=nsfw tai submission > 0.6
-Muistin puhuja-fix: ON
-
-Session:
-/newgame - Resetoi session
-/wipe - Poista kaikki muistot
-
-Status:
-/status - Näytä tila
-/plans - Näytä suunnitelmat
-/memory - Muististatistiikka (nyt puhujittain)
-
-Control:
-/scene <tyyppi> - Vaihda scene
-/together - Aseta fyysisesti yhdessä
-/separate - Aseta erilleen
-/mood <nimi> - Vaihda emotional mode
-/tension <0.0-1.0> - Aseta tension
-
-Media:
-/image [kuvaus] - Generoi kuva
-
-Aktiviteetit:
-/activity <tyyppi> [tunnit] - Aloita aktiviteetti
-
-Info:
-/help - Tämä ohje
-
-Kuvapyynnöt tekstissä:
-- "lähetä kuva" / "haluan kuvan" / "näytä kuva" / "ota kuva"
-
-Kuvakommentointi:
-- "kommentoi kuvaa" / "se kuva" / "edellinen kuva"
-"""
-    await update.message.reply_text(txt)
-
-# ====================== MAIN ======================
-async def main():
-    global background_task
-
-    print("[MAIN] ===== STARTING MAIN FUNCTION =====")
-    import sys
-    print(f"[MAIN] Python {sys.version}")
-    print(f"[MAIN] Version: {BOT_VERSION} (Claude + Grok NSFW-hybrid + memory speaker fix)")
-    print(f"[MAIN] Primary LLM: {CLAUDE_MODEL_PRIMARY}")
-    print(f"[MAIN] NSFW: Grok used when mode=nsfw or submission > 0.6")
-    print(f"[MAIN] Memory: {MEMORY_SEARCH_WINDOW_DAYS}d window, max {MEMORY_SEARCH_MAX_ROWS} rows")
-    print(f"[MAIN] Dedup threshold: {MEMORY_DEDUP_THRESHOLD:.0%}")
-    print(f"[MAIN] NEW: user/megan utterances stored separately (no combined blob)")
-
-    print("[MAIN] Step 1: Starting Flask...")
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
-    print("[MAIN] Step 2: Migration...")
-    try:
-        migrate_database()
-    except Exception as e:
-        print(f"[MAIN] Migration error: {e}")
-
-    print("[MAIN] Step 3: Loading states...")
-    try:
-        load_states_from_db()
-    except Exception as e:
-        print(f"[MAIN] Load states error: {e}")
-
-    print("[MAIN] Step 4: Boot cleanup...")
-    for user_id in list(continuity_state.keys()):
-        try:
-            clean_ephemeral_state_on_boot(user_id)
-        except Exception as e:
-            print(f"[MAIN] Boot clean error {user_id}: {e}")
-
-    print("[MAIN] Step 5: Indexes...")
-    try:
-        create_database_indexes()
-    except Exception as e:
-        print(f"[MAIN] Index error: {e}")
-
-    print("[MAIN] Step 6: Pre-warming Claude client...")
-    get_claude_client()
-
-    print("[MAIN] Step 7: Building Telegram application...")
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    print("[MAIN] Step 8: Adding handlers...")
-    application.add_handler(CommandHandler("newgame", cmd_new_game))
-    application.add_handler(CommandHandler("wipe", cmd_wipe))
-    application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("plans", cmd_plans))
-    application.add_handler(CommandHandler("memory", cmd_memory))
-    application.add_handler(CommandHandler("scene", cmd_scene))
-    application.add_handler(CommandHandler("together", cmd_together))
-    application.add_handler(CommandHandler("separate", cmd_separate))
-    application.add_handler(CommandHandler("mood", cmd_mood))
-    application.add_handler(CommandHandler("tension", cmd_tension))
-    application.add_handler(CommandHandler("image", cmd_image))
-    application.add_handler(CommandHandler("activity", cmd_activity))
+    # v8.3.3 korjaus B: sticky-muistokomennot
+    application.add_handler(CommandHandler("fantasies", cmd_fantasies))
+    application.add_handler(CommandHandler("sticky", cmd_sticky))
+    application.add_handler(CommandHandler("forget_sticky", cmd_forget_sticky))
+    application.add_handler(CommandHandler("add_sticky", cmd_add_sticky))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
