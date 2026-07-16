@@ -1,27 +1,30 @@
 """
-Megan Telegram Bot - v8.3.5-logic-consistency
+Megan Telegram Bot - v8.3.6-claude-grok-only
 Pääasiallinen LLM: Claude Opus 4.7
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
+Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
 
-Muutokset v8.3.4 → v8.3.5 (LOOGISUUDEN PARANNUKSET):
-- D) Response Planning Step: build_response_plan()
-     Erillinen sisäinen "suunnitteluaskel" ennen varsinaista reply-generointia.
-     Poimii relevantit faktat, tarkistaa ristiriidat käyttäjän viestin ja
-     tunnetun tilan välillä (scene, faktat, sticky-muistot), asettaa
-     tavoitteen vuorolle. Ei näy käyttäjälle, mutta ohjaa lopullista
-     vastausta johdonmukaisemmaksi.
-- E) Entiteettien skeemavalidointi: validate_entity()
-     Entity Extractorin palauttamat entiteetit validoidaan tiukasti ennen
-     tallennusta (sallitut tyypit, pituusrajat, confidence-rajat). Virheelliset
-     entiteetit hylätään hiljaisesti sen sijaan että ne tallennettaisiin
-     sellaisenaan.
-- F) Ristiriitatarkistus faktoille: values_conflict() + get_profile_fact_value()
-     Kun uusi entiteetti on ristiriidassa olemassa olevan profile_fact-arvon
-     kanssa, tallennetaan siitä eksplisiittinen "päivitys"-episodic-muisto
-     sen sijaan että vanha arvo vain hiljaa ylikirjoitettaisiin.
-- G) Eriytetyt temperature-arvot faktoille vs. luovalle sisällölle:
-     TEMP_FACTS (0.15) faktanpoimintaan, TEMP_REASONING (0.3) suunnitteluun,
-     TEMP_REPLY / TEMP_REPLY_NSFW luovaan vastausgenerointiin.
+Muutokset v8.3.5 → v8.3.6:
+- H) OpenAI poistettu kokonaan:
+     * get_embedding()/cosine_similarity() poistettu. retrieve_relevant_memories()
+       käyttää nyt paikallista text_similarity_score() (sanatason Jaccard-
+       samankaltaisuus) OpenAI-embeddingien sijaan - ei enää ulkoista API-kutsua
+       muistihakuun.
+     * analyze_generated_image() käyttää nyt Claudea (native vision-tuki)
+       GPT-4o-mini:n sijaan kuvien analysointiin.
+     * call_llm():sta poistettu OpenAI-fallback-polku. Jäljellä: Claude → Grok.
+     * OPENAI_API_KEY/OPENAI_MODEL/openai_client poistettu kokonaan.
+     * HUOM: Grok-clientti käyttää yhä `openai`-Python-pakettia HTTP-clienttinä
+       (XAI:n OpenAI-yhteensopiva API), mutta ei kutsu OpenAI:n omaa palvelua.
+- I) Scene-engine idle-gate -korjaus: maybe_transition_scene()
+     Korjaa bugin, jossa scene saattoi vaihtua satunnaisesti kesken aktiivisen,
+     keskeytymättömän keskustelun (esim. "home" → "work" 30min kohdalla vaikka
+     käyttäjä kirjoitti koko ajan). Automaattinen scene-siirtymä vaatii nyt
+     todellisen ≥20min idle-tauon käyttäjän viesteissä
+     (temporal_state.time_since_last_message_minutes), ei pelkkää kulunutta
+     seinäkelloaikaa edellisestä scene-vaihdosta.
+- Kaikki v8.3.5 muutokset (response planning, entity validation, contradiction
+  detection, eriytetyt temperaturet) PIDETTY SAMANA
 - Kaikki v8.3.4 muutokset (entity extractor, rolling summary, sticky,
   location_state, speaker fix) PIDETTY SAMANA
 """
@@ -36,18 +39,16 @@ from telegram import Update, InputFile
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 import sqlite3
-import numpy as np
 from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.5-logic-consistency"
+BOT_VERSION = "8.3.6-claude-grok-only"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-7"
 CLAUDE_MODEL_LIGHT = "claude-sonnet-4-6"
 GROK_MODEL = "grok-4-1-fast"
-OPENAI_MODEL = "gpt-4o-mini"
 
 MEMORY_SEARCH_WINDOW_DAYS = 90
 MEMORY_SEARCH_MAX_ROWS = 2000
@@ -85,7 +86,6 @@ def run_flask():
         print(f"[FLASK ERROR] {e}")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
@@ -96,7 +96,9 @@ if not TELEGRAM_TOKEN:
 if not ANTHROPIC_API_KEY:
     raise ValueError("ANTHROPIC_API_KEY puuttuu!")
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# HUOM: Grok-clientti käyttää `openai`-pakettia vain HTTP-clienttinä XAI:n
+# OpenAI-yhteensopivaa API:a varten - tämä EI ole riippuvuus OpenAI:n omaan
+# palveluun. OpenAI (gpt-4o-mini, embeddings) on poistettu v8.3.6:ssa kokonaan.
 grok_client = AsyncOpenAI(api_key=XAI_API_KEY, base_url="https://api.x.ai/v1") if XAI_API_KEY else None
 venice_client = AsyncOpenAI(api_key=VENICE_API_KEY, base_url="https://api.venice.ai/v1") if VENICE_API_KEY else None
 claude_client = None
@@ -378,6 +380,15 @@ def maybe_transition_scene(state, now):
         return state["scene"]
     if now < state["scene_locked_until"]:
         return state["scene"]
+    # v8.3.6: älä vaihda scenea kesken aktiivisen, keskeytymättömän keskustelun.
+    # Vaadi todellinen idle-tauko käyttäjän viesteissä (ei pelkkä kulunut
+    # seinäkellonaika edellisestä scene-vaihdosta) ennen automaattista siirtymää.
+    temporal = state.get("temporal_state", {})
+    if not isinstance(temporal, dict):
+        temporal = {}
+    minutes_since_last_user_msg = temporal.get("time_since_last_message_minutes", 0)
+    if minutes_since_last_user_msg < 20:
+        return state["scene"]
     current = state["scene"]
     allowed = SCENE_TRANSITIONS.get(current, [])
     if not allowed:
@@ -573,6 +584,7 @@ def get_time_block():
 # ====================== LLM ======================
 async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                    temperature=0.8, prefer_light=False, json_mode=False):
+    """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu."""
     claude = get_claude_client()
     if claude:
         try:
@@ -592,42 +604,27 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
             messages = []
             if system_prompt: messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": user_prompt})
-            response = await grok_client.chat.completions.create(
-                model=GROK_MODEL, messages=messages, max_tokens=max_tokens, temperature=temperature)
+            kwargs = {"model": GROK_MODEL, "messages": messages,
+                      "max_tokens": max_tokens, "temperature": temperature}
+            if json_mode: kwargs["response_format"] = {"type": "json_object"}
+            response = await grok_client.chat.completions.create(**kwargs)
             text = response.choices[0].message.content
             if text and text.strip(): return text.strip()
         except Exception as e:
             print(f"[LLM] Grok error: {type(e).__name__}: {str(e)[:100]}")
-    if openai_client:
-        try:
-            messages = []
-            if system_prompt: messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": user_prompt})
-            kwargs = {"model": OPENAI_MODEL, "messages": messages,
-                      "max_tokens": max_tokens, "temperature": temperature}
-            if json_mode: kwargs["response_format"] = {"type": "json_object"}
-            response = await openai_client.chat.completions.create(**kwargs)
-            text = response.choices[0].message.content
-            if text and text.strip(): return text.strip()
-        except Exception as e:
-            print(f"[LLM] OpenAI error: {type(e).__name__}: {str(e)[:100]}")
-    print("[LLM] ALL PROVIDERS FAILED")
+    print("[LLM] ALL PROVIDERS FAILED (Claude + Grok)")
     return ""
 
-# ====================== EMBEDDINGS ======================
-async def get_embedding(text: str):
-    if not openai_client:
-        return np.zeros(1536, dtype=np.float32)
-    try:
-        resp = await openai_client.embeddings.create(input=text, model="text-embedding-3-small")
-        return np.array(resp.data[0].embedding, dtype=np.float32)
-    except Exception as e:
-        print(f"[EMBED] {e}")
-        return np.zeros(1536, dtype=np.float32)
-
-def cosine_similarity(a, b):
-    if len(a) == 0 or len(b) == 0: return 0.0
-    return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-9))
+# ====================== v8.3.6: PAIKALLINEN TEKSTISIMILARITEETTI ======================
+# Korvaa OpenAI-embeddingit (text-embedding-3-small). Sanatason Jaccard-
+# samankaltaisuus ei ole yhtä tarkka kuin semanttinen embedding, mutta toimii
+# täysin ilman ulkoista API-kutsua muistihakuun.
+def text_similarity_score(query: str, content: str) -> float:
+    qw = set(normalize_text(query).split())
+    cw = set(normalize_text(content).split())
+    if not qw or not cw:
+        return 0.0
+    return len(qw & cw) / len(qw | cw)
 
 # ====================== STATE PERSISTENCE ======================
 def _default_temporal_state():
@@ -953,28 +950,26 @@ async def store_episodic_memory(user_id: int, content: str,
                                 memory_type: str = "event", source_turn_id: int = None):
     if not content or len(content.strip()) < 12: return
     if await is_duplicate_memory(user_id, content, memory_type): return
-    emb = await get_embedding(content)
     with db_lock:
         conn.execute("""
             INSERT INTO episodic_memories (user_id, content, embedding, memory_type, source_turn_id, created_at)
             VALUES (?,?,?,?,?,?)
-        """, (str(user_id), content, emb.tobytes(), memory_type, source_turn_id, time.time()))
+        """, (str(user_id), content, None, memory_type, source_turn_id, time.time()))
         conn.commit()
 
 async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
-    q_emb = await get_embedding(query)
     now = time.time()
     cutoff = now - (MEMORY_SEARCH_WINDOW_DAYS * 86400)
     with db_lock:
         rows = conn.execute("""
-            SELECT content, embedding, memory_type, created_at FROM episodic_memories
+            SELECT content, memory_type, created_at FROM episodic_memories
             WHERE user_id=? AND created_at > ?
             ORDER BY created_at DESC LIMIT ?
         """, (str(user_id), cutoff, MEMORY_SEARCH_MAX_ROWS)).fetchall()
     if len(rows) < 200:
         with db_lock:
             rows = conn.execute("""
-                SELECT content, embedding, memory_type, created_at FROM episodic_memories
+                SELECT content, memory_type, created_at FROM episodic_memories
                 WHERE user_id=? ORDER BY created_at DESC LIMIT ?
             """, (str(user_id), MEMORY_SEARCH_MAX_ROWS)).fetchall()
     type_weights = {
@@ -984,16 +979,15 @@ async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
         "megan_action":-0.20,"megan_utterance":-0.30,
     }
     scored = []
-    for content, emb_blob, memory_type, created_at in rows:
-        try:
-            emb = np.frombuffer(emb_blob, dtype=np.float32)
-            sim = cosine_similarity(q_emb, emb)
-            age_h = max((now - created_at) / 3600.0, 0.0)
-            recency = 1.0 / (1.0 + (age_h / 24.0))
-            type_bonus = type_weights.get(memory_type, 0.0)
-            score = 0.65*sim + 0.25*recency + 0.10*type_bonus
-            scored.append((score, content, memory_type))
-        except Exception: continue
+    for content, memory_type, created_at in rows:
+        sim = text_similarity_score(query, content)
+        age_h = max((now - created_at) / 3600.0, 0.0)
+        recency = 1.0 / (1.0 + (age_h / 24.0))
+        type_bonus = type_weights.get(memory_type, 0.0)
+        # v8.3.6: recency-painoa nostettu (0.25->0.30) koska sanatason
+        # similariteetti on karkeampi kuin embedding-cosine.
+        score = 0.55*sim + 0.30*recency + 0.15*type_bonus
+        scored.append((score, content, memory_type))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [{"content":x[1],"memory_type":x[2]} for x in scored[:limit]]
 
@@ -1566,12 +1560,11 @@ async def maybe_create_summary(user_id: int):
 TÄRKEÄÄ: Erottele Käyttäjän ja Meganin puheet.
 {transcript}"""
     summary = await call_llm(user_prompt=prompt, max_tokens=300, temperature=0.3, prefer_light=True) or "Summary unavailable"
-    emb = await get_embedding(summary)
     with db_lock:
         conn.execute("""
             INSERT INTO summaries (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
             VALUES (?,?,?,?,?,?)
-        """, (str(user_id), start_id, end_id, summary, emb.tobytes(), time.time()))
+        """, (str(user_id), start_id, end_id, summary, None, time.time()))
         conn.commit()
 
 # ====================== TOPIC STATE ======================
@@ -1933,9 +1926,11 @@ STYLE: Ultra-realistic 8K photography, cinematic lighting, editorial quality
 """
 
 async def analyze_generated_image(image_bytes: bytes, user_request: str, state: dict) -> dict:
+    """v8.3.6: kuva-analyysi Claudella (native vision) OpenAI:n gpt-4o-mini:n sijaan."""
     default = {"summary":"","visible_outfit":"","visible_setting":"","pose":"","mood":"",
                "notable_details":[],"matches_request":True,"caption_seed":""}
-    if not openai_client: return default
+    claude = get_claude_client()
+    if not claude: return default
     try:
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         conv = state.get("conversation_mode","casual")
@@ -1944,13 +1939,20 @@ async def analyze_generated_image(image_bytes: bytes, user_request: str, state: 
 Schema: {{"summary":"","visible_outfit":"","visible_setting":"","pose":"","mood":"","notable_details":[],"matches_request":true,"caption_seed":""}}
 Mode: {conv}, Submission: {sub:.2f}, Request: {user_request[:200]}
 Analyze the ACTUAL image. caption_seed natural for dominant Megan."""
-        resp = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":[
-                {"type":"text","text":prompt},
-                {"type":"image_url","image_url":{"url":f"data:image/png;base64,{b64}","detail":"low"}}]}],
-            max_tokens=350, temperature=0.2)
-        return parse_json_object(resp.choices[0].message.content or "{}", default)
+        response = await claude.messages.create(
+            model=CLAUDE_MODEL_LIGHT,
+            max_tokens=350,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64",
+                     "media_type": "image/png", "data": b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        text = response.content[0].text if response.content else "{}"
+        return parse_json_object(text, default)
     except Exception as e:
         print(f"[VISION] {e}")
         return default
