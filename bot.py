@@ -1,19 +1,29 @@
 """
-Megan Telegram Bot - v8.3.4-entity-rolling-memory
+Megan Telegram Bot - v8.3.5-logic-consistency
 Pääasiallinen LLM: Claude Opus 4.7
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 
-Muutokset v8.3.3 → v8.3.4:
-- A) Entity Memory Extractor: extract_and_store_entities()
-     Poimii rakenteistettuja entiteettejä jokaisesta käyttäjän vuorosta.
-     Tallentaa profile_facts + user_fact episodic + sticky important_fact.
-     Ratkaisee "unohdin mitä sanoit 10 viestiä sitten" -ongelman.
-- B) Rolling Summary: update_rolling_summary() + rolling_summary-taulu
-     Kumulatiivinen tiivistelmä, päivitetään joka 5. vuorolla.
-     Ladataan AINA kontekstiin kuten sticky_memories.
-     Säilyttää historian kasvavasti.
-- C) Uudet komennot: /rolling, /force_rolling
-- Kaikki v8.3.3 muutokset (sticky, location_state, speaker fix) PIDETTY SAMANA
+Muutokset v8.3.4 → v8.3.5 (LOOGISUUDEN PARANNUKSET):
+- D) Response Planning Step: build_response_plan()
+     Erillinen sisäinen "suunnitteluaskel" ennen varsinaista reply-generointia.
+     Poimii relevantit faktat, tarkistaa ristiriidat käyttäjän viestin ja
+     tunnetun tilan välillä (scene, faktat, sticky-muistot), asettaa
+     tavoitteen vuorolle. Ei näy käyttäjälle, mutta ohjaa lopullista
+     vastausta johdonmukaisemmaksi.
+- E) Entiteettien skeemavalidointi: validate_entity()
+     Entity Extractorin palauttamat entiteetit validoidaan tiukasti ennen
+     tallennusta (sallitut tyypit, pituusrajat, confidence-rajat). Virheelliset
+     entiteetit hylätään hiljaisesti sen sijaan että ne tallennettaisiin
+     sellaisenaan.
+- F) Ristiriitatarkistus faktoille: values_conflict() + get_profile_fact_value()
+     Kun uusi entiteetti on ristiriidassa olemassa olevan profile_fact-arvon
+     kanssa, tallennetaan siitä eksplisiittinen "päivitys"-episodic-muisto
+     sen sijaan että vanha arvo vain hiljaa ylikirjoitettaisiin.
+- G) Eriytetyt temperature-arvot faktoille vs. luovalle sisällölle:
+     TEMP_FACTS (0.15) faktanpoimintaan, TEMP_REASONING (0.3) suunnitteluun,
+     TEMP_REPLY / TEMP_REPLY_NSFW luovaan vastausgenerointiin.
+- Kaikki v8.3.4 muutokset (entity extractor, rolling summary, sticky,
+  location_state, speaker fix) PIDETTY SAMANA
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -31,7 +41,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.4-entity-rolling-memory"
+BOT_VERSION = "8.3.5-logic-consistency"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-7"
@@ -46,6 +56,20 @@ MEMORY_DEDUP_HOURS = 24
 NARRATIVE_PAST_LINES = 15
 NARRATIVE_TODAY_LINES = 8
 ROLLING_SUMMARY_UPDATE_EVERY = 5
+
+# ====================== v8.3.5: ERIYTETYT TEMPERATURE-ARVOT ======================
+# Faktapohjaiset kutsut (entity extraction, frame extraction, turn analysis):
+# matala temperature -> deterministisempi, vähemmän hallusinaatiota.
+TEMP_FACTS = 0.15
+# Sisäinen suunnitteluvaihe ennen vastausta: hieman löysempi mutta yhä kurinalainen.
+TEMP_REASONING = 0.3
+# Varsinainen luova reply-generointi (Claude):
+TEMP_REPLY = 0.8
+# Varsinainen luova reply-generointi (Grok NSFW-polku):
+TEMP_REPLY_NSFW = 0.92
+# Retry-polut (anti-jankkaaja / anti-breakage) - hieman korkeampi vaihtelun vuoksi:
+TEMP_RETRY = 0.95
+TEMP_RETRY_NSFW_BREAK = 0.85
 
 app = Flask(__name__)
 
@@ -494,7 +518,6 @@ for _sql in [
         content TEXT, category TEXT, created_at REAL,
         last_referenced_at REAL DEFAULT 0, reference_count INTEGER DEFAULT 0,
         source_turn_id INTEGER, active INTEGER DEFAULT 1)""",
-    # v8.3.4 UUSI
     """CREATE TABLE IF NOT EXISTS rolling_summary (
         user_id TEXT PRIMARY KEY,
         summary TEXT DEFAULT '',
@@ -504,7 +527,7 @@ for _sql in [
 ]:
     conn.execute(_sql)
 conn.commit()
-print("✅ Database initialized (+ rolling_summary v8.3.4)")
+print("✅ Database initialized (+ rolling_summary v8.3.4, logic layer v8.3.5)")
 
 # ====================== GLOBAL STATE ======================
 continuity_state = {}
@@ -1000,10 +1023,73 @@ def get_profile_facts(user_id: int, limit: int = 12):
         """, (str(user_id), limit)).fetchall()
     return [{"fact_key":r[0],"fact_value":r[1],"confidence":r[2],"updated_at":r[3]} for r in rows]
 
-# ====================== A) ENTITY MEMORY EXTRACTOR (v8.3.4) ======================
+# ====================== v8.3.5: FAKTOJEN VALIDOINTI + RISTIRIITATARKISTUS ======================
+VALID_ENTITY_TYPES = {"location", "activity", "feeling", "opinion", "plan_mention", "personal_fact"}
+
+def validate_entity(ent: dict):
+    """
+    Tiukka skeemavalidointi Entity Extractorin tuottamalle yksittäiselle
+    entiteetille. Palauttaa siistityn dictin tai None jos entiteetti ei
+    täytä vaatimuksia (jolloin se hylätään hiljaisesti sen sijaan että
+    se tallennettaisiin vääränä/puolikkaana datana).
+    """
+    if not isinstance(ent, dict):
+        return None
+    etype = ent.get("type")
+    key = (ent.get("key") or "").strip()
+    value = (ent.get("value") or "").strip()
+    try:
+        confidence = float(ent.get("confidence", 0))
+    except (TypeError, ValueError):
+        return None
+    is_permanent = bool(ent.get("is_permanent", False))
+
+    if etype not in VALID_ENTITY_TYPES:
+        return None
+    if not key or not value:
+        return None
+    if len(key) > 60 or len(value) > 300:
+        return None
+    if not (0.0 <= confidence <= 1.0):
+        return None
+
+    return {"type": etype, "key": key, "value": value,
+            "confidence": confidence, "is_permanent": is_permanent}
+
+def get_profile_fact_value(user_id: int, fact_key: str):
+    with db_lock:
+        row = conn.execute(
+            "SELECT fact_value, confidence FROM profile_facts WHERE user_id=? AND fact_key=?",
+            (str(user_id), fact_key)).fetchone()
+    return {"value": row[0], "confidence": row[1]} if row else None
+
+def values_conflict(old_value: str, new_value: str) -> bool:
+    """
+    Karkea mutta nopea ristiriitatarkistus: jos uusi arvo on hyvin erilainen
+    kuin vanha (ei pelkkä muotoiluero), merkitään mahdolliseksi ristiriidaksi.
+    Tarkoituksella konservatiivinen (mieluummin false positive kuin hiljainen
+    ylikirjoitus).
+    """
+    if not old_value or not new_value:
+        return False
+    if normalize_text(old_value) == normalize_text(new_value):
+        return False
+    ow = set(normalize_text(old_value).split())
+    nw = set(normalize_text(new_value).split())
+    if not ow or not nw:
+        return False
+    overlap = len(ow & nw) / len(ow | nw)
+    return overlap < 0.3
+
+# ====================== A) ENTITY MEMORY EXTRACTOR (v8.3.4, validoitu v8.3.5) ======================
 async def extract_and_store_entities(user_id: int, user_text: str, source_turn_id: int):
     """
     Poimii rakenteistettuja entiteettejä käyttäjän vuorosta.
+    v8.3.5: jokainen entiteetti validoidaan skeeman mukaan ennen tallennusta,
+    ja jos entiteetti on ristiriidassa aiemman profile_fact-arvon kanssa,
+    ristiriita kirjataan eksplisiittisesti episodic-muistoon "päivityksenä"
+    hiljaisen ylikirjoituksen sijaan.
+
     Tallennetaan kolmeen paikkaan jotta ei koskaan unohdu:
     1. profile_facts (rakenteistettu)
     2. episodic_memories user_fact-tyypillä (embedding-haku löytää)
@@ -1033,21 +1119,33 @@ Examples:
 Message: {user_text}"""
 
     raw = await call_llm(user_prompt=prompt, max_tokens=250,
-                         temperature=0.1, prefer_light=True, json_mode=True)
+                         temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return
 
     result = parse_json_object(raw, {"entities": []})
-    entities = result.get("entities", []) or []
+    raw_entities = result.get("entities", []) or []
 
     stored = 0
-    for ent in entities[:4]:
-        etype = ent.get("type", "")
-        key = (ent.get("key", "") or "").strip()
-        value = (ent.get("value", "") or "").strip()
-        confidence = float(ent.get("confidence", 0.5))
-        is_permanent = bool(ent.get("is_permanent", False))
+    for raw_ent in raw_entities[:4]:
+        ent = validate_entity(raw_ent)
+        if ent is None:
+            print(f"[ENTITY] rejected invalid entity: {raw_ent}")
+            continue
 
-        if not key or not value or confidence < 0.5: continue
+        etype, key, value = ent["type"], ent["key"], ent["value"]
+        confidence, is_permanent = ent["confidence"], ent["is_permanent"]
+
+        if confidence < 0.5:
+            continue
+
+        # v8.3.5: ristiriitatarkistus ennen tallennusta
+        existing = get_profile_fact_value(user_id, key)
+        if existing and values_conflict(existing["value"], value):
+            print(f"[ENTITY] contradiction: {key} '{existing['value']}' -> '{value}'")
+            await store_episodic_memory(
+                user_id=user_id,
+                content=f"Käyttäjä päivitti tietoa [{etype}] {key}: aiemmin '{existing['value']}', nyt '{value}'",
+                memory_type="user_fact", source_turn_id=source_turn_id)
 
         # 1) profile_facts
         upsert_profile_fact(user_id=user_id, fact_key=key, fact_value=value,
@@ -1893,7 +1991,7 @@ Scene: {state.get('scene','home')}, Mode: {state.get('conversation_mode','casual
 Previous outfit: {(state.get('last_image') or {}).get('context','none')}
 Recent: {recent}
 Request: {text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=0.1, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["explicit_request"] = text
@@ -2022,7 +2120,7 @@ KRIITTINEN PUHUJA-SÄÄNTÖ:
 Active plans: {plans_text}
 Recent: {recent_text}
 Latest Käyttäjä turn: {user_text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=500, temperature=0.2, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=500, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw:
         default["user_text"] = user_text
         return default
@@ -2037,18 +2135,41 @@ def apply_scene_updates_from_turn(state: dict, user_text: str):
     maybe_interrupt_action(state, user_text)
     update_action(state, now)
 
+def validate_fact(fact: dict):
+    """v8.3.5: kevyt validointi frame extractorin facts-kentälle."""
+    if not isinstance(fact, dict):
+        return None
+    key = (fact.get("fact_key") or "").strip()
+    value = (fact.get("fact_value") or "").strip()
+    try:
+        confidence = float(fact.get("confidence", 0.7))
+    except (TypeError, ValueError):
+        confidence = 0.7
+    if not key or not value or len(key) > 60 or len(value) > 300:
+        return None
+    confidence = max(0.0, min(1.0, confidence))
+    return {"fact_key": key, "fact_value": value, "confidence": confidence}
+
 async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
     state = get_or_create_state(user_id)
     update_topic_state(user_id, frame)
     resolve_open_loops(user_id, frame.get("user_text",""), frame)
     save_topic_state_to_db(user_id)
 
-    for fact in (frame.get("facts",[]) or [])[:8]:
-        upsert_profile_fact(user_id=user_id, fact_key=fact.get("fact_key",""),
-                            fact_value=fact.get("fact_value",""),
-                            confidence=float(fact.get("confidence",0.7)), source_turn_id=source_turn_id)
+    valid_facts = [f for f in (validate_fact(fact) for fact in (frame.get("facts",[]) or [])[:8]) if f]
+
+    for fact in valid_facts:
+        existing = get_profile_fact_value(user_id, fact["fact_key"])
+        if existing and values_conflict(existing["value"], fact["fact_value"]):
+            print(f"[FRAME] contradiction: {fact['fact_key']} '{existing['value']}' -> '{fact['fact_value']}'")
+            await store_episodic_memory(user_id=user_id,
+                content=f"Käyttäjä päivitti tietoa: {fact['fact_key']}: aiemmin '{existing['value']}', nyt '{fact['fact_value']}'",
+                memory_type="user_fact", source_turn_id=source_turn_id)
+        upsert_profile_fact(user_id=user_id, fact_key=fact["fact_key"],
+                            fact_value=fact["fact_value"],
+                            confidence=fact["confidence"], source_turn_id=source_turn_id)
         await store_episodic_memory(user_id=user_id,
-            content=f"Käyttäjästä tiedetään: {fact.get('fact_key','')}: {fact.get('fact_value','')}",
+            content=f"Käyttäjästä tiedetään: {fact['fact_key']}: {fact['fact_value']}",
             memory_type="user_fact", source_turn_id=source_turn_id)
 
     for plan in (frame.get("plans",[]) or [])[:5]:
@@ -2073,12 +2194,11 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
                                 source_turn_id=source_turn_id)
 
     # Vahvat preferenssit → sticky
-    for fact in (frame.get("facts",[]) or [])[:8]:
-        conf = float(fact.get("confidence",0.7))
-        key = (fact.get("fact_key","") or "").lower()
-        if conf >= 0.85 and any(m in key for m in ["preference","like","love","favorite",
+    for fact in valid_facts:
+        key = fact["fact_key"].lower()
+        if fact["confidence"] >= 0.85 and any(m in key for m in ["preference","like","love","favorite",
                                                      "hate","dislike","tykkää","rakastaa"]):
-            await add_sticky_memory(user_id=user_id, content=f"{key}: {fact.get('fact_value','')}",
+            await add_sticky_memory(user_id=user_id, content=f"{key}: {fact['fact_value']}",
                                     sticky_type="preference", category="strong_preference",
                                     source_turn_id=source_turn_id)
 
@@ -2144,7 +2264,6 @@ def format_context_pack(context_pack: dict):
 {format_sticky_for_context(sticky_memories)}
 """
 
-    # v8.3.4 UUSI: Rolling summary block
     rolling_summary = context_pack.get("rolling_summary", "")
     rolling_block = ""
     if rolling_summary:
@@ -2233,11 +2352,88 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict) ->
 Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":""}}
 Recent: {recent_text}
 Latest: {user_text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=200, temperature=0.1, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=200, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["signal_type"] = signal
     return result
+
+
+# ====================== D) RESPONSE PLANNING STEP (v8.3.5) ======================
+async def build_response_plan(user_id: int, user_text: str, context_pack: dict, turn_analysis: dict) -> str:
+    """
+    Erillinen sisäinen suunnitteluvaihe ennen varsinaista vastausta.
+    EI näy käyttäjälle - ainoastaan ohjaa lopullista reply-generointia.
+
+    Tarkistaa:
+    - Mitkä tunnetut faktat/muistot ovat suoraan relevantteja tähän vuoroon
+    - Onko käyttäjän viesti ristiriidassa tunnetun tilan (scene, sijainti,
+      profile facts, sticky-muistot) kanssa
+    - Mikä on tämän vuoron tavoite
+    - Pitäisikö vastauksen nojata kumulatiiviseen muistiyhteenvetoon
+    """
+    rolling_summary = context_pack.get("rolling_summary", "")
+    profile_facts = context_pack.get("profile_facts", [])
+    sticky_memories = context_pack.get("sticky_memories", [])
+    scene = context_pack.get("scene", "neutral")
+    location_status = context_pack.get("location_status", "separate")
+
+    facts_str = "\n".join(f"- {f['fact_key']}: {f['fact_value']}" for f in profile_facts) or "none"
+    sticky_str = "\n".join(f"- [{s['sticky_type']}] {s['content'][:100]}"
+                           for s in sticky_memories[:15]) or "none"
+
+    default_plan = {"relevant_facts": [], "potential_contradiction": None,
+                     "scene_consistent": True, "turn_goal": "vastaa luonnollisesti",
+                     "should_reference_rolling_summary": False}
+
+    prompt = f"""Analysoi tilanne ennen Meganin vastauksen kirjoittamista. Return JSON only.
+
+Schema:
+{{"relevant_facts":[],"potential_contradiction":null,"scene_consistent":true,
+"turn_goal":"","should_reference_rolling_summary":false}}
+
+Rules:
+- relevant_facts: max 3 faktaa jotka ovat suoraan relevantteja käyttäjän viimeisimpään viestiin
+- potential_contradiction: jos käyttäjän viesti on ristiriidassa tunnettujen faktojen/scenen kanssa,
+  kuvaa se lyhyesti yhdellä lauseella; muuten null
+- scene_consistent: onko käyttäjän viesti looginen nykyisen scenen ({scene}) ja
+  sijainnin ({location_status}) kanssa
+- turn_goal: yksi lause, mitä Meganin pitäisi saavuttaa tässä vastauksessa
+- should_reference_rolling_summary: true jos käyttäjä viittaa johonkin joka löytyy
+  todennäköisesti vain pitkän aikavälin historiasta, ei viimeisimmistä vuoroista
+
+Rolling summary (lyhennetty): {rolling_summary[:600] or 'ei vielä'}
+Profile facts: {facts_str}
+Sticky memories: {sticky_str}
+Turn analysis: {json.dumps(turn_analysis, ensure_ascii=False)}
+Käyttäjän viesti: {user_text}"""
+
+    raw = await call_llm(user_prompt=prompt, max_tokens=300,
+                         temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
+    if not raw:
+        return format_response_plan(default_plan)
+    plan = parse_json_object(raw, default_plan)
+    return format_response_plan(plan)
+
+def format_response_plan(plan: dict) -> str:
+    lines = ["=== SISÄINEN SUUNNITELMA (ei näy käyttäjälle, ohjaa vastausta) ==="]
+    rf = plan.get("relevant_facts", []) or []
+    if rf:
+        lines.append("Relevantit faktat: " + "; ".join(str(x) for x in rf[:3]))
+    contradiction = plan.get("potential_contradiction")
+    if contradiction:
+        lines.append(f"⚠️ MAHDOLLINEN RISTIRIITA: {contradiction}")
+        lines.append("→ Jos ristiriita on todellinen, käsittele se luonnollisesti Meganina "
+                      "(esim. kysy tarkennusta tai huomauta siitä leikkisästi/dominoivasti). "
+                      "ÄLÄ vain ohita sitä hiljaa.")
+    if not plan.get("scene_consistent", True):
+        lines.append("⚠️ Käyttäjän viesti ei täsmää nykyiseen sceneen/sijaintiin - "
+                      "ota tämä huomioon vastauksessa luontevasti.")
+    lines.append(f"Tämän vuoron tavoite: {plan.get('turn_goal','vastaa luonnollisesti')}")
+    if plan.get("should_reference_rolling_summary"):
+        lines.append("→ Hyödynnä KUMULATIIVISTA MUISTIYHTEENVETOA vastauksessa.")
+    lines.append("=" * 50)
+    return "\n".join(lines)
 
 
 # ====================== GENERATE REPLY ======================
@@ -2263,6 +2459,17 @@ async def generate_llm_reply(user_id, user_text):
     user_correcting = turn_analysis.get("user_is_correcting_bot", False)
     tone_needed = turn_analysis.get("tone_needed", "direct")
     primary_intent = turn_analysis.get("primary_intent", "chat")
+
+    # v8.3.5: sisäinen suunnitteluvaihe ennen vastausta.
+    # Ohitetaan triviaaleissa/rajatapauksissa (boundary, meta_probe) nopeuden vuoksi -
+    # niissä situation_directive jo hoitaa tarvittavan ohjauksen.
+    response_plan = ""
+    if signal_type not in ("boundary", "meta_probe"):
+        try:
+            response_plan = await build_response_plan(user_id, user_text, context_pack, turn_analysis)
+        except Exception as e:
+            print(f"[PLAN] build_response_plan failed: {e}")
+            response_plan = ""
 
     current_mode = update_conversation_mode(user_id, user_text)
     if signal_type in ("boundary","topic_change"):
@@ -2320,11 +2527,15 @@ CONVERSATION STATE:
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
 Raja tai stop = noudatetaan heti.
+Jos SISÄINEN SUUNNITELMA (user-viestissä) mainitsee ristiriidan, käsittele se
+hahmon sisällä luonnollisesti - älä ohita sitä.
 
 Respond naturally in Finnish. Max 1 question per reply.
 """
 
     user_prompt = f"""TURN ANALYSIS: {json.dumps(turn_analysis, ensure_ascii=False)}
+
+{response_plan}
 
 CONTEXT:
 {memory_context}
@@ -2341,17 +2552,17 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
         messages = [{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}]
         try:
             response = await grok_client.chat.completions.create(
-                model=GROK_MODEL, messages=messages, max_tokens=1200, temperature=0.92)
+                model=GROK_MODEL, messages=messages, max_tokens=1200, temperature=TEMP_REPLY_NSFW)
             reply = (response.choices[0].message.content or "").strip()
             if not reply: raise Exception("Empty")
             print(f"[NSFW-HYBRID] Grok: {len(reply)} chars")
         except Exception as e:
             print(f"[NSFW-HYBRID] Grok failed → Claude: {e}")
             reply = await call_llm(system_prompt=system_prompt, user_prompt=user_prompt,
-                                   max_tokens=1200, temperature=0.8)
+                                   max_tokens=1200, temperature=TEMP_REPLY)
     else:
         reply = await call_llm(system_prompt=system_prompt, user_prompt=user_prompt,
-                               max_tokens=1200, temperature=0.8)
+                               max_tokens=1200, temperature=TEMP_REPLY)
 
     if not reply:
         return "Anteeksi, tekninen ongelma. Yritä hetken päästä uudelleen."
@@ -2365,12 +2576,12 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
             try:
                 r = await grok_client.chat.completions.create(model=GROK_MODEL,
                     messages=[{"role":"system","content":system_prompt},{"role":"user","content":retry}],
-                    max_tokens=1200, temperature=0.95)
+                    max_tokens=1200, temperature=TEMP_RETRY)
                 nr = (r.choices[0].message.content or "").strip()
                 if nr: reply = nr
             except Exception: pass
         else:
-            nr = await call_llm(system_prompt=system_prompt, user_prompt=retry, max_tokens=1200, temperature=0.95)
+            nr = await call_llm(system_prompt=system_prompt, user_prompt=retry, max_tokens=1200, temperature=TEMP_RETRY)
             if nr: reply = nr
 
     # Anti-breakage
@@ -2380,12 +2591,12 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
             try:
                 r = await grok_client.chat.completions.create(model=GROK_MODEL,
                     messages=[{"role":"system","content":system_prompt},{"role":"user","content":bp}],
-                    max_tokens=1200, temperature=0.85)
+                    max_tokens=1200, temperature=TEMP_RETRY_NSFW_BREAK)
                 clean = (r.choices[0].message.content or "").strip()
                 if clean and not detect_character_break(clean): reply = clean
             except Exception: pass
         else:
-            clean = await call_llm(system_prompt=system_prompt, user_prompt=bp, max_tokens=1200, temperature=0.85)
+            clean = await call_llm(system_prompt=system_prompt, user_prompt=bp, max_tokens=1200, temperature=TEMP_RETRY_NSFW_BREAK)
             if clean and not detect_character_break(clean):
                 reply = clean
             else:
@@ -2395,7 +2606,7 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
                     "Joo joo. Ja sä oot astronautti. Mitä oikeesti haluat?"])
     return reply
 
-# ====================== HANDLE MESSAGE (v8.3.4) ======================
+# ====================== HANDLE MESSAGE (v8.3.5) ======================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = None
     try:
@@ -2435,7 +2646,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await store_episodic_memory(user_id=user_id, content=f"Käyttäjä sanoi: {text}",
                                     memory_type="user_utterance", source_turn_id=user_turn_id)
 
-        # v8.3.4 A: Entity extraction (taustalla)
+        # v8.3.4/8.3.5 A: Entity extraction (validoitu, taustalla)
         asyncio.create_task(extract_and_store_entities(user_id, text, user_turn_id))
 
         # v8.3.4 B: Rolling summary -laskuri
@@ -2481,7 +2692,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await store_episodic_memory(user_id=user_id, content=f"Megan sanoi: {reply}",
                                     memory_type="megan_utterance", source_turn_id=assistant_turn_id)
 
-        # v8.3.4 B: Päivitä rolling summary jos laskuri täynnä (taustalla)
         if turn_count >= ROLLING_SUMMARY_UPDATE_EVERY:
             asyncio.create_task(update_rolling_summary(user_id))
 
@@ -2660,6 +2870,12 @@ Location: {state.get('location_status')}
 Submission: {state.get('submission_level',0.0):.2f}
 Mode: {state.get('conversation_mode')}
 
+v8.3.5 loogisuus:
+- Response planning step: ON (ohitetaan boundary/meta_probe -tapauksissa)
+- Entity schema validation: ON
+- Fact contradiction detection: ON
+- Eriytetyt temperaturet: facts={TEMP_FACTS}, reasoning={TEMP_REASONING}, reply={TEMP_REPLY}
+
 v8.3.4 muisti:
 - Entity extractor: ON (per vuoro)
 - Rolling summary: {len(rs['summary'])} chars, {rolling_age or 'ei koskaan'}
@@ -2712,7 +2928,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Episodic: {stats['episodic_total']}
   - user_utterance: {stats['user_utterance']}
   - megan_utterance: {stats['megan_utterance']}
-  - user_fact: {stats['user_fact']} (entity extractor)
+  - user_fact: {stats['user_fact']} (entity extractor, validoitu)
   - user_action: {stats['user_action']}
   - fantasy: {stats['fantasy']}
 
@@ -2751,6 +2967,15 @@ async def cmd_force_rolling(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Päivitetty ({len(rs['summary'])} chars)")
     else:
         await update.message.reply_text("⚠️ Ei uusia vuoroja tiivistettäväksi.")
+
+async def cmd_plan_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.5: näyttää viimeisimmän sisäisen suunnitelman debug-käyttöön."""
+    user_id = update.effective_user.id
+    text = " ".join(context.args) if context.args else "Mitä teet nyt?"
+    context_pack = await build_context_pack(user_id, text)
+    turn_analysis = await analyze_user_turn(user_id, text, context_pack)
+    plan = await build_response_plan(user_id, text, context_pack, turn_analysis)
+    await update.message.reply_text(f"🧭 TURN ANALYSIS:\n{json.dumps(turn_analysis, ensure_ascii=False, indent=2)}\n\n{plan}"[:4000])
 
 async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -2909,12 +3134,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
-v8.3.4 UUDET:
+v8.3.5 UUDET (loogisuus):
+/plan_debug [viesti] - Näytä sisäinen suunnitelma + turn analysis debug-tarkoitukseen
+
+v8.3.4:
 /rolling - Näytä kumulatiivinen muistiyhteenveto
 /force_rolling - Pakota rolling summary -päivitys
 
 Muisti (automaattinen):
-- Entity extractor: poimii faktat jokaisesta viestistä
+- Entity extractor: poimii faktat jokaisesta viestistä (validoitu skeema)
+- Ristiriitatarkistus: uusi tieto vs. vanha profile_fact
+- Response planning: sisäinen suunnitelma ennen jokaista vastausta
 - Rolling summary: päivitetään joka {ROLLING_SUMMARY_UPDATE_EVERY}. viestillä
 - Sticky memories: fantasiat ja tärkeät faktat pysyvästi
 
@@ -2930,7 +3160,8 @@ Media: /image [kuvaus] | /activity <tyyppi> [tunnit]
 async def main():
     global background_task
     print(f"[MAIN] Megan {BOT_VERSION}")
-    print(f"[MAIN] Entity extractor: ON | Rolling summary every {ROLLING_SUMMARY_UPDATE_EVERY} turns")
+    print(f"[MAIN] Entity extractor (validated): ON | Response planning: ON | "
+          f"Rolling summary every {ROLLING_SUMMARY_UPDATE_EVERY} turns")
 
     threading.Thread(target=run_flask, daemon=True).start()
 
@@ -2965,6 +3196,7 @@ async def main():
     application.add_handler(CommandHandler("add_sticky", cmd_add_sticky))
     application.add_handler(CommandHandler("rolling", cmd_rolling))
     application.add_handler(CommandHandler("force_rolling", cmd_force_rolling))
+    application.add_handler(CommandHandler("plan_debug", cmd_plan_debug))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
