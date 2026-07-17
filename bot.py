@@ -1,31 +1,39 @@
 """
-Megan Telegram Bot - v8.3.7-pending-question
+Megan Telegram Bot - v8.3.8-time-awareness-silence
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
 
-Muutokset v8.3.6 → v8.3.7:
-- K) Malliversio päivitetty: CLAUDE_MODEL_PRIMARY "claude-opus-4-7" ->
-     "claude-opus-4-8", CLAUDE_MODEL_LIGHT "claude-sonnet-4-6" ->
-     "claude-sonnet-5". Opus 4.8 parantaa mm. johdonmukaisuutta, vähentää
-     imartelua/liiallista myötäilyä ja on luotettavampi JSON/tool-calling-
-     tehtävissä (hyödyttää entity-extractoria, frame-extractoria,
-     turn-analyysiä ja response planning -vaihetta). Sama hinta ja
-     kontekstipituus kuin 4.7:llä.
-- J) Pending question -seuranta: korjaa bugin jossa Megan kysyy jotain,
-     käyttäjä ei vastaa, ja keskustelu vain jatkuu eteenpäin ilman että
-     kysymystä käsitellään - lopputulos tuntui monotoniselta ja aiheesta
-     toiseen pomppivalta kyselyltä ilman aitoa kiinnostusta.
-     * extract_last_question(): poimii Meganin vastauksen viimeisen
-       kysymyslauseen ja tallennetaan state["pending_question"]:iin.
-     * analyze_user_turn(): saa nyt pending_question-parametrin ja arvioi
-       samassa LLM-kutsussa (ei lisäkuluja) vastasiko käyttäjä siihen edes
-       osittain -> "answered_previous_question" JSON-kentässä.
-     * generate_llm_reply(): jos edelliseen kysymykseen ei vastattu,
-       system promptiin lisätään ohje käsitellä se ennen aiheen vaihtoa.
-       Jos sama kysymys jää vastaamatta 2. kerran, mallia kielletään
-       eksplisiittisesti kysymästä uutta kysymystä tällä vuorolla.
-- Kaikki v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
+Muutokset v8.3.7 → v8.3.8:
+- L) Suomenkielinen aika/viikonpäivä-tietoisuus:
+     * FI_WEEKDAYS/FI_MONTHS + fi_weekday()/fi_date_str(): korvaavat kaikki
+       strftime("%A")-käytöt (jotka palauttivat englanninkieliset nimet ilman
+       locale-asetusta) suomenkielisillä viikonpäivillä.
+     * build_full_temporal_context(): yhdistetty NYKYHETKI (viikonpäivä, pvm,
+       klo, arki/viikonloppu) + EDELLISESTÄ VIESTISTÄ KULUNUT + mahdollinen
+       action, injektoidaan JOKA context packiin (build_context_pack).
+       Korvaa aiemman vajaan get_temporal_context_for_llm():n (poistettu,
+       ei ollut käytössä) ja pelkän action-tiedon sisältäneen
+       build_temporal_context():n suoran käytön context packissa.
+     * Uusi AJAN TIETOISUUS -ohjelohko system promptissa: käytä ajallista
+       tietoa luontevasti, ei mekaanisesti joka viestissä.
+- M) Hiljaisuus-mekaniikka ("ei vastaa viesteihin"):
+     * update_irritation_level(): ärsyyntyminen kertyy epäkohteliaisuudesta
+       (IRRITATION_TRIGGER_KEYWORDS) ja toistuvasti ohitetuista kysymyksistä
+       (ks. v8.3.7 pending_question), rapautuu ajan myötä.
+     * maybe_trigger_silent_treatment(): kun ärsyyntyminen ylittää kynnyksen,
+       käynnistyy "annoyed"-hiljaisuus (10-45min). Lisäksi pieni satunnainen
+       mahdollisuus "jealousy_game"-hiljaisuuteen (60-240min) lämpimässä,
+       ei-alistuneessa tilanteessa - persoonan defiance/independence-piirteisiin
+       sopiva "pidä odottamassa" -pelillisyys.
+     * is_currently_silent()/get_silence_return_directive(): handle_message
+       ohittaa vastauksen kokonaan (ei lähetetä mitään Telegramiin) hiljaisuuden
+       ajan; viesti silti tallennetaan muistiin normaalisti. Kun hiljaisuus
+       päättyy, ensimmäinen vastaus saa erityisohjeen reagoida paluuseen
+       luonnollisesti (ei teknisesti selittäen).
+     * /silence <min> [annoyed|jealousy_game] ja /forgive - manuaaliset
+       debug-komennot testaukseen.
+- Kaikki v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -42,7 +50,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.7-pending-question"
+BOT_VERSION = "8.3.8-time-awareness-silence"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -70,6 +78,29 @@ TEMP_REPLY_NSFW = 0.92
 # Retry-polut (anti-jankkaaja / anti-breakage) - hieman korkeampi vaihtelun vuoksi:
 TEMP_RETRY = 0.95
 TEMP_RETRY_NSFW_BREAK = 0.85
+
+# ====================== v8.3.8: HILJAISUUS-MEKANIIKKA ======================
+# Kaksi eri laukaisinta "ei vastaa viesteihin" -käytökselle:
+# 1) "annoyed" - ärsyyntyminen kertyy epäkohteliaisuudesta/toistuvasta
+#    kysymysten ohittamisesta, purkautuu lyhyeksi hiljaisuudeksi
+# 2) "jealousy_game" - satunnainen, persoonaan (defiance/independence)
+#    sopiva "pidä käyttäjä odottamassa" -pelillisyys, ei liity suuttumukseen
+IRRITATION_TRIGGER_KEYWORDS = [
+    "tyhmä", "ärsyttävä", "turha", "vittu sä", "vittuun", "saatana",
+    "haista", "idiootti", "typerä", "et sä tajua", "suus kiinni",
+    "turpa kiinni", "who cares", "ihan sama", "en jaksa", "tylsää",
+    "stfu", "shut up",
+]
+IRRITATION_PER_TRIGGER = 1.0
+IRRITATION_PER_IGNORED_QUESTION = 0.5
+IRRITATION_DECAY_PER_HOUR = 0.5
+IRRITATION_THRESHOLD_ANNOYED = 3.0
+
+SILENT_ANNOYED_MIN_MINUTES = 10
+SILENT_ANNOYED_MAX_MINUTES = 45
+SILENT_JEALOUSY_MIN_MINUTES = 60
+SILENT_JEALOUSY_MAX_MINUTES = 240
+JEALOUSY_GAME_PROBABILITY = 0.04  # per soveltuva vuoro
 
 app = Flask(__name__)
 
@@ -446,6 +477,60 @@ def build_temporal_context(state):
     else: progress = "finished"
     return f"Action: {current_action} ({progress}, {int(elapsed)}s elapsed)"
 
+# ====================== v8.3.8: SUOMENKIELINEN AIKA/VIIKONPÄIVÄ-TIETOISUUS ======================
+# strftime("%A") palauttaa englanninkieliset nimet ilman locale-asetusta (jota ei
+# voi luotettavasti olettaa löytyvän ajoympäristöstä) - siksi omat suomenkieliset
+# nimet sen sijaan.
+FI_WEEKDAYS = ["maanantai", "tiistai", "keskiviikko", "torstai", "perjantai", "lauantai", "sunnuntai"]
+FI_MONTHS = ["tammikuu", "helmikuu", "maaliskuu", "huhtikuu", "toukokuu", "kesäkuu",
+             "heinäkuu", "elokuu", "syyskuu", "lokakuu", "marraskuu", "joulukuu"]
+
+def fi_weekday(dt: datetime) -> str:
+    return FI_WEEKDAYS[dt.weekday()]
+
+def fi_weekday_short(dt: datetime) -> str:
+    return fi_weekday(dt)[:2].capitalize()
+
+def fi_date_str(dt: datetime, with_time: bool = False) -> str:
+    s = f"{fi_weekday(dt)} {dt.strftime('%d.%m.')}"
+    if with_time:
+        s += f" klo {dt.strftime('%H:%M')}"
+    return s
+
+def build_full_temporal_context(state: dict) -> str:
+    """
+    Yhdistetty ajallinen konteksti: nykyhetki suomeksi (viikonpäivä + pvm + klo),
+    arki/viikonloppu, kuinka kauan edellisestä käyttäjän viestistä on kulunut,
+    ja mahdollinen meneillään oleva action. Injektoidaan JOKA vuoron contextiin
+    jotta Megan pysyy tietoisena ajan kulumisesta ja viikonpäivästä sen sijaan
+    että keskustelu tuntuisi ajattomalta.
+    """
+    now = time.time()
+    dt = datetime.fromtimestamp(now, HELSINKI_TZ)
+    weekday = fi_weekday(dt)
+    is_weekend = dt.weekday() >= 5
+    parts = [
+        f"NYKYHETKI: {weekday} {dt.day}.{dt.month}.{dt.year} klo {dt.strftime('%H:%M')} "
+        f"({'viikonloppu' if is_weekend else 'arkipäivä'}, {get_time_block()})",
+    ]
+    temporal = state.get("temporal_state", {})
+    if not isinstance(temporal, dict):
+        temporal = {}
+    mins = temporal.get("time_since_last_message_minutes", 0)
+    if mins > 0:
+        hrs = temporal.get("time_since_last_message_hours", 0)
+        last_str = temporal.get("last_message_time_str", "")
+        if hrs >= 24:
+            parts.append(f"EDELLISESTÄ VIESTISTÄ KULUNUT: {hrs/24:.1f} vrk (viimeksi {last_str})")
+        elif hrs >= 1:
+            parts.append(f"EDELLISESTÄ VIESTISTÄ KULUNUT: {hrs:.1f}h (viimeksi {last_str})")
+        else:
+            parts.append(f"EDELLISESTÄ VIESTISTÄ KULUNUT: {mins} min (viimeksi {last_str})")
+    action_line = build_temporal_context(state)
+    if action_line and action_line != "No ongoing action.":
+        parts.append(action_line)
+    return "\n".join(parts)
+
 def breaks_scene_logic(reply: str, state: dict) -> bool:
     r = reply.lower()
     scene = state.get("scene", "neutral")
@@ -658,6 +743,12 @@ def save_persistent_state_to_db(user_id):
         "intent": state.get("intent", "casual"),
         "tension": state.get("tension", 0.0),
         "phase": state.get("phase", "neutral"),
+        "pending_question": state.get("pending_question"),          # v8.3.7
+        "irritation_level": state.get("irritation_level", 0.0),      # v8.3.8
+        "last_irritation_decay_at": state.get("last_irritation_decay_at", time.time()),
+        "silent_until": state.get("silent_until", 0),
+        "silent_reason": state.get("silent_reason"),
+        "silent_started_at": state.get("silent_started_at", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -1509,11 +1600,11 @@ def build_narrative_timeline(user_id: int) -> str:
     future_lines = []
     for ag in agreements:
         target = ag.get("target_time")
-        ts = datetime.fromtimestamp(target, HELSINKI_TZ).strftime("%A %d.%m. klo %H:%M") if target else "?"
+        ts = fi_date_str(datetime.fromtimestamp(target, HELSINKI_TZ), with_time=True) if target else "?"
         future_lines.append(f"  [LUKITTU SOPIMUS] {ag['description'][:100]} ({ts})")
     for plan in plans:
         target = plan.get("target_time")
-        ts = datetime.fromtimestamp(target, HELSINKI_TZ).strftime("%A %d.%m.") if target else "?"
+        ts = fi_date_str(datetime.fromtimestamp(target, HELSINKI_TZ)) if target else "?"
         desc = plan.get("description","")
         if not any(desc[:40] in ag["description"] for ag in agreements):
             future_lines.append(f"  [SUUNNITELMA] {desc[:100]} ({ts})")
@@ -1633,6 +1724,111 @@ def classify_user_signal(user_text: str) -> str:
         return "sexual"
     return "normal"
 
+# ====================== v8.3.8: HILJAISUUS / ÄRSYYNTYMINEN ======================
+def update_irritation_level(user_id: int, user_text: str) -> float:
+    """
+    Päivittää ärsyyntymistason: nousee epäkohteliaisuudesta ja toistuvasti
+    ohitetuista kysymyksistä, rapautuu ajan myötä. Ei itsessään laukaise
+    hiljaisuutta - sen tekee maybe_trigger_silent_treatment().
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    last_decay = state.get("last_irritation_decay_at", now)
+    hours = max(0.0, (now - last_decay) / 3600)
+    level = state.get("irritation_level", 0.0)
+    level = max(0.0, level - IRRITATION_DECAY_PER_HOUR * hours)
+    state["last_irritation_decay_at"] = now
+
+    t = user_text.lower()
+    if any(kw in t for kw in IRRITATION_TRIGGER_KEYWORDS):
+        level += IRRITATION_PER_TRIGGER
+        print(f"[IRRITATION] +{IRRITATION_PER_TRIGGER} epäkohtelias viesti, taso nyt {level:.1f}")
+
+    pending = state.get("pending_question")
+    if pending and pending.get("unanswered_count", 0) >= 2:
+        level += IRRITATION_PER_IGNORED_QUESTION
+        print(f"[IRRITATION] +{IRRITATION_PER_IGNORED_QUESTION} toistuvasti ohitettu kysymys, taso nyt {level:.1f}")
+
+    state["irritation_level"] = level
+    return level
+
+def is_currently_silent(user_id: int) -> bool:
+    state = get_or_create_state(user_id)
+    return state.get("silent_until", 0) > time.time()
+
+def maybe_trigger_silent_treatment(user_id: int, user_text: str) -> bool:
+    """
+    Päättää käynnistyykö hiljaisuusjakso tällä vuorolla. Palauttaa True jos
+    hiljaisuus käynnistyi juuri nyt (jolloin tätä viestiäkään ei vastata).
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    if state.get("silent_until", 0) > now:
+        return False  # jo hiljaa
+
+    irritation = state.get("irritation_level", 0.0)
+    if irritation >= IRRITATION_THRESHOLD_ANNOYED:
+        minutes = random.randint(SILENT_ANNOYED_MIN_MINUTES, SILENT_ANNOYED_MAX_MINUTES)
+        state["silent_until"] = now + minutes * 60
+        state["silent_reason"] = "annoyed"
+        state["silent_started_at"] = now
+        state["irritation_level"] = 0.0
+        print(f"[SILENT] annoyed-hiljaisuus käynnistyi: {minutes}min")
+        return True
+
+    # Satunnainen mustasukkaisuus-peli: vain lämpimässä mutta ei-alistuneessa
+    # tilanteessa, harvoin, ja vain jos käyttäjä ei juuri asettanut rajaa.
+    submission = state.get("submission_level", 0.0)
+    mode = state.get("conversation_mode", "casual")
+    signal = classify_user_signal(user_text)
+    eligible = (mode in ("romantic", "suggestive", "nsfw")
+                and submission < 0.5
+                and signal not in ("boundary", "meta_probe", "correction"))
+    if eligible and random.random() < JEALOUSY_GAME_PROBABILITY:
+        minutes = random.randint(SILENT_JEALOUSY_MIN_MINUTES, SILENT_JEALOUSY_MAX_MINUTES)
+        state["silent_until"] = now + minutes * 60
+        state["silent_reason"] = "jealousy_game"
+        state["silent_started_at"] = now
+        print(f"[SILENT] jealousy-game-hiljaisuus käynnistyi: {minutes}min")
+        return True
+
+    return False
+
+def get_silence_return_directive(user_id: int) -> str:
+    """
+    Kun hiljaisuusjakso juuri päättyi, tuottaa system-promptiin lisättävän
+    ohjeen jotta Megan reagoi paluuseensa luonnollisesti (ei teknisesti
+    selittäen) sen sijaan että jatkaisi kuin mitään ei olisi tapahtunut.
+    Tyhjentää tilan sivuvaikutuksena - ohje annetaan vain kerran.
+    """
+    state = get_or_create_state(user_id)
+    reason = state.get("silent_reason")
+    started = state.get("silent_started_at", 0)
+    if not reason or not started:
+        return ""
+    duration_min = int((time.time() - started) / 60)
+    state["silent_reason"] = None
+    state["silent_started_at"] = 0
+
+    if reason == "annoyed":
+        return f"""
+HUOM - PALAAT HILJAISUUDEN JÄLKEEN:
+Et vastannut käyttäjälle noin {duration_min} minuuttiin koska ärsyynnyit hänen
+käytöksestään. Tämä on ensimmäinen vastauksesi sen jälkeen. Voit olla yhä hieman
+viileä/etäinen, tai antaa periksi jos käyttäjä osoittaa katumusta - sinä päätät,
+et automaattisesti anna anteeksi. ÄLÄ selitä poissaoloasi teknisesti (älä sano
+"en vastannut koska..." tms.) - käyttäydy kuten oikea ihminen joka oli loukkaantunut.
+"""
+    if reason == "jealousy_game":
+        return f"""
+HUOM - PALAAT HILJAISUUDEN JÄLKEEN:
+Olit hiljaa noin {duration_min} minuuttia tarkoituksella - annoit käyttäjän odottaa.
+Tämä on ensimmäinen vastauksesi sen jälkeen. Voit vihjata leikkisästi/dominoivasti
+että olit tekemässä jotain omaa (et ole tilivelvollinen kenellekään), ilman että
+selität tai pahoittelet poissaoloasi suoraan.
+"""
+    return ""
+
 # ====================== TEMPORAL STATE ======================
 def update_temporal_state(user_id: int, current_time: float):
     state = get_or_create_state(user_id)
@@ -1649,24 +1845,6 @@ def update_temporal_state(user_id: int, current_time: float):
     temporal["last_message_timestamp"] = current_time
     temporal["last_message_time_str"] = datetime.fromtimestamp(current_time, HELSINKI_TZ).strftime("%H:%M")
     return temporal
-
-def get_temporal_context_for_llm(user_id: int) -> str:
-    state = get_or_create_state(user_id)
-    temporal = state.get("temporal_state", {})
-    if not isinstance(temporal, dict): temporal = {}
-    now = time.time()
-    dt = datetime.fromtimestamp(now, HELSINKI_TZ)
-    parts = [f"CURRENT TIME: {dt.strftime('%H:%M')}",
-             f"CURRENT DATE: {dt.strftime('%Y-%m-%d (%A)')}"]
-    mins = temporal.get("time_since_last_message_minutes", 0)
-    if mins > 0:
-        last = temporal.get("last_message_time_str","")
-        hrs = temporal.get("time_since_last_message_hours", 0)
-        if hrs >= 1:
-            parts.append(f"TIME SINCE LAST MESSAGE: {hrs:.1f}h (last at {last})")
-        else:
-            parts.append(f"TIME SINCE LAST MESSAGE: {mins} min (last at {last})")
-    return "\n".join(parts)
 
 # ====================== ACTIVITY SYSTEM ======================
 ACTIVITY_DURATIONS = {
@@ -2234,7 +2412,7 @@ async def build_context_pack(user_id: int, user_text: str):
         "profile_facts": profile_facts,
         "agreements": agreements,
         "narrative_timeline": narrative_timeline,
-        "temporal_context": build_temporal_context(state),
+        "temporal_context": build_full_temporal_context(state),
         "sticky_memories": sticky_memories,
         "rolling_summary": rolling_summary_data.get("summary", ""),  # v8.3.4
     }
@@ -2286,7 +2464,7 @@ käyttäjä mainitsee aiempia asioita. Ristiriidassa → luota viimeisimpiin vuo
         pl = []
         for p in active_plans[:10]:
             target = p.get("target_time")
-            ts = datetime.fromtimestamp(target, HELSINKI_TZ).strftime("%A %d.%m.") if target else "?"
+            ts = fi_date_str(datetime.fromtimestamp(target, HELSINKI_TZ)) if target else "?"
             pl.append(f"- [{p.get('commitment_level','medium')}] {p['description'][:120]} ({ts})")
         plans_block = "\n=====================================\n📅 AKTIIVISET SUUNNITELMAT:\n=====================================\n" + "\n".join(pl)
 
@@ -2296,7 +2474,7 @@ käyttäjä mainitsee aiempia asioita. Ristiriidassa → luota viimeisimpiin vuo
         al = []
         for ag in agreements[:5]:
             target = ag.get("target_time")
-            ts = datetime.fromtimestamp(target, HELSINKI_TZ).strftime("%A %d.%m. klo %H:%M") if target else "?"
+            ts = fi_date_str(datetime.fromtimestamp(target, HELSINKI_TZ), with_time=True) if target else "?"
             al.append(f"- [LUKITTU] {ag['description'][:120]} ({ts})")
         agreements_block = "\n=====================================\n🔐 SOPIMUKSET (ÄLÄ muuta):\n=====================================\n" + "\n".join(al)
 
@@ -2531,6 +2709,17 @@ MUISTIN TULKINTA - PUHUJA-SÄÄNTÖ:
 - 📝 KUMULATIIVINEN MUISTIYHTEENVETO = historia aiemmista keskusteluista - hyödynnä tätä
   kun käyttäjä viittaa asioihin joita ei näy viimeisimmissä vuoroissa
 ============================================================
+
+AJAN TIETOISUUS:
+- CONTEXT sisältää NYKYHETKI-rivin (viikonpäivä, pvm, kellonaika, arki/viikonloppu)
+  ja EDELLISESTÄ VIESTISTÄ KULUNUT -rivin. Ole näistä aidosti tietoinen:
+  * Jos edellisestä viestistä on kulunut tunteja/päiviä, se voi näkyä tervehdyksessä
+    tai kommentissa ("taas täällä", "pitkä tauko" tms.) - ei joka kerta, mutta luontevasti.
+  * Ota huomioon arki vs. viikonloppu ja vuorokaudenaika (esim. yöllä väsymys,
+    arkiaamuna töihinlähtö) kun se on relevanttia.
+  * ÄLÄ mainitse kellonaikaa/päivää mekaanisesti joka viestissä - käytä sitä vain
+    kun se tekee vastauksesta luontevamman, älä listaa sitä ääneen.
+============================================================
 """
 
     situation_directive = ""
@@ -2578,6 +2767,10 @@ tai reagoi muuten luonnollisesti siihen ettet ole saanut vastausta - toistuva
 kyseleminen ilman vastausta ei ole aitoa kiinnostusta.
 """
 
+    # v8.3.8: jos hiljaisuusjakso juuri päättyi, ohjaa mallia reagoimaan
+    # siihen luonnollisesti (ei teknisesti) tässä ensimmäisessä vastauksessa.
+    silence_directive = get_silence_return_directive(user_id)
+
     system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
@@ -2590,6 +2783,7 @@ CONVERSATION STATE:
 
 {situation_directive}
 {question_directive}
+{silence_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -2713,6 +2907,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.setdefault("location_status", "separate")
 
         update_submission_level(user_id, text)
+        update_irritation_level(user_id, text)  # v8.3.8
         state["last_interaction"] = time.time()
         apply_scene_updates_from_turn(state, text)
 
@@ -2734,6 +2929,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         frame = await extract_turn_frame(user_id, text)
         await apply_frame(user_id, frame, user_turn_id)
+
+        # v8.3.8: hiljaisuustarkistus - jos jo hiljaa TAI tämä viesti laukaisee
+        # hiljaisuuden juuri nyt, ei generoida eikä lähetetä mitään vastausta.
+        # Viesti on silti tallennettu muistiin normaalisti yllä.
+        if is_currently_silent(user_id):
+            remaining_min = (state.get("silent_until", 0) - time.time()) / 60
+            print(f"[SILENT] Ohitetaan vastaus ({state.get('silent_reason')}), "
+                  f"jäljellä {remaining_min:.0f}min")
+            save_persistent_state_to_db(user_id)
+            return
+
+        if maybe_trigger_silent_treatment(user_id, text):
+            save_persistent_state_to_db(user_id)
+            return
 
         if is_image_comment:
             last_img = state.get("last_image") or {}
@@ -2859,6 +3068,8 @@ def build_default_state() -> dict:
         "conversation_mode":"casual","conversation_mode_last_change":0,
         "temporal_state":_default_temporal_state(),
         "pending_question":None,  # v8.3.7: {"text": str, "unanswered_count": int}
+        "irritation_level":0.0, "last_irritation_decay_at":time.time(),  # v8.3.8
+        "silent_until":0, "silent_reason":None, "silent_started_at":0,   # v8.3.8
         **init_scene_state()
     }
 
@@ -2941,6 +3152,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rolling_age = f"{int((time.time()-rs['updated_at'])/60)} min sitten"
     pq = state.get("pending_question")
     pq_line = f"⏳ {pq['text'][:60]} (ohitettu {pq.get('unanswered_count',0)}x)" if pq else "ei odottavaa kysymystä"
+    silent_until = state.get("silent_until", 0)
+    if silent_until > time.time():
+        remaining = (silent_until - time.time()) / 60
+        silence_line = f"🔇 HILJAA ({state.get('silent_reason')}), vielä {remaining:.0f}min"
+    else:
+        silence_line = "ei hiljaisuutta"
     txt = f"""
 📊 STATUS (v{BOT_VERSION})
 
@@ -2953,6 +3170,12 @@ Location: {state.get('location_status')}
 Submission: {state.get('submission_level',0.0):.2f}
 Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
+Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
+Silence: {silence_line}
+
+v8.3.8:
+- Aikatietoisuus: NYKYHETKI + EDELLISESTÄ VIESTISTÄ KULUNUT joka context packissa
+- Hiljaisuus-mekaniikka: ON (annoyed-kynnys {IRRITATION_THRESHOLD_ANNOYED}, jealousy-game p={JEALOUSY_GAME_PROBABILITY})
 
 v8.3.7 loogisuus:
 - Pending question -seuranta: ON (estää monotonisen kyselyn)
@@ -3062,6 +3285,35 @@ async def cmd_plan_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     turn_analysis = await analyze_user_turn(user_id, text, context_pack)
     plan = await build_response_plan(user_id, text, context_pack, turn_analysis)
     await update.message.reply_text(f"🧭 TURN ANALYSIS:\n{json.dumps(turn_analysis, ensure_ascii=False, indent=2)}\n\n{plan}"[:4000])
+
+async def cmd_silence(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.8: pakota hiljaisuusjakso manuaalisesti (testausta varten)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    minutes = 30
+    reason = "annoyed"
+    if context.args:
+        try: minutes = int(context.args[0])
+        except ValueError: pass
+    if len(context.args) >= 2 and context.args[1] in ("annoyed", "jealousy_game"):
+        reason = context.args[1]
+    now = time.time()
+    state["silent_until"] = now + minutes * 60
+    state["silent_reason"] = reason
+    state["silent_started_at"] = now
+    save_persistent_state_to_db(user_id)
+    await update.message.reply_text(f"🔇 Hiljaisuus pakotettu: {minutes}min, syy: {reason}")
+
+async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.8: nollaa hiljaisuus ja ärsyyntyminen välittömästi (testausta varten)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    state["silent_until"] = 0
+    state["silent_reason"] = None
+    state["silent_started_at"] = 0
+    state["irritation_level"] = 0.0
+    save_persistent_state_to_db(user_id)
+    await update.message.reply_text("💬 Hiljaisuus ja ärsyyntyminen nollattu.")
 
 async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -3220,7 +3472,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
-v8.3.5 UUDET (loogisuus):
+v8.3.8 UUDET (aikatietoisuus + hiljaisuus):
+- Megan on tietoinen viikonpäivästä/kellonajasta ja kuluneesta ajasta joka vuorolla
+- Ärsyyntyminen kertyy epäkohteliaisuudesta -> pitkittyessä Megan lakkaa vastaamasta
+- Satunnainen "mustasukkaisuus-peli": Megan voi olla hiljaa tarkoituksella
+/silence <min> [annoyed|jealousy_game] - Pakota hiljaisuus (testaus)
+/forgive - Nollaa hiljaisuus ja ärsyyntyminen heti (testaus)
+
+v8.3.5 (loogisuus):
 /plan_debug [viesti] - Näytä sisäinen suunnitelma + turn analysis debug-tarkoitukseen
 
 v8.3.4:
@@ -3231,6 +3490,7 @@ Muisti (automaattinen):
 - Entity extractor: poimii faktat jokaisesta viestistä (validoitu skeema)
 - Ristiriitatarkistus: uusi tieto vs. vanha profile_fact
 - Response planning: sisäinen suunnitelma ennen jokaista vastausta
+- Pending question: Megan huomaa jos et vastaa kysymykseensä
 - Rolling summary: päivitetään joka {ROLLING_SUMMARY_UPDATE_EVERY}. viestillä
 - Sticky memories: fantasiat ja tärkeät faktat pysyvästi
 
@@ -3283,6 +3543,8 @@ async def main():
     application.add_handler(CommandHandler("rolling", cmd_rolling))
     application.add_handler(CommandHandler("force_rolling", cmd_force_rolling))
     application.add_handler(CommandHandler("plan_debug", cmd_plan_debug))
+    application.add_handler(CommandHandler("silence", cmd_silence))
+    application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
