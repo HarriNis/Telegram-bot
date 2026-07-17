@@ -1,32 +1,31 @@
 """
-Megan Telegram Bot - v8.3.6-claude-grok-only
-Pääasiallinen LLM: Claude Opus 4.7
+Megan Telegram Bot - v8.3.7-pending-question
+Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
 
-Muutokset v8.3.5 → v8.3.6:
-- H) OpenAI poistettu kokonaan:
-     * get_embedding()/cosine_similarity() poistettu. retrieve_relevant_memories()
-       käyttää nyt paikallista text_similarity_score() (sanatason Jaccard-
-       samankaltaisuus) OpenAI-embeddingien sijaan - ei enää ulkoista API-kutsua
-       muistihakuun.
-     * analyze_generated_image() käyttää nyt Claudea (native vision-tuki)
-       GPT-4o-mini:n sijaan kuvien analysointiin.
-     * call_llm():sta poistettu OpenAI-fallback-polku. Jäljellä: Claude → Grok.
-     * OPENAI_API_KEY/OPENAI_MODEL/openai_client poistettu kokonaan.
-     * HUOM: Grok-clientti käyttää yhä `openai`-Python-pakettia HTTP-clienttinä
-       (XAI:n OpenAI-yhteensopiva API), mutta ei kutsu OpenAI:n omaa palvelua.
-- I) Scene-engine idle-gate -korjaus: maybe_transition_scene()
-     Korjaa bugin, jossa scene saattoi vaihtua satunnaisesti kesken aktiivisen,
-     keskeytymättömän keskustelun (esim. "home" → "work" 30min kohdalla vaikka
-     käyttäjä kirjoitti koko ajan). Automaattinen scene-siirtymä vaatii nyt
-     todellisen ≥20min idle-tauon käyttäjän viesteissä
-     (temporal_state.time_since_last_message_minutes), ei pelkkää kulunutta
-     seinäkelloaikaa edellisestä scene-vaihdosta.
-- Kaikki v8.3.5 muutokset (response planning, entity validation, contradiction
-  detection, eriytetyt temperaturet) PIDETTY SAMANA
-- Kaikki v8.3.4 muutokset (entity extractor, rolling summary, sticky,
-  location_state, speaker fix) PIDETTY SAMANA
+Muutokset v8.3.6 → v8.3.7:
+- K) Malliversio päivitetty: CLAUDE_MODEL_PRIMARY "claude-opus-4-7" ->
+     "claude-opus-4-8", CLAUDE_MODEL_LIGHT "claude-sonnet-4-6" ->
+     "claude-sonnet-5". Opus 4.8 parantaa mm. johdonmukaisuutta, vähentää
+     imartelua/liiallista myötäilyä ja on luotettavampi JSON/tool-calling-
+     tehtävissä (hyödyttää entity-extractoria, frame-extractoria,
+     turn-analyysiä ja response planning -vaihetta). Sama hinta ja
+     kontekstipituus kuin 4.7:llä.
+- J) Pending question -seuranta: korjaa bugin jossa Megan kysyy jotain,
+     käyttäjä ei vastaa, ja keskustelu vain jatkuu eteenpäin ilman että
+     kysymystä käsitellään - lopputulos tuntui monotoniselta ja aiheesta
+     toiseen pomppivalta kyselyltä ilman aitoa kiinnostusta.
+     * extract_last_question(): poimii Meganin vastauksen viimeisen
+       kysymyslauseen ja tallennetaan state["pending_question"]:iin.
+     * analyze_user_turn(): saa nyt pending_question-parametrin ja arvioi
+       samassa LLM-kutsussa (ei lisäkuluja) vastasiko käyttäjä siihen edes
+       osittain -> "answered_previous_question" JSON-kentässä.
+     * generate_llm_reply(): jos edelliseen kysymykseen ei vastattu,
+       system promptiin lisätään ohje käsitellä se ennen aiheen vaihtoa.
+       Jos sama kysymys jää vastaamatta 2. kerran, mallia kielletään
+       eksplisiittisesti kysymästä uutta kysymystä tällä vuorolla.
+- Kaikki v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -43,11 +42,11 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.6-claude-grok-only"
+BOT_VERSION = "8.3.7-pending-question"
 print(f"🚀 Megan {BOT_VERSION}")
 
-CLAUDE_MODEL_PRIMARY = "claude-opus-4-7"
-CLAUDE_MODEL_LIGHT = "claude-sonnet-4-6"
+CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
+CLAUDE_MODEL_LIGHT = "claude-sonnet-5"
 GROK_MODEL = "grok-4-1-fast"
 
 MEMORY_SEARCH_WINDOW_DAYS = 90
@@ -2330,11 +2329,29 @@ RECENT TURNS:
 {turns_lines}
 """
 
-# ====================== TURN ANALYSIS ======================
-async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict) -> dict:
+# ====================== v8.3.7: PENDING QUESTION -SEURANTA ======================
+def extract_last_question(text: str):
+    """
+    Poimii vastauksen viimeisen kysymyslauseen (jos on) yksinkertaisella
+    lauserajauksella. Käytetään pending_question-seurantaan: jos Megan
+    kysyy jotain, muistetaan se ja tarkistetaan seuraavalla vuorolla
+    vastasiko käyttäjä siihen.
+    """
+    if not text or "?" not in text:
+        return None
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    for s in reversed(sentences):
+        s = s.strip()
+        if s.endswith("?") and len(s) > 3:
+            return s
+    return None
+
+async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
+                            pending_question: dict = None) -> dict:
     default = {"primary_intent":"chat","topic":"general","what_user_wants_now":user_text,
                "explicit_constraints":[],"user_is_correcting_bot":False,"should_change_course":False,
-               "tone_needed":"direct","answer_first":user_text,"signal_type":"normal"}
+               "tone_needed":"direct","answer_first":user_text,"signal_type":"normal",
+               "answered_previous_question":True}
     signal = classify_user_signal(user_text)
     default["signal_type"] = signal
     if signal == "boundary":
@@ -2345,19 +2362,30 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict) ->
         default.update({"primary_intent":"correction","user_is_correcting_bot":True,"should_change_course":True})
         return default
     if signal == "topic_change":
+        # Käyttäjä vaihtaa aihetta tietoisesti - ei nagata edellisestä kysymyksestä.
         default.update({"primary_intent":"topic_change","should_change_course":True})
         return default
     recent_turns = context_pack.get("recent_turns", [])
     recent_text = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content']}"
                             for t in recent_turns[-4:])
+    pending_block = ""
+    if pending_question and pending_question.get("text"):
+        pending_block = f"""
+MEGANIN EDELLINEN KYSYMYS (tarkista huolella vastasiko käyttäjä tähän edes osittain/välillisesti):
+"{pending_question['text']}\""""
     prompt = f"""Return JSON only.
-Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":""}}
+Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":"","answered_previous_question":true}}
+
+answered_previous_question: true jos käyttäjän viesti vastaa (edes osittain, epäsuorasti tai vaihtaa aihetta selvästi tietoisesti) Meganin edelliseen kysymykseen, TAI jos kysymystä ei ollut. false jos käyttäjä selvästi ohitti kysymyksen ja jatkoi jostain muusta ikään kuin kysymystä ei olisi esitetty.
+{pending_block}
 Recent: {recent_text}
 Latest: {user_text}"""
     raw = await call_llm(user_prompt=prompt, max_tokens=200, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["signal_type"] = signal
+    if "answered_previous_question" not in result:
+        result["answered_previous_question"] = True
     return result
 
 
@@ -2455,12 +2483,23 @@ def detect_character_break(text: str) -> bool:
 async def generate_llm_reply(user_id, user_text):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
-    turn_analysis = await analyze_user_turn(user_id, user_text, context_pack)
+    pending_question = state.get("pending_question")
+    turn_analysis = await analyze_user_turn(user_id, user_text, context_pack,
+                                            pending_question=pending_question)
     signal_type = turn_analysis.get("signal_type", "normal")
     should_change = turn_analysis.get("should_change_course", False)
     user_correcting = turn_analysis.get("user_is_correcting_bot", False)
     tone_needed = turn_analysis.get("tone_needed", "direct")
     primary_intent = turn_analysis.get("primary_intent", "chat")
+    answered_previous_question = turn_analysis.get("answered_previous_question", True)
+
+    # v8.3.7: päivitä pending_question-tila sen mukaan vastasiko käyttäjä siihen.
+    if pending_question and not answered_previous_question:
+        pending_question["unanswered_count"] = pending_question.get("unanswered_count", 0) + 1
+        state["pending_question"] = pending_question
+    else:
+        state["pending_question"] = None
+        pending_question = None
 
     # v8.3.5: sisäinen suunnitteluvaihe ennen vastausta.
     # Ohitetaan triviaaleissa/rajatapauksissa (boundary, meta_probe) nopeuden vuoksi -
@@ -2514,6 +2553,31 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     elif should_change:
         situation_directive = "AIHE VAIHTUU - seuraa käyttäjän suuntaa."
 
+    # v8.3.7: jos edelliseen kysymykseen ei vastattu, ohjaa mallia käsittelemään
+    # se ennen kuin se kysyy jotain uutta - estää monotonisen "kysele jotain,
+    # unohda heti" -kaavan.
+    question_directive = ""
+    if pending_question and not answered_previous_question:
+        count = pending_question.get("unanswered_count", 1)
+        prev_q = pending_question.get("text", "")
+        if count <= 1:
+            question_directive = f"""
+HUOM - EDELLINEN KYSYMYS JÄI VAILLE VASTAUSTA:
+Kysyit äsken: "{prev_q}" - käyttäjä ei vastannut siihen suoraan.
+Osoita aitoa kiinnostusta: palaa siihen luontevasti TAI päästä siitä tietoisesti irti
+(esim. huomauta leikkisästi/dominoivasti ettet saanut vastausta) ENNEN kuin siirryt
+mihinkään uuteen. ÄLÄ vain kysy uutta kysymystä ikään kuin edellistä ei olisi ollut -
+se tekee sinusta monotonisen kyselijän ilman aitoa kiinnostusta.
+"""
+        else:
+            question_directive = f"""
+HUOM - OLET KYSYNYT SAMAA ASIAA JO {count} KERTAA ILMAN VASTAUSTA:
+"{prev_q}"
+ÄLÄ kysy mitään uutta kysymystä tässä vuorossa. Tee sen sijaan toteamus, kommentti,
+tai reagoi muuten luonnollisesti siihen ettet ole saanut vastausta - toistuva
+kyseleminen ilman vastausta ei ole aitoa kiinnostusta.
+"""
+
     system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
@@ -2525,6 +2589,7 @@ CONVERSATION STATE:
 - Signal: {signal_type}
 
 {situation_directive}
+{question_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -2606,6 +2671,18 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
                     "Hah, mitä höpötät. Keskitytään nyt olennaiseen 😏",
                     "Outo kysymys. Sano jotain kiinnostavampaa.",
                     "Joo joo. Ja sä oot astronautti. Mitä oikeesti haluat?"])
+
+    # v8.3.7: päivitä pending_question lopullisen vastauksen perusteella.
+    # Jos edellinen kysymys jäi vaille vastausta JA malli silti kysyi jotain
+    # uutta direktiivistä huolimatta, säilytetään alkuperäinen (jo kasvatettu
+    # unanswered_count) sen sijaan että ylikirjoitettaisiin - näin nagaus ei
+    # unohdu jos malli ei noudattanut ohjetta.
+    still_pending_unanswered = bool(state.get("pending_question")
+                                     and not answered_previous_question)
+    if not still_pending_unanswered:
+        new_question = extract_last_question(reply)
+        state["pending_question"] = {"text": new_question, "unanswered_count": 0} if new_question else None
+
     return reply
 
 # ====================== HANDLE MESSAGE (v8.3.5) ======================
@@ -2781,6 +2858,7 @@ def build_default_state() -> dict:
                        "open_loops":[],"updated_at":time.time()},
         "conversation_mode":"casual","conversation_mode_last_change":0,
         "temporal_state":_default_temporal_state(),
+        "pending_question":None,  # v8.3.7: {"text": str, "unanswered_count": int}
         **init_scene_state()
     }
 
@@ -2861,21 +2939,27 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rolling_age = ""
     if rs["updated_at"] > 0:
         rolling_age = f"{int((time.time()-rs['updated_at'])/60)} min sitten"
+    pq = state.get("pending_question")
+    pq_line = f"⏳ {pq['text'][:60]} (ohitettu {pq.get('unanswered_count',0)}x)" if pq else "ei odottavaa kysymystä"
     txt = f"""
 📊 STATUS (v{BOT_VERSION})
 
 Primary LLM: {CLAUDE_MODEL_PRIMARY}
+Light LLM: {CLAUDE_MODEL_LIGHT}
 NSFW: Grok kun mode=nsfw tai submission > 0.6
 
 Scene: {state.get('scene')} | {state.get('micro_context')}
 Location: {state.get('location_status')}
 Submission: {state.get('submission_level',0.0):.2f}
 Mode: {state.get('conversation_mode')}
+Pending question: {pq_line}
 
-v8.3.5 loogisuus:
+v8.3.7 loogisuus:
+- Pending question -seuranta: ON (estää monotonisen kyselyn)
 - Response planning step: ON (ohitetaan boundary/meta_probe -tapauksissa)
 - Entity schema validation: ON
 - Fact contradiction detection: ON
+- Scene idle-gate: ON (≥20min idle ennen automaattista scene-vaihtoa)
 - Eriytetyt temperaturet: facts={TEMP_FACTS}, reasoning={TEMP_REASONING}, reply={TEMP_REPLY}
 
 v8.3.4 muisti:
