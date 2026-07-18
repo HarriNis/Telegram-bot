@@ -1,39 +1,41 @@
 """
-Megan Telegram Bot - v8.3.8-time-awareness-silence
+Megan Telegram Bot - v8.3.9-humanize-graded-logic
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
 
-Muutokset v8.3.7 → v8.3.8:
-- L) Suomenkielinen aika/viikonpäivä-tietoisuus:
-     * FI_WEEKDAYS/FI_MONTHS + fi_weekday()/fi_date_str(): korvaavat kaikki
-       strftime("%A")-käytöt (jotka palauttivat englanninkieliset nimet ilman
-       locale-asetusta) suomenkielisillä viikonpäivillä.
-     * build_full_temporal_context(): yhdistetty NYKYHETKI (viikonpäivä, pvm,
-       klo, arki/viikonloppu) + EDELLISESTÄ VIESTISTÄ KULUNUT + mahdollinen
-       action, injektoidaan JOKA context packiin (build_context_pack).
-       Korvaa aiemman vajaan get_temporal_context_for_llm():n (poistettu,
-       ei ollut käytössä) ja pelkän action-tiedon sisältäneen
-       build_temporal_context():n suoran käytön context packissa.
-     * Uusi AJAN TIETOISUUS -ohjelohko system promptissa: käytä ajallista
-       tietoa luontevasti, ei mekaanisesti joka viestissä.
-- M) Hiljaisuus-mekaniikka ("ei vastaa viesteihin"):
-     * update_irritation_level(): ärsyyntyminen kertyy epäkohteliaisuudesta
-       (IRRITATION_TRIGGER_KEYWORDS) ja toistuvasti ohitetuista kysymyksistä
-       (ks. v8.3.7 pending_question), rapautuu ajan myötä.
-     * maybe_trigger_silent_treatment(): kun ärsyyntyminen ylittää kynnyksen,
-       käynnistyy "annoyed"-hiljaisuus (10-45min). Lisäksi pieni satunnainen
-       mahdollisuus "jealousy_game"-hiljaisuuteen (60-240min) lämpimässä,
-       ei-alistuneessa tilanteessa - persoonan defiance/independence-piirteisiin
-       sopiva "pidä odottamassa" -pelillisyys.
-     * is_currently_silent()/get_silence_return_directive(): handle_message
-       ohittaa vastauksen kokonaan (ei lähetetä mitään Telegramiin) hiljaisuuden
-       ajan; viesti silti tallennetaan muistiin normaalisti. Kun hiljaisuus
-       päättyy, ensimmäinen vastaus saa erityisohjeen reagoida paluuseen
-       luonnollisesti (ei teknisesti selittäen).
-     * /silence <min> [annoyed|jealousy_game] ja /forgive - manuaaliset
-       debug-komennot testaukseen.
-- Kaikki v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
+Muutokset v8.3.8 → v8.3.9 (perustuu Grokin koodikatselmukseen - toteutettu
+neljä sen ehdotusta jotka eivät olleet joko jo olemassa tai virheellisiä):
+- N) Tyyli/rytmi-ohje (system prompt, ei post-processing-regexiä):
+     Uusi style_directive generate_llm_reply():ssä ohjeistaa puhekielisyyttä,
+     vaihtelevaa lauserytmiä ja "älä kuulosta kirjailijalta" -asennetta.
+     Tietoinen valinta: EI mekaanista regex-pohjaista "human noise"-lisäystä
+     valmiiseen tekstiin (esim. satunnaiset ".." tai "No nii.." -lisäykset),
+     koska ne irrottavat lisäyksen kontekstista ja näkyvät helposti bugina.
+     Opus 4.8 tuottaa luontevamman vaihtelun kun sitä ohjeistetaan promptissa.
+- O) Liukuva pending-question-arvio (0.0-1.0 binäärisen true/false sijaan):
+     analyze_user_turn() palauttaa nyt "answered_previous_question_score".
+     generate_llm_reply() erottelee kolme tasoa: <0.4 täysi ohitus (kova
+     nagaus + IRRITATION_FULL_IGNORE_QUESTION), 0.4-0.7 osittainen vastaus
+     (lievä huomautus + IRRITATION_PARTIAL_IGNORE_QUESTION), >=0.7 riittävä
+     (pending nollataan). update_irritation_level():n karkea
+     unanswered_count>=2-heuristiikka poistettu - irritation lisätään nyt
+     suoraan ja tarkemmin generate_llm_reply():ssä.
+- P) Emotionaalinen ulottuvuus build_response_plan():iin (EI erillistä
+     inner-monologue-kutsua): plan-skeemaan lisätty "emotional_undertone",
+     joka johdetaan emotional_mode/tension/irritation/submission-tilasta
+     saman LLM-kutsun sisällä. Ristiriitaohje muutettu ihmismäisemmäksi
+     ("hetkinen, eiks sä just sanonut...").
+- Q) Pehmeä korjaus scene/temporal-ristiriitoihin: breaks_scene_logic()/
+     breaks_temporal_logic() eivät enää korvaa koko vastausta geneerisellä
+     paikkatekstillä suoraan handle_message():ssa. generate_llm_reply()
+     yrittää nyt ensin pyytää mallia korjaamaan ristiriidan itse samalla
+     sävyllä; geneerinen teksti on vain varakeino jos korjaus epäonnistuu.
+- Ei toteutettu (perusteltu koodikatselmuksessa): erillinen inner/outer-voice
+  -kutsu (päällekkäinen build_response_plan():n kanssa) ja väite että Claude-
+  hahmolukko katoaisi Grok-polulla NSFW:ssä (virheellinen - system_prompt on
+  identtinen molemmilla providereilla).
+- Kaikki v8.3.8, v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -50,7 +52,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.8-time-awareness-silence"
+BOT_VERSION = "8.3.9-humanize-graded-logic"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -92,7 +94,8 @@ IRRITATION_TRIGGER_KEYWORDS = [
     "stfu", "shut up",
 ]
 IRRITATION_PER_TRIGGER = 1.0
-IRRITATION_PER_IGNORED_QUESTION = 0.5
+IRRITATION_FULL_IGNORE_QUESTION = 1.0    # v8.3.9: score < 0.4
+IRRITATION_PARTIAL_IGNORE_QUESTION = 0.3  # v8.3.9: 0.4 <= score < 0.7
 IRRITATION_DECAY_PER_HOUR = 0.5
 IRRITATION_THRESHOLD_ANNOYED = 3.0
 
@@ -1727,9 +1730,13 @@ def classify_user_signal(user_text: str) -> str:
 # ====================== v8.3.8: HILJAISUUS / ÄRSYYNTYMINEN ======================
 def update_irritation_level(user_id: int, user_text: str) -> float:
     """
-    Päivittää ärsyyntymistason: nousee epäkohteliaisuudesta ja toistuvasti
-    ohitetuista kysymyksistä, rapautuu ajan myötä. Ei itsessään laukaise
-    hiljaisuutta - sen tekee maybe_trigger_silent_treatment().
+    Päivittää ärsyyntymistason: nousee epäkohteliaisuudesta, rapautuu ajan
+    myötä. Ei itsessään laukaise hiljaisuutta - sen tekee
+    maybe_trigger_silent_treatment(). HUOM v8.3.9: ohitettujen kysymysten
+    ärsyyntymislisä ei enää tule tästä karkeasta heuristiikasta, vaan
+    generate_llm_reply() lisää sen suoraan liukuvan
+    answered_previous_question_score-arvon perusteella (tarkempi ja
+    reagoi heti sen sijaan että vaatisi kaksi ohitusta ennen huomiota).
     """
     state = get_or_create_state(user_id)
     now = time.time()
@@ -1743,11 +1750,6 @@ def update_irritation_level(user_id: int, user_text: str) -> float:
     if any(kw in t for kw in IRRITATION_TRIGGER_KEYWORDS):
         level += IRRITATION_PER_TRIGGER
         print(f"[IRRITATION] +{IRRITATION_PER_TRIGGER} epäkohtelias viesti, taso nyt {level:.1f}")
-
-    pending = state.get("pending_question")
-    if pending and pending.get("unanswered_count", 0) >= 2:
-        level += IRRITATION_PER_IGNORED_QUESTION
-        print(f"[IRRITATION] +{IRRITATION_PER_IGNORED_QUESTION} toistuvasti ohitettu kysymys, taso nyt {level:.1f}")
 
     state["irritation_level"] = level
     return level
@@ -2529,7 +2531,7 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
     default = {"primary_intent":"chat","topic":"general","what_user_wants_now":user_text,
                "explicit_constraints":[],"user_is_correcting_bot":False,"should_change_course":False,
                "tone_needed":"direct","answer_first":user_text,"signal_type":"normal",
-               "answered_previous_question":True}
+               "answered_previous_question_score":1.0}
     signal = classify_user_signal(user_text)
     default["signal_type"] = signal
     if signal == "boundary":
@@ -2549,12 +2551,17 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
     pending_block = ""
     if pending_question and pending_question.get("text"):
         pending_block = f"""
-MEGANIN EDELLINEN KYSYMYS (tarkista huolella vastasiko käyttäjä tähän edes osittain/välillisesti):
+MEGANIN EDELLINEN KYSYMYS (arvioi huolella kuinka hyvin käyttäjä vastasi tähän):
 "{pending_question['text']}\""""
     prompt = f"""Return JSON only.
-Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":"","answered_previous_question":true}}
+Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":"","answered_previous_question_score":1.0}}
 
-answered_previous_question: true jos käyttäjän viesti vastaa (edes osittain, epäsuorasti tai vaihtaa aihetta selvästi tietoisesti) Meganin edelliseen kysymykseen, TAI jos kysymystä ei ollut. false jos käyttäjä selvästi ohitti kysymyksen ja jatkoi jostain muusta ikään kuin kysymystä ei olisi esitetty.
+answered_previous_question_score: liukuva 0.0-1.0 arvio siitä vastasiko käyttäjän
+viesti Meganin edelliseen kysymykseen (tai 1.0 jos kysymystä ei ollut):
+- 1.0 = vastasi suoraan ja selvästi
+- 0.7-0.9 = vastasi mutta epäsuorasti/lyhyesti
+- 0.4-0.6 = sivusi aihetta osittain muttei oikeasti vastannut
+- 0.0-0.3 = ohitti kysymyksen täysin, jatkoi kuin sitä ei olisi esitetty
 {pending_block}
 Recent: {recent_text}
 Latest: {user_text}"""
@@ -2562,8 +2569,11 @@ Latest: {user_text}"""
     if not raw: return default
     result = parse_json_object(raw, default)
     result["signal_type"] = signal
-    if "answered_previous_question" not in result:
-        result["answered_previous_question"] = True
+    try:
+        result["answered_previous_question_score"] = max(0.0, min(1.0,
+            float(result.get("answered_previous_question_score", 1.0))))
+    except (TypeError, ValueError):
+        result["answered_previous_question_score"] = 1.0
     return result
 
 
@@ -2572,14 +2582,18 @@ async def build_response_plan(user_id: int, user_text: str, context_pack: dict, 
     """
     Erillinen sisäinen suunnitteluvaihe ennen varsinaista vastausta.
     EI näy käyttäjälle - ainoastaan ohjaa lopullista reply-generointia.
+    Toimii samalla "sisäisenä äänenä" (ei tarvita erillistä inner-monologue-
+    kutsua - se tuottaisi lähes saman analyysin toisella LLM-kutsulla).
 
     Tarkistaa:
     - Mitkä tunnetut faktat/muistot ovat suoraan relevantteja tähän vuoroon
     - Onko käyttäjän viesti ristiriidassa tunnetun tilan (scene, sijainti,
       profile facts, sticky-muistot) kanssa
     - Mikä on tämän vuoron tavoite
+    - Millä tunnesävyllä Meganin tulisi vastata (v8.3.9)
     - Pitäisikö vastauksen nojata kumulatiiviseen muistiyhteenvetoon
     """
+    state = get_or_create_state(user_id)
     rolling_summary = context_pack.get("rolling_summary", "")
     profile_facts = context_pack.get("profile_facts", [])
     sticky_memories = context_pack.get("sticky_memories", [])
@@ -2592,13 +2606,14 @@ async def build_response_plan(user_id: int, user_text: str, context_pack: dict, 
 
     default_plan = {"relevant_facts": [], "potential_contradiction": None,
                      "scene_consistent": True, "turn_goal": "vastaa luonnollisesti",
-                     "should_reference_rolling_summary": False}
+                     "should_reference_rolling_summary": False,
+                     "emotional_undertone": "neutraali, itsevarma"}
 
     prompt = f"""Analysoi tilanne ennen Meganin vastauksen kirjoittamista. Return JSON only.
 
 Schema:
 {{"relevant_facts":[],"potential_contradiction":null,"scene_consistent":true,
-"turn_goal":"","should_reference_rolling_summary":false}}
+"turn_goal":"","should_reference_rolling_summary":false,"emotional_undertone":""}}
 
 Rules:
 - relevant_facts: max 3 faktaa jotka ovat suoraan relevantteja käyttäjän viimeisimpään viestiin
@@ -2607,8 +2622,18 @@ Rules:
 - scene_consistent: onko käyttäjän viesti looginen nykyisen scenen ({scene}) ja
   sijainnin ({location_status}) kanssa
 - turn_goal: yksi lause, mitä Meganin pitäisi saavuttaa tässä vastauksessa
+- emotional_undertone: 3-6 sanaa siitä millä tunnesävyllä Megan vastaa TÄSSÄ vuorossa,
+  ottaen huomioon hänen persoonansa (dominoiva, itsenäinen, ei tarvitseva), nykyinen
+  mieliala/jännite/ärsyyntyminen alla, ja äskeinen historia. Esim. "leikkisän ärsyyntynyt",
+  "lämmin mutta pidättyväinen", "kiihottunut ja määräilevä", "kylmän etäinen"
 - should_reference_rolling_summary: true jos käyttäjä viittaa johonkin joka löytyy
   todennäköisesti vain pitkän aikavälin historiasta, ei viimeisimmistä vuoroista
+
+Meganin nykyinen sisäinen tila:
+- emotional_mode: {state.get('emotional_mode','calm')}
+- tension: {state.get('tension',0.0):.2f}
+- irritation_level: {state.get('irritation_level',0.0):.1f}
+- submission_level (käyttäjän): {state.get('submission_level',0.0):.2f}
 
 Rolling summary (lyhennetty): {rolling_summary[:600] or 'ei vielä'}
 Profile facts: {facts_str}
@@ -2616,7 +2641,7 @@ Sticky memories: {sticky_str}
 Turn analysis: {json.dumps(turn_analysis, ensure_ascii=False)}
 Käyttäjän viesti: {user_text}"""
 
-    raw = await call_llm(user_prompt=prompt, max_tokens=300,
+    raw = await call_llm(user_prompt=prompt, max_tokens=350,
                          temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
     if not raw:
         return format_response_plan(default_plan)
@@ -2631,13 +2656,14 @@ def format_response_plan(plan: dict) -> str:
     contradiction = plan.get("potential_contradiction")
     if contradiction:
         lines.append(f"⚠️ MAHDOLLINEN RISTIRIITA: {contradiction}")
-        lines.append("→ Jos ristiriita on todellinen, käsittele se luonnollisesti Meganina "
-                      "(esim. kysy tarkennusta tai huomauta siitä leikkisästi/dominoivasti). "
-                      "ÄLÄ vain ohita sitä hiljaa.")
+        lines.append("→ Jos ristiriita on todellinen, käsittele se ihmismäisesti: esim. "
+                      '"hetkinen, eiks sä just äsken sanonut jotain ihan muuta - vai muistanks mä väärin?" '
+                      "sen sijaan että vain toteat sen tai ohitat sen hiljaa.")
     if not plan.get("scene_consistent", True):
         lines.append("⚠️ Käyttäjän viesti ei täsmää nykyiseen sceneen/sijaintiin - "
                       "ota tämä huomioon vastauksessa luontevasti.")
     lines.append(f"Tämän vuoron tavoite: {plan.get('turn_goal','vastaa luonnollisesti')}")
+    lines.append(f"Tunnesävy: {plan.get('emotional_undertone','neutraali, itsevarma')}")
     if plan.get("should_reference_rolling_summary"):
         lines.append("→ Hyödynnä KUMULATIIVISTA MUISTIYHTEENVETOA vastauksessa.")
     lines.append("=" * 50)
@@ -2669,12 +2695,47 @@ async def generate_llm_reply(user_id, user_text):
     user_correcting = turn_analysis.get("user_is_correcting_bot", False)
     tone_needed = turn_analysis.get("tone_needed", "direct")
     primary_intent = turn_analysis.get("primary_intent", "chat")
-    answered_previous_question = turn_analysis.get("answered_previous_question", True)
+    answered_score = turn_analysis.get("answered_previous_question_score", 1.0)
 
-    # v8.3.7: päivitä pending_question-tila sen mukaan vastasiko käyttäjä siihen.
-    if pending_question and not answered_previous_question:
-        pending_question["unanswered_count"] = pending_question.get("unanswered_count", 0) + 1
-        state["pending_question"] = pending_question
+    # v8.3.9: liukuva pending_question-arvio (0.0-1.0) korvaa aiemman binäärisen
+    # true/false-logiikan. Kolme tasoa: täysi ohitus (<0.4, kova nagaus + iso
+    # ärsyyntymislisä), osittainen vastaus (0.4-0.7, lievä huomautus + pieni
+    # ärsyyntymislisä), riittävä vastaus (>=0.7, pending nollataan).
+    question_directive = ""
+    if pending_question and answered_score < 0.7:
+        if answered_score < 0.4:
+            pending_question["unanswered_count"] = pending_question.get("unanswered_count", 0) + 1
+            state["pending_question"] = pending_question
+            state["irritation_level"] = state.get("irritation_level", 0.0) + IRRITATION_FULL_IGNORE_QUESTION
+            count = pending_question.get("unanswered_count", 1)
+            prev_q = pending_question.get("text", "")
+            if count <= 1:
+                question_directive = f"""
+HUOM - EDELLINEN KYSYMYS JÄI VAILLE VASTAUSTA:
+Kysyit äsken: "{prev_q}" - käyttäjä ei vastannut siihen suoraan.
+Osoita aitoa kiinnostusta: palaa siihen luontevasti TAI päästä siitä tietoisesti irti
+(esim. huomauta leikkisästi/dominoivasti ettet saanut vastausta) ENNEN kuin siirryt
+mihinkään uuteen. ÄLÄ vain kysy uutta kysymystä ikään kuin edellistä ei olisi ollut -
+se tekee sinusta monotonisen kyselijän ilman aitoa kiinnostusta.
+"""
+            else:
+                question_directive = f"""
+HUOM - OLET KYSYNYT SAMAA ASIAA JO {count} KERTAA ILMAN VASTAUSTA:
+"{prev_q}"
+ÄLÄ kysy mitään uutta kysymystä tässä vuorossa. Tee sen sijaan toteamus, kommentti,
+tai reagoi muuten luonnollisesti siihen ettet ole saanut vastausta - toistuva
+kyseleminen ilman vastausta ei ole aitoa kiinnostusta.
+"""
+        else:  # 0.4 <= score < 0.7: osittainen vastaus
+            state["pending_question"] = pending_question  # säilytetään, ei kasvateta laskuria
+            state["irritation_level"] = state.get("irritation_level", 0.0) + IRRITATION_PARTIAL_IGNORE_QUESTION
+            prev_q = pending_question.get("text", "")
+            question_directive = f"""
+HUOM - VASTASIT VAIN OSITTAIN EDELLISEEN KYSYMYKSEEN:
+Kysyit äsken: "{prev_q}" - käyttäjä sivusi aihetta muttei vastannut suoraan.
+Voit hyväksyä osittaisen vastauksen ja jatkaa luontevasti, mutta jos haluat
+tarkennusta, voit kysyä sen - ei pakko.
+"""
     else:
         state["pending_question"] = None
         pending_question = None
@@ -2722,6 +2783,24 @@ AJAN TIETOISUUS:
 ============================================================
 """
 
+    # v8.3.9: tyyli/rytmi-ohje - vähentää "puhdasta", kirjallista, mekaanista
+    # vaikutelmaa ilman post-processing-hakkerointia (malli tuottaa vaihtelun itse).
+    style_directive = """
+============================================================
+TYYLI JA RYTMI - ÄLÄ KUULOSTA KIRJOITETULTA TAI TÄYDELLISELTÄ:
+============================================================
+- Käytä puhekielisiä muotoja luontevasti: "mä", "sä", "oot", "mä oon", "ei oo",
+  "jotenki", "ihan", "silleen", "tosi", "no niin" - vaihtelevasti, ei jokaisessa lauseessa.
+- Lauseiden pituus vaihtelee vuorosta toiseen: joskus lyhyt ja terävä, joskus
+  pidempi ja rönsyilevä. Älä toista samaa lauserakennetta peräkkäisissä vastauksissa.
+- Älä aloita jokaista vastausta samalla tavalla (ei aina "no niin", "hei", tms.)
+- Voit joskus (ei aina) jättää ajatuksen kesken ("...") tai vaihtaa suuntaa kesken
+  lauseen, jos se tuntuu luontevalta juuri siinä kohtaa.
+- Emojia harvoin ja vain kun se oikeasti sopii tunnelmaan - ei jokaisen viestin lopussa.
+- Olet ihminen joka kirjoittaa nopeasti puhelimella, et kirjailija joka hioo lauseita.
+============================================================
+"""
+
     situation_directive = ""
     if signal_type == "meta_probe":
         situation_directive = """
@@ -2742,31 +2821,6 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     elif should_change:
         situation_directive = "AIHE VAIHTUU - seuraa käyttäjän suuntaa."
 
-    # v8.3.7: jos edelliseen kysymykseen ei vastattu, ohjaa mallia käsittelemään
-    # se ennen kuin se kysyy jotain uutta - estää monotonisen "kysele jotain,
-    # unohda heti" -kaavan.
-    question_directive = ""
-    if pending_question and not answered_previous_question:
-        count = pending_question.get("unanswered_count", 1)
-        prev_q = pending_question.get("text", "")
-        if count <= 1:
-            question_directive = f"""
-HUOM - EDELLINEN KYSYMYS JÄI VAILLE VASTAUSTA:
-Kysyit äsken: "{prev_q}" - käyttäjä ei vastannut siihen suoraan.
-Osoita aitoa kiinnostusta: palaa siihen luontevasti TAI päästä siitä tietoisesti irti
-(esim. huomauta leikkisästi/dominoivasti ettet saanut vastausta) ENNEN kuin siirryt
-mihinkään uuteen. ÄLÄ vain kysy uutta kysymystä ikään kuin edellistä ei olisi ollut -
-se tekee sinusta monotonisen kyselijän ilman aitoa kiinnostusta.
-"""
-        else:
-            question_directive = f"""
-HUOM - OLET KYSYNYT SAMAA ASIAA JO {count} KERTAA ILMAN VASTAUSTA:
-"{prev_q}"
-ÄLÄ kysy mitään uutta kysymystä tässä vuorossa. Tee sen sijaan toteamus, kommentti,
-tai reagoi muuten luonnollisesti siihen ettet ole saanut vastausta - toistuva
-kyseleminen ilman vastausta ei ole aitoa kiinnostusta.
-"""
-
     # v8.3.8: jos hiljaisuusjakso juuri päättyi, ohjaa mallia reagoimaan
     # siihen luonnollisesti (ei teknisesti) tässä ensimmäisessä vastauksessa.
     silence_directive = get_silence_return_directive(user_id)
@@ -2774,6 +2828,7 @@ kyseleminen ilman vastausta ei ole aitoa kiinnostusta.
     system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
+{style_directive}
 
 CONVERSATION STATE:
 - Mode: {current_mode}
@@ -2866,13 +2921,37 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
                     "Outo kysymys. Sano jotain kiinnostavampaa.",
                     "Joo joo. Ja sä oot astronautti. Mitä oikeesti haluat?"])
 
-    # v8.3.7: päivitä pending_question lopullisen vastauksen perusteella.
-    # Jos edellinen kysymys jäi vaille vastausta JA malli silti kysyi jotain
-    # uutta direktiivistä huolimatta, säilytetään alkuperäinen (jo kasvatettu
-    # unanswered_count) sen sijaan että ylikirjoitettaisiin - näin nagaus ei
-    # unohdu jos malli ei noudattanut ohjetta.
-    still_pending_unanswered = bool(state.get("pending_question")
-                                     and not answered_previous_question)
+    # v8.3.9: pehmeä korjaus scene/temporal-ristiriitoihin. Sen sijaan että
+    # koko vastaus korvataan geneerisellä paikkatekstillä, pyydetään mallia
+    # itse korjaamaan looginen ristiriita säilyttäen sävyn - geneerinen teksti
+    # on vain viimeinen varakeino jos korjausyritys epäonnistuu.
+    if breaks_scene_logic(reply, state):
+        note = (f"Vastauksessa mainittiin paikka/tilanne joka ei sovi nykyiseen "
+                f"sceneen ({state.get('scene')}, sijaintitila: {state.get('location_status')}).")
+        fix_prompt = user_prompt + f"\n\nKORJAUSOHJE: {note}\nKirjoita vastaus uudelleen samalla sävyllä, mutta korjaa tämä looginen ristiriita luontevasti."
+        fixed = await call_llm(system_prompt=system_prompt, user_prompt=fix_prompt,
+                               max_tokens=1200, temperature=TEMP_REPLY)
+        if fixed and not breaks_scene_logic(fixed, state):
+            reply = fixed.strip()
+        else:
+            reply = "Hetki, kadotin ajatuksen. Sano uudelleen."
+
+    if breaks_temporal_logic(reply, state):
+        note = f"Vastaus oli ristiriidassa meneillään olevan toiminnan kanssa ({state.get('current_action')})."
+        fix_prompt = user_prompt + f"\n\nKORJAUSOHJE: {note}\nKirjoita vastaus uudelleen samalla sävyllä, mutta korjaa tämä looginen ristiriita luontevasti."
+        fixed = await call_llm(system_prompt=system_prompt, user_prompt=fix_prompt,
+                               max_tokens=1200, temperature=TEMP_REPLY)
+        if fixed and not breaks_temporal_logic(fixed, state):
+            reply = fixed.strip()
+        else:
+            reply = "Hetki, olin vähän muualla. Mitä sanoit?"
+
+    # v8.3.9: päivitä pending_question lopullisen vastauksen perusteella.
+    # Jos edellinen kysymys jäi vaille (riittävää) vastausta JA malli silti
+    # kysyi jotain uutta direktiivistä huolimatta, säilytetään alkuperäinen
+    # (jo kasvatettu unanswered_count) sen sijaan että ylikirjoitettaisiin -
+    # näin nagaus ei unohdu jos malli ei noudattanut ohjetta.
+    still_pending_unanswered = bool(state.get("pending_question") and answered_score < 0.7)
     if not still_pending_unanswered:
         new_question = extract_last_question(reply)
         state["pending_question"] = {"text": new_question, "unanswered_count": 0} if new_question else None
@@ -2966,11 +3045,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 memory_type="plan_update", source_turn_id=user_turn_id)
 
         reply = await generate_llm_reply(user_id, text)
-
-        if breaks_scene_logic(reply, state):
-            reply = "Hetki, kadotin ajatuksen. Sano uudelleen."
-        if breaks_temporal_logic(reply, state):
-            reply = "Hetki, olin vähän muualla. Mitä sanoit?"
+        # v8.3.9: scene/temporal-ristiriitojen korjaus tapahtuu nyt sisällä
+        # generate_llm_reply():ssä (pehmeä LLM-korjaus geneerisen tekstin sijaan).
 
         conversation_history[user_id].append({"role":"assistant","content":reply})
         conversation_history[user_id] = conversation_history[user_id][-20:]
@@ -3172,6 +3248,12 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+
+v8.3.9:
+- Tyyli/rytmi-ohje: ON (puhekielisyys, vaihteleva rytmi, ei post-processing-hakkerointia)
+- Pending question -arvio: liukuva 0.0-1.0 (ei enää binäärinen true/false)
+- Response plan: sisältää emotional_undertone-ulottuvuuden (ei erillistä LLM-kutsua)
+- Scene/temporal-ristiriidat: pehmeä LLM-korjaus ennen geneeristä varatekstiä
 
 v8.3.8:
 - Aikatietoisuus: NYKYHETKI + EDELLISESTÄ VIESTISTÄ KULUNUT joka context packissa
