@@ -56,7 +56,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.12-error-diagnostics"
+BOT_VERSION = "8.3.13-thinking-block-fix"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -701,6 +701,22 @@ def _extract_anthropic_error_message(e: Exception) -> str:
         return str(msg)
     return str(e)
 
+def extract_claude_text(response) -> str:
+    """
+    v8.3.13: Uudemmat Claude-mallit (mm. claude-sonnet-5) voivat palauttaa
+    "extended thinking" -lohkoja (ThinkingBlock) ENNEN varsinaista tekstiä
+    content-listassa. response.content[0] ei siis ole enää luotettavasti
+    tekstilohko - täytyy etsiä ensimmäinen lohko jolla on ei-tyhjä
+    'text'-attribuutti sen sijaan että oletetaan sen olevan indeksissä 0.
+    """
+    if not response or not response.content:
+        return ""
+    for block in response.content:
+        text = getattr(block, "text", None)
+        if text:
+            return text
+    return ""
+
 async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                    temperature=0.8, prefer_light=False, json_mode=False):
     """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu.
@@ -709,32 +725,44 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
     v8.3.12: virheviesti tulostetaan omalle rivilleen ilman JSON-kääretekstiä
     ympärillä - monet lokinäkymät (mm. Render) katkaisevat pitkät rivit, ja
     kääre ("Error code: 400 - {'type': 'error', ...") söi suurimman osan
-    merkkibudjetista ennen kuin varsinainen viesti edes alkoi."""
+    merkkibudjetista ennen kuin varsinainen viesti edes alkoi.
+    v8.3.13: temperature EI enää lähetetä Claudelle ollenkaan - Anthropic
+    on deprecatoinut sen parametrina uusimmille malleille (esim. Sonnet 5).
+    Retry-logiikka jätetty varalle tulevia vastaavia deprecaatioita varten.
+    Lisäksi tekstin poiminta käyttää nyt extract_claude_text():ia, koska
+    content[0] voi olla ThinkingBlock eikä tekstilohko."""
     claude = get_claude_client()
     if claude:
         model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
         messages = [{"role": "user", "content": user_prompt}]
         kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
-        if prefer_light: kwargs["temperature"] = temperature
+        # HUOM: temperature EI lähetetä Claudelle (deprecated uusimmilla malleilla).
+        # temperature-parametria käytetään yhä Grok-kutsuun alempana.
         if system_prompt: kwargs["system"] = system_prompt
         try:
             response = await claude.messages.create(**kwargs)
-            if response.content:
-                text = response.content[0].text
-                if text and text.strip(): return text.strip()
+            text = extract_claude_text(response)
+            if text and text.strip(): return text.strip()
         except Exception as e:
             inner_msg = _extract_anthropic_error_message(e)
             print(f"[LLM] Claude error: {type(e).__name__}")
             print(f"[LLM] Claude error message: {inner_msg}")
-            if "temperature" in inner_msg.lower() and "temperature" in kwargs:
+            # Varakeino: jos virhe mainitsee jonkin tunnetun deprecatoidun
+            # parametrin joka meillä sattuisi vielä olemaan kwargs:ssa,
+            # poista se ja yritä uudelleen kerran.
+            retry_kwargs = dict(kwargs)
+            removed_any = False
+            for param_name in ("temperature", "top_p", "top_k"):
+                if param_name in inner_msg.lower() and param_name in retry_kwargs:
+                    del retry_kwargs[param_name]
+                    removed_any = True
+            if removed_any:
                 try:
-                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
                     response = await claude.messages.create(**retry_kwargs)
-                    if response.content:
-                        text = response.content[0].text
-                        if text and text.strip():
-                            print("[LLM] Claude retry ilman temperature-parametria onnistui")
-                            return text.strip()
+                    text = extract_claude_text(response)
+                    if text and text.strip():
+                        print("[LLM] Claude retry (deprecatoitu parametri poistettu) onnistui")
+                        return text.strip()
                 except Exception as e2:
                     inner_msg2 = _extract_anthropic_error_message(e2)
                     print(f"[LLM] Claude retry error: {type(e2).__name__}")
@@ -2264,7 +2292,7 @@ Analyze the ACTUAL image. caption_seed natural for dominant Megan."""
                 ],
             }],
         )
-        text = response.content[0].text if response.content else "{}"
+        text = extract_claude_text(response) or "{}"
         return parse_json_object(text, default)
     except Exception as e:
         print(f"[VISION] {e}")
