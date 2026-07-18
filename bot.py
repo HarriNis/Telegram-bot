@@ -56,7 +56,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.11-claude-temp-fix"
+BOT_VERSION = "8.3.12-error-diagnostics"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -679,13 +679,37 @@ def get_time_block():
     return "late_evening"
 
 # ====================== LLM ======================
+def _extract_anthropic_error_message(e: Exception) -> str:
+    """
+    v8.3.12: Poimii Anthropic-SDK:n virheestä pelkän sisemmän 'message'-kentän
+    sen sijaan että tulostettaisiin koko str(e) (joka sisältää paljon
+    JSON-kääretekstiä ennen varsinaista syytä). anthropic-kirjaston
+    APIStatusError-tyyppisillä poikkeuksilla on yleensä .body (jäsennetty
+    JSON) ja/tai .message-attribuutti - käytetään niitä jos löytyvät,
+    muuten pudotaan str(e):hen.
+    """
+    try:
+        body = getattr(e, "body", None)
+        if isinstance(body, dict):
+            inner = body.get("error", {})
+            if isinstance(inner, dict) and inner.get("message"):
+                return str(inner["message"])
+    except Exception:
+        pass
+    msg = getattr(e, "message", None)
+    if msg:
+        return str(msg)
+    return str(e)
+
 async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                    temperature=0.8, prefer_light=False, json_mode=False):
     """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu.
     v8.3.11: jos Claude palauttaa 400-virheen joka mainitsee temperature-
     parametrin, yritetään kerran uudelleen ilman sitä ennen Grok-fallbackia.
-    Virhelokit myös pidennetty 100->400 merkkiin ettei todellinen syy jää
-    piiloon."""
+    v8.3.12: virheviesti tulostetaan omalle rivilleen ilman JSON-kääretekstiä
+    ympärillä - monet lokinäkymät (mm. Render) katkaisevat pitkät rivit, ja
+    kääre ("Error code: 400 - {'type': 'error', ...") söi suurimman osan
+    merkkibudjetista ennen kuin varsinainen viesti edes alkoi."""
     claude = get_claude_client()
     if claude:
         model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
@@ -699,9 +723,10 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                 text = response.content[0].text
                 if text and text.strip(): return text.strip()
         except Exception as e:
-            err_str = str(e)
-            print(f"[LLM] Claude error: {type(e).__name__}: {err_str[:400]}")
-            if "temperature" in err_str.lower() and "temperature" in kwargs:
+            inner_msg = _extract_anthropic_error_message(e)
+            print(f"[LLM] Claude error: {type(e).__name__}")
+            print(f"[LLM] Claude error message: {inner_msg}")
+            if "temperature" in inner_msg.lower() and "temperature" in kwargs:
                 try:
                     retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
                     response = await claude.messages.create(**retry_kwargs)
@@ -711,7 +736,9 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                             print("[LLM] Claude retry ilman temperature-parametria onnistui")
                             return text.strip()
                 except Exception as e2:
-                    print(f"[LLM] Claude retry error: {type(e2).__name__}: {str(e2)[:400]}")
+                    inner_msg2 = _extract_anthropic_error_message(e2)
+                    print(f"[LLM] Claude retry error: {type(e2).__name__}")
+                    print(f"[LLM] Claude retry error message: {inner_msg2}")
     if grok_client:
         try:
             messages = []
@@ -724,7 +751,8 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
             text = response.choices[0].message.content
             if text and text.strip(): return text.strip()
         except Exception as e:
-            print(f"[LLM] Grok error: {type(e).__name__}: {str(e)[:400]}")
+            print(f"[LLM] Grok error: {type(e).__name__}")
+            print(f"[LLM] Grok error message: {str(e)}")
     print("[LLM] ALL PROVIDERS FAILED (Claude + Grok)")
     return ""
 
