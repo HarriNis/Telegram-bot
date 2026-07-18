@@ -1,41 +1,44 @@
 """
-Megan Telegram Bot - v8.3.9-humanize-graded-logic
+Megan Telegram Bot - v8.3.10-local-embeddings-memory
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
 
-Muutokset v8.3.8 → v8.3.9 (perustuu Grokin koodikatselmukseen - toteutettu
-neljä sen ehdotusta jotka eivät olleet joko jo olemassa tai virheellisiä):
-- N) Tyyli/rytmi-ohje (system prompt, ei post-processing-regexiä):
-     Uusi style_directive generate_llm_reply():ssä ohjeistaa puhekielisyyttä,
-     vaihtelevaa lauserytmiä ja "älä kuulosta kirjailijalta" -asennetta.
-     Tietoinen valinta: EI mekaanista regex-pohjaista "human noise"-lisäystä
-     valmiiseen tekstiin (esim. satunnaiset ".." tai "No nii.." -lisäykset),
-     koska ne irrottavat lisäyksen kontekstista ja näkyvät helposti bugina.
-     Opus 4.8 tuottaa luontevamman vaihtelun kun sitä ohjeistetaan promptissa.
-- O) Liukuva pending-question-arvio (0.0-1.0 binäärisen true/false sijaan):
-     analyze_user_turn() palauttaa nyt "answered_previous_question_score".
-     generate_llm_reply() erottelee kolme tasoa: <0.4 täysi ohitus (kova
-     nagaus + IRRITATION_FULL_IGNORE_QUESTION), 0.4-0.7 osittainen vastaus
-     (lievä huomautus + IRRITATION_PARTIAL_IGNORE_QUESTION), >=0.7 riittävä
-     (pending nollataan). update_irritation_level():n karkea
-     unanswered_count>=2-heuristiikka poistettu - irritation lisätään nyt
-     suoraan ja tarkemmin generate_llm_reply():ssä.
-- P) Emotionaalinen ulottuvuus build_response_plan():iin (EI erillistä
-     inner-monologue-kutsua): plan-skeemaan lisätty "emotional_undertone",
-     joka johdetaan emotional_mode/tension/irritation/submission-tilasta
-     saman LLM-kutsun sisällä. Ristiriitaohje muutettu ihmismäisemmäksi
-     ("hetkinen, eiks sä just sanonut...").
-- Q) Pehmeä korjaus scene/temporal-ristiriitoihin: breaks_scene_logic()/
-     breaks_temporal_logic() eivät enää korvaa koko vastausta geneerisellä
-     paikkatekstillä suoraan handle_message():ssa. generate_llm_reply()
-     yrittää nyt ensin pyytää mallia korjaamaan ristiriidan itse samalla
-     sävyllä; geneerinen teksti on vain varakeino jos korjaus epäonnistuu.
-- Ei toteutettu (perusteltu koodikatselmuksessa): erillinen inner/outer-voice
-  -kutsu (päällekkäinen build_response_plan():n kanssa) ja väite että Claude-
-  hahmolukko katoaisi Grok-polulla NSFW:ssä (virheellinen - system_prompt on
-  identtinen molemmilla providereilla).
-- Kaikki v8.3.8, v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
+RIIPPUVUUS v8.3.10: pip install sentence-transformers --break-system-packages
+(lisäksi numpy, joka palautettiin v8.3.6:n jälkeen). Malli
+"paraphrase-multilingual-MiniLM-L12-v2" (~470MB) ladataan HuggingFace
+Hubista ensimmäisellä käynnistyksellä ja cachetaan levylle - ei vaadi
+OpenAI:ta eikä mitään ulkoista API-kutsua ajon aikana. Jos kirjastoa ei ole
+asennettu, koodi putoaa automaattisesti Jaccard-tekstivertailuun (v8.3.6:n
+tapaan) - ei kaadu, mutta muistihaku on epätarkempi.
+
+Muutokset v8.3.9 → v8.3.10 (muistin ja loogisuuden tehostus):
+- R) Paikallinen semanttinen embedding OpenAI:n sijaan:
+     * get_embedding_model()/compute_embedding()/get_embedding_async():
+       ladataan "paraphrase-multilingual-MiniLM-L12-v2" laiskasti, ajetaan
+       thread poolissa (ei blokkaa event loopia). Tukee suomen taivutus-
+       muotoja toisin kuin v8.3.6:n Jaccard-sanavertailu (joka ei nähnyt
+       "menin"/"meni"/"menossa" samaksi asiaksi) - tämä oli yksi pääsyistä
+       Meganin "unohtamiseen".
+     * store_episodic_memory()/maybe_create_summary(): tallentavat taas
+       oikeat embedding-vektorit episodic_memories/summaries-tauluihin.
+     * retrieve_relevant_memories(): käyttää embedding-kosinisamankaltaisuutta
+       kun saatavilla, putoaa Jaccard-fallbackiin per rivi (esim. vanhat
+       v8.3.6-v8.3.9-väliltä olevat rivit joilla ei ole embeddingiä).
+- S) megan_utterance/megan_action-painojen korjaus retrieve_relevant_memories():ssä:
+     nostettu -0.30/-0.20 -> -0.05/-0.05. Alkuperäinen tarkoitus (estää
+     puhujasekaannus muistihaussa) säilyy, mutta Meganin omat aiemmat
+     lausunnot eivät enää ole systemaattisesti aliedustettuja hakutuloksissa.
+     Lisäksi uusi kontekstuaalinen +0.35-boost megan_utterance-tyypille kun
+     käyttäjän viesti viittaa selvästi Meganin aiempaan puheeseen
+     ("sä sanoit", "sä lupasit", "muistatko ku").
+- T) Kasvatetut muisti-ikkunat: RECENT_TURNS_CONTEXT 8->16 (context pack,
+     reply-generointi), RECENT_TURNS_FRAME 8->10 (frame-extractori),
+     analyze_user_turn recent-slice 4->6, relevant_memories-limit 5->8.
+- Embedding-malli esiladataan main():ssa käynnistyksen yhteydessä ettei
+  ensimmäinen viesti kärsi latausviiveestä. /status näyttää embedding-
+  backendin tilan.
+- Kaikki v8.3.9, v8.3.8, v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -48,11 +51,12 @@ from telegram import Update, InputFile
 from telegram.ext import Application, MessageHandler, filters, CommandHandler, ContextTypes
 from openai import AsyncOpenAI
 import sqlite3
+import numpy as np
 from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.9-humanize-graded-logic"
+BOT_VERSION = "8.3.10-local-embeddings-memory"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -104,6 +108,12 @@ SILENT_ANNOYED_MAX_MINUTES = 45
 SILENT_JEALOUSY_MIN_MINUTES = 60
 SILENT_JEALOUSY_MAX_MINUTES = 240
 JEALOUSY_GAME_PROBABILITY = 0.04  # per soveltuva vuoro
+
+# ====================== v8.3.10: MUISTI-IKKUNAT ======================
+# Nostettu 8:sta - kapea ikkuna oli osasyy siihen että Megan "unohti" äskettäin
+# sanottuja asioita jotka olivat jo pudonneet ikkunan ulkopuolelle.
+RECENT_TURNS_CONTEXT = 16  # context packiin (reply-generointi, response planning)
+RECENT_TURNS_FRAME = 10    # frame-extractoriin (kevyempi, ajetaan joka vuorolla)
 
 app = Flask(__name__)
 
@@ -702,16 +712,68 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
     print("[LLM] ALL PROVIDERS FAILED (Claude + Grok)")
     return ""
 
-# ====================== v8.3.6: PAIKALLINEN TEKSTISIMILARITEETTI ======================
-# Korvaa OpenAI-embeddingit (text-embedding-3-small). Sanatason Jaccard-
-# samankaltaisuus ei ole yhtä tarkka kuin semanttinen embedding, mutta toimii
-# täysin ilman ulkoista API-kutsua muistihakuun.
+# ====================== v8.3.6/v8.3.10: TEKSTISIMILARITEETTI ======================
+# v8.3.6: Jaccard-fallback (aina saatavilla, ei riippuvuuksia).
 def text_similarity_score(query: str, content: str) -> float:
     qw = set(normalize_text(query).split())
     cw = set(normalize_text(content).split())
     if not qw or not cw:
         return 0.0
     return len(qw & cw) / len(qw | cw)
+
+# v8.3.10: Paikallinen monikielinen embedding-malli (tukee suomea) OpenAI:n
+# tilalle. Ei ulkoista API-kutsua ajon aikana - painot ladataan HuggingFace
+# Hubista vain ensimmäisellä käynnistyskerralla ja cachetaan levylle sen
+# jälkeen. Jaccard-sanavertailu ei ymmärtänyt suomen taivutusmuotoja
+# ("menin"/"meni"/"menossa" eivät jaa sanoja vaikka tarkoittavat samaa) -
+# tämä oli yksi pääsyistä miksi Megan ei löytänyt vanhoja muistoja hausta.
+_embedding_model = None
+_embedding_model_failed = False
+
+def get_embedding_model():
+    """Lataa embedding-mallin laiskasti. Palauttaa None jos kirjastoa ei ole
+    asennettu tai lataus epäonnistuu - tällöin retrieve_relevant_memories()
+    putoaa automaattisesti Jaccard-fallbackiin per muisti."""
+    global _embedding_model, _embedding_model_failed
+    if _embedding_model_failed:
+        return None
+    if _embedding_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+            print("✅ Embedding-malli ladattu (paraphrase-multilingual-MiniLM-L12-v2, paikallinen)")
+        except Exception as e:
+            print(f"⚠️ Embedding-mallin lataus epäonnistui, käytetään Jaccard-fallbackia: {e}")
+            _embedding_model_failed = True
+            return None
+    return _embedding_model
+
+def compute_embedding(text: str):
+    """Synkroninen embedding-laskenta. Kutsu aina get_embedding_async():n
+    kautta async-koodista (ajetaan thread poolissa, ei jää blokkaamaan
+    event loopia)."""
+    model = get_embedding_model()
+    if model is None:
+        return None
+    try:
+        vec = model.encode(text, convert_to_numpy=True, normalize_embeddings=True)
+        return vec.astype(np.float32)
+    except Exception as e:
+        print(f"[EMBED] {e}")
+        return None
+
+async def get_embedding_async(text: str):
+    if not text or not text.strip():
+        return None
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, compute_embedding, text)
+
+def cosine_similarity(a, b):
+    """Molemmat vektorit ovat jo normalisoituja (normalize_embeddings=True),
+    joten pistetulo == kosinisamankaltaisuus."""
+    if a is None or b is None or len(a) == 0 or len(b) == 0:
+        return 0.0
+    return float(np.dot(a, b))
 
 # ====================== STATE PERSISTENCE ======================
 def _default_temporal_state():
@@ -1043,44 +1105,71 @@ async def store_episodic_memory(user_id: int, content: str,
                                 memory_type: str = "event", source_turn_id: int = None):
     if not content or len(content.strip()) < 12: return
     if await is_duplicate_memory(user_id, content, memory_type): return
+    emb = await get_embedding_async(content)  # v8.3.10: None jos malli ei saatavilla - ok
+    emb_bytes = emb.tobytes() if emb is not None else None
     with db_lock:
         conn.execute("""
             INSERT INTO episodic_memories (user_id, content, embedding, memory_type, source_turn_id, created_at)
             VALUES (?,?,?,?,?,?)
-        """, (str(user_id), content, None, memory_type, source_turn_id, time.time()))
+        """, (str(user_id), content, emb_bytes, memory_type, source_turn_id, time.time()))
         conn.commit()
 
 async def retrieve_relevant_memories(user_id: int, query: str, limit: int = 5):
     now = time.time()
+    q_emb = await get_embedding_async(query)  # v8.3.10: None jos malli ei saatavilla
     cutoff = now - (MEMORY_SEARCH_WINDOW_DAYS * 86400)
     with db_lock:
         rows = conn.execute("""
-            SELECT content, memory_type, created_at FROM episodic_memories
+            SELECT content, embedding, memory_type, created_at FROM episodic_memories
             WHERE user_id=? AND created_at > ?
             ORDER BY created_at DESC LIMIT ?
         """, (str(user_id), cutoff, MEMORY_SEARCH_MAX_ROWS)).fetchall()
     if len(rows) < 200:
         with db_lock:
             rows = conn.execute("""
-                SELECT content, memory_type, created_at FROM episodic_memories
+                SELECT content, embedding, memory_type, created_at FROM episodic_memories
                 WHERE user_id=? ORDER BY created_at DESC LIMIT ?
             """, (str(user_id), MEMORY_SEARCH_MAX_ROWS)).fetchall()
+    # v8.3.10: megan_utterance/megan_action nostettu lähelle nollaa (oli -0.30/-0.20).
+    # Alkuperäinen tarkoitus (estää puhujasekaannus) toimi, mutta sivuvaikutuksena
+    # Meganin OMAT aiemmat lausunnot olivat systemaattisesti epätodennäköisimpiä
+    # nousta hakutuloksiin - juuri silloin kun käyttäjä kysyy "mitä sä sanoit".
     type_weights = {
         "user_fact":0.50,"user_action":0.40,"plan_update":0.40,"agreement":0.40,
         "fantasy":0.25,"user_utterance":0.15,"image_sent":0.15,
         "spontaneous_narrative":0.10,"event":0.05,"conversation_event":0.00,
-        "megan_action":-0.20,"megan_utterance":-0.30,
+        "megan_action":-0.05,"megan_utterance":-0.05,
     }
+    # v8.3.10: kontekstuaalinen boost megan_utterance-tyypille kun käyttäjä
+    # eksplisiittisesti viittaa siihen mitä Megan on sanonut/luvannut.
+    ql = query.lower()
+    references_megan_speech = any(kw in ql for kw in [
+        "sä sanoit", "sä lupasit", "muistatko ku", "muistatko kun", "mitä sä sanoit",
+        "sanoit että", "lupasit", "väitit", "totesit", "sanoit et", "sanoit sä",
+    ])
+    megan_utterance_boost = 0.35 if references_megan_speech else 0.0
+
     scored = []
-    for content, memory_type, created_at in rows:
-        sim = text_similarity_score(query, content)
-        age_h = max((now - created_at) / 3600.0, 0.0)
-        recency = 1.0 / (1.0 + (age_h / 24.0))
-        type_bonus = type_weights.get(memory_type, 0.0)
-        # v8.3.6: recency-painoa nostettu (0.25->0.30) koska sanatason
-        # similariteetti on karkeampi kuin embedding-cosine.
-        score = 0.55*sim + 0.30*recency + 0.15*type_bonus
-        scored.append((score, content, memory_type))
+    for content, emb_blob, memory_type, created_at in rows:
+        try:
+            if q_emb is not None and emb_blob:
+                emb = np.frombuffer(emb_blob, dtype=np.float32)
+                sim = cosine_similarity(q_emb, emb)
+            else:
+                # Fallback per rivi: joko malli ei saatavilla, tai vanha rivi
+                # v8.3.6-v8.3.9-väliltä jolloin embeddingiä ei tallennettu.
+                sim = text_similarity_score(query, content)
+            age_h = max((now - created_at) / 3600.0, 0.0)
+            recency = 1.0 / (1.0 + (age_h / 24.0))
+            type_bonus = type_weights.get(memory_type, 0.0)
+            if memory_type == "megan_utterance":
+                type_bonus += megan_utterance_boost
+            # v8.3.10: takaisin lähemmäs alkuperäisiä painoja (0.65/0.25/0.10)
+            # koska semanttinen embedding on taas käytössä kun malli on saatavilla.
+            score = 0.65*sim + 0.25*recency + 0.10*type_bonus
+            scored.append((score, content, memory_type))
+        except Exception:
+            continue
     scored.sort(key=lambda x: x[0], reverse=True)
     return [{"content":x[1],"memory_type":x[2]} for x in scored[:limit]]
 
@@ -1653,11 +1742,12 @@ async def maybe_create_summary(user_id: int):
 TÄRKEÄÄ: Erottele Käyttäjän ja Meganin puheet.
 {transcript}"""
     summary = await call_llm(user_prompt=prompt, max_tokens=300, temperature=0.3, prefer_light=True) or "Summary unavailable"
+    emb = await get_embedding_async(summary)  # v8.3.10
     with db_lock:
         conn.execute("""
             INSERT INTO summaries (user_id, start_turn_id, end_turn_id, summary, embedding, created_at)
             VALUES (?,?,?,?,?,?)
-        """, (str(user_id), start_id, end_id, summary, None, time.time()))
+        """, (str(user_id), start_id, end_id, summary, emb.tobytes() if emb is not None else None, time.time()))
         conn.commit()
 
 # ====================== TOPIC STATE ======================
@@ -2275,7 +2365,7 @@ async def maybe_send_proactive_image(application, user_id: int):
 
 # ====================== FRAME EXTRACTOR ======================
 async def extract_turn_frame(user_id: int, user_text: str):
-    recent_turns = get_recent_turns(user_id, limit=8)
+    recent_turns = get_recent_turns(user_id, limit=RECENT_TURNS_FRAME)
     active_plans = get_active_plans(user_id, limit=3)
     recent_text = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content']}"
                             for t in recent_turns)
@@ -2393,8 +2483,8 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
 # ====================== C) CONTEXT PACK (v8.3.4) ======================
 async def build_context_pack(user_id: int, user_text: str):
     state = get_or_create_state(user_id)
-    recent_turns = get_recent_turns(user_id, limit=8)
-    relevant_memories = await retrieve_relevant_memories(user_id, user_text, limit=5)
+    recent_turns = get_recent_turns(user_id, limit=RECENT_TURNS_CONTEXT)
+    relevant_memories = await retrieve_relevant_memories(user_id, user_text, limit=8)
     active_plans = get_active_plans(user_id, limit=10)
     profile_facts = get_profile_facts(user_id, limit=8)
     agreements = get_active_agreements(user_id)
@@ -2547,7 +2637,7 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
         return default
     recent_turns = context_pack.get("recent_turns", [])
     recent_text = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content']}"
-                            for t in recent_turns[-4:])
+                            for t in recent_turns[-6:])
     pending_block = ""
     if pending_question and pending_question.get("text"):
         pending_block = f"""
@@ -3240,6 +3330,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Primary LLM: {CLAUDE_MODEL_PRIMARY}
 Light LLM: {CLAUDE_MODEL_LIGHT}
 NSFW: Grok kun mode=nsfw tai submission > 0.6
+Embedding: {"paikallinen (paraphrase-multilingual-MiniLM-L12-v2)" if get_embedding_model() else "❌ ei saatavilla - Jaccard-fallback"}
 
 Scene: {state.get('scene')} | {state.get('micro_context')}
 Location: {state.get('location_status')}
@@ -3248,6 +3339,12 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+
+v8.3.10:
+- Semanttinen muistihaku: paikallinen embedding-malli (ei OpenAI:ta) Jaccard-fallbackin sijaan
+- megan_utterance/megan_action-painot nostettu lähelle nollaa (oli -0.30/-0.20)
+- Kontekstuaalinen boost kun käyttäjä viittaa Meganin aiempaan puheeseen
+- Muisti-ikkunat kasvatettu: context {RECENT_TURNS_CONTEXT} vuoroa, frame {RECENT_TURNS_FRAME} vuoroa
 
 v8.3.9:
 - Tyyli/rytmi-ohje: ON (puhekielisyys, vaihteleva rytmi, ei post-processing-hakkerointia)
@@ -3604,6 +3701,10 @@ async def main():
     except Exception as e: print(f"[INDEX] {e}")
 
     get_claude_client()
+    try:
+        get_embedding_model()  # v8.3.10: esilataus - ensimmäinen viesti ei odota mallin latausta
+    except Exception as e:
+        print(f"[EMBED] Esilataus epäonnistui: {e}")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("newgame", cmd_new_game))
