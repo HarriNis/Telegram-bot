@@ -56,7 +56,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.11-claude-temp-fix"
+BOT_VERSION = "8.3.10-local-embeddings-memory"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -681,37 +681,21 @@ def get_time_block():
 # ====================== LLM ======================
 async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                    temperature=0.8, prefer_light=False, json_mode=False):
-    """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu.
-    v8.3.11: jos Claude palauttaa 400-virheen joka mainitsee temperature-
-    parametrin, yritetään kerran uudelleen ilman sitä ennen Grok-fallbackia.
-    Virhelokit myös pidennetty 100->400 merkkiin ettei todellinen syy jää
-    piiloon."""
+    """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu."""
     claude = get_claude_client()
     if claude:
-        model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
-        messages = [{"role": "user", "content": user_prompt}]
-        kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
-        if prefer_light: kwargs["temperature"] = temperature
-        if system_prompt: kwargs["system"] = system_prompt
         try:
+            model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
+            messages = [{"role": "user", "content": user_prompt}]
+            kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
+            if prefer_light: kwargs["temperature"] = temperature
+            if system_prompt: kwargs["system"] = system_prompt
             response = await claude.messages.create(**kwargs)
             if response.content:
                 text = response.content[0].text
                 if text and text.strip(): return text.strip()
         except Exception as e:
-            err_str = str(e)
-            print(f"[LLM] Claude error: {type(e).__name__}: {err_str[:400]}")
-            if "temperature" in err_str.lower() and "temperature" in kwargs:
-                try:
-                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
-                    response = await claude.messages.create(**retry_kwargs)
-                    if response.content:
-                        text = response.content[0].text
-                        if text and text.strip():
-                            print("[LLM] Claude retry ilman temperature-parametria onnistui")
-                            return text.strip()
-                except Exception as e2:
-                    print(f"[LLM] Claude retry error: {type(e2).__name__}: {str(e2)[:400]}")
+            print(f"[LLM] Claude error: {type(e).__name__}: {str(e)[:100]}")
     if grok_client:
         try:
             messages = []
@@ -724,7 +708,7 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
             text = response.choices[0].message.content
             if text and text.strip(): return text.strip()
         except Exception as e:
-            print(f"[LLM] Grok error: {type(e).__name__}: {str(e)[:400]}")
+            print(f"[LLM] Grok error: {type(e).__name__}: {str(e)[:100]}")
     print("[LLM] ALL PROVIDERS FAILED (Claude + Grok)")
     return ""
 
