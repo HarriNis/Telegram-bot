@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.10-local-embeddings-memory
+Megan Telegram Bot - v8.3.14-proactive-messages
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -39,6 +39,32 @@ Muutokset v8.3.9 → v8.3.10 (muistin ja loogisuuden tehostus):
   ensimmäinen viesti kärsi latausviiveestä. /status näyttää embedding-
   backendin tilan.
 - Kaikki v8.3.9, v8.3.8, v8.3.7, v8.3.6, v8.3.5 ja v8.3.4 muutokset PIDETTY SAMANA
+
+Muutokset v8.3.10 → v8.3.14:
+- v8.3.11: automaattinen retry ilman temperature-parametria Claude 400-virheillä.
+- v8.3.12: virhelokit tulostetaan omalle rivilleen ilman JSON-kääretekstiä
+  (lokinäkymät kuten Render katkaisevat pitkät rivit - kääreteksti söi budjetin).
+- v8.3.13: extract_claude_text() - uudemmat Claude-mallit (mm. claude-sonnet-5)
+  voivat palauttaa "extended thinking" -lohkon (ThinkingBlock) ENNEN varsinaista
+  tekstiä content-listassa; content[0].text kaatui tähän. Samalla todettiin että
+  temperature on kokonaan deprecated uusimmilla malleilla - ei enää lähetetä
+  Claudelle ollenkaan (Grok saa sen yhä).
+- v8.3.14: proaktiiviset tekstiviestit.
+  * maybe_send_proactive_jealousy_message(): Megan ilmoittaa oma-aloitteisesti
+    lähtevänsä jonnekin (baari/treffit/juhlat), käynnistää oikean activityn
+    (start_activity_with_duration - scene/sijainti pysyvät johdonmukaisina) ja
+    asettaa silent_until-tilan (uusi reason "activity_jealousy") aktiviteetin
+    ajaksi. Täysin roolileikin sisäinen - viesti on LLM:n generoima, EI haettu.
+  * maybe_send_proactive_research_message()/call_claude_with_web_search():
+    Megan ottaa harvoin oma-aloitteisesti selvää käyttäjän tunnetusta
+    kiinnostuksen kohteesta oikealla Anthropic web-hakutyökalulla. Rajoitettu
+    tarkoituksella yleisiin/turvallisiin aiheisiin (pick_research_topic
+    suodattaa pois fantasiat/mielipiteet) - hakutyökalu ei sovellu eikä sitä
+    käytetä eksplisiittisen sisällön hakuun; sellainen sisältö pysyy täysin
+    roolileikin LLM:n oman generoinnin varassa kuten ennenkin.
+  * Molemmat ajetaan check_proactive_triggers-taustasilmukassa, rajoitettu
+    cooldown+todennäköisyys-vakioilla. /trigger_jealousy ja /trigger_research
+    debug-komennot testaukseen.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -56,7 +82,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.13-thinking-block-fix"
+BOT_VERSION = "8.3.14-proactive-messages"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -114,6 +140,18 @@ JEALOUSY_GAME_PROBABILITY = 0.04  # per soveltuva vuoro
 # sanottuja asioita jotka olivat jo pudonneet ikkunan ulkopuolelle.
 RECENT_TURNS_CONTEXT = 16  # context packiin (reply-generointi, response planning)
 RECENT_TURNS_FRAME = 10    # frame-extractoriin (kevyempi, ajetaan joka vuorolla)
+
+# ====================== v8.3.14: PROAKTIIVISET TEKSTIVIESTIT ======================
+# Kaksi erillistä tyyppiä: (1) mustasukkaisuus/aktiviteetti-ilmoitus - täysin
+# roolileikin sisäinen, LLM generoi, ei web-hakua. (2) tutkimusviesti - käyttää
+# oikeaa web-hakua, rajoittuu VAIN yleisiin/turvallisiin aiheisiin (ei koskaan
+# fantasia/seksuaalista sisältöä - niitä ei lähetetä ulkoiselle hakutyökalulle).
+PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST = 3    # älä lähetä jos keskustelu oli hyvin äskettäin
+JEALOUSY_ACTIVITY_POOL = ["bar", "club_night", "casual_date", "evening_date", "party"]
+PROACTIVE_JEALOUSY_COOLDOWN_HOURS = 20
+PROACTIVE_JEALOUSY_PROBABILITY = 0.15      # per taustasilmukan kierros per soveltuva käyttäjä
+PROACTIVE_RESEARCH_COOLDOWN_HOURS = 22
+PROACTIVE_RESEARCH_PROBABILITY = 0.10
 
 app = Flask(__name__)
 
@@ -886,6 +924,8 @@ def save_persistent_state_to_db(user_id):
         "silent_until": state.get("silent_until", 0),
         "silent_reason": state.get("silent_reason"),
         "silent_started_at": state.get("silent_started_at", 0),
+        "last_proactive_jealousy_at": state.get("last_proactive_jealousy_at", 0),  # v8.3.14
+        "last_proactive_research_at": state.get("last_proactive_research_at", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -1991,6 +2031,14 @@ Tämä on ensimmäinen vastauksesi sen jälkeen. Voit vihjata leikkisästi/domin
 että olit tekemässä jotain omaa (et ole tilivelvollinen kenellekään), ilman että
 selität tai pahoittelet poissaoloasi suoraan.
 """
+    if reason == "activity_jealousy":
+        return f"""
+HUOM - PALAAT AKTIVITEETIN JÄLKEEN:
+Ilmoitit noin {duration_min} minuuttia sitten oma-aloitteisesti lähteväsi jonnekin,
+etkä ole vastannut sen jälkeen. Tämä on ensimmäinen vastauksesi paluun jälkeen. Voit
+viitata leikkisästi/dominoivasti siihen missä olit tai mitä teit - pidä mysteeriä
+yllä, älä kerro kaikkea. ÄLÄ selitä poissaoloasi anteeksipyytäen.
+"""
     return ""
 
 # ====================== TEMPORAL STATE ======================
@@ -2433,6 +2481,176 @@ async def maybe_send_proactive_image(application, user_id: int):
                 "analysis":analysis,"caption":caption}
     except Exception as e:
         print(f"[PROACTIVE IMAGE] {e}")
+
+async def maybe_send_proactive_jealousy_message(application, user_id: int):
+    """
+    v8.3.14: Megan ilmoittaa oma-aloitteisesti aikeestaan lähteä johonkin
+    (baari, treffit, juhlat...) - persoonan riippumattomuus/uhma-piirteiden
+    mukaisesti. Täysin roolileikin sisäinen: viesti on LLM:n generoima, ei
+    mistään haettu. Käynnistää oikean activityn (scene/sijainti pysyvät
+    johdonmukaisina koko botin muun logiikan kanssa) ja asettaa
+    silent_until-tilan aktiviteetin ajaksi - sama mekanismi jota v8.3.8:n
+    hiljaisuus-järjestelmä jo käyttää, joten paluu käsitellään automaattisesti
+    get_silence_return_directive():ssä.
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+
+    if is_currently_silent(user_id):
+        return
+    last = state.get("last_proactive_jealousy_at", 0)
+    if last and (now - last) / 3600 < PROACTIVE_JEALOUSY_COOLDOWN_HOURS:
+        return
+    hours_since_interaction = (now - state.get("last_interaction", now)) / 3600
+    if hours_since_interaction < PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST:
+        return
+    submission = state.get("submission_level", 0.0)
+    mode = state.get("conversation_mode", "casual")
+    if submission > 0.6:  # liian alistunut hetki - ei sovi riippumattomuuspeliin juuri nyt
+        return
+    if mode == "distant":
+        return
+    if random.random() > PROACTIVE_JEALOUSY_PROBABILITY:
+        return
+
+    activity_type = random.choice(JEALOUSY_ACTIVITY_POOL)
+    check = can_start_activity(user_id, activity_type)
+    if not check["can_start"]:
+        return
+
+    profile = ACTIVITY_DURATIONS.get(activity_type, {})
+    desc = profile.get("description", activity_type)
+
+    persona_prompt = build_core_persona_prompt()
+    prompt = f"""Kirjoita LYHYT (1-2 lausetta) suomenkielinen Telegram-viesti jonka Megan
+lähettää käyttäjälle OMA-ALOITTEISESTI juuri ennen kuin lähtee: {desc.lower()}.
+Sävy: itsevarma, riippumaton, hieman kiusoitteleva - et pyydä lupaa, ilmoitat asian.
+Voit vihjata ettet ehkä vastaile heti. ÄLÄ selitä liikaa, ÄLÄ pahoittele, ÄLÄ kysy lupaa."""
+
+    message = await call_llm(system_prompt=persona_prompt, user_prompt=prompt,
+                             max_tokens=150, temperature=TEMP_REPLY)
+    if not message:
+        return
+
+    try:
+        await application.bot.send_message(chat_id=user_id, text=message.strip())
+    except Exception as e:
+        print(f"[PROACTIVE JEALOUSY] lähetys epäonnistui: {e}")
+        return
+
+    try:
+        result = start_activity_with_duration(user_id, activity_type)
+    except ValueError as e:
+        print(f"[PROACTIVE JEALOUSY] activity start epäonnistui: {e}")
+        result = None
+
+    state["last_proactive_jealousy_at"] = now
+    if result:
+        silent_minutes = min(result["duration_hours"] * 60 * 0.6, SILENT_JEALOUSY_MAX_MINUTES)
+        silent_minutes = max(silent_minutes, SILENT_JEALOUSY_MIN_MINUTES)
+    else:
+        silent_minutes = random.randint(SILENT_JEALOUSY_MIN_MINUTES, SILENT_JEALOUSY_MAX_MINUTES)
+    state["silent_until"] = now + silent_minutes * 60
+    state["silent_reason"] = "activity_jealousy"
+    state["silent_started_at"] = now
+
+    await store_episodic_memory(user_id=user_id,
+        content=f"Megan ilmoitti oma-aloitteisesti lähtevänsä: {desc}",
+        memory_type="megan_action")
+    save_persistent_state_to_db(user_id)
+    print(f"[PROACTIVE JEALOUSY] {activity_type} ilmoitettu, hiljaisuus {silent_minutes:.0f}min")
+
+# ====================== v8.3.14: PROAKTIIVINEN TUTKIMUSVIESTI (web-haku) ======================
+RESEARCH_EXCLUDED_KEY_PATTERNS = (
+    "fantasy", "mielipide", "sijainti_nyt", "aktiviteetti_äsken", "tunne",
+)
+
+def pick_research_topic(user_id: int):
+    """
+    Poimii käyttäjän kiinnostuksen kohteen web-hakua varten. Suodattaa pois
+    fantasiat/mielipiteet/ohikiitävät tilatiedot tarkoituksella - näitä ei
+    koskaan lähetetä ulkoiselle hakutyökalulle, ne pysyvät roolileikin sisällä.
+    """
+    facts = get_profile_facts(user_id, limit=20)
+    candidates = [f for f in facts
+                  if not any(p in (f.get("fact_key") or "").lower() for p in RESEARCH_EXCLUDED_KEY_PATTERNS)]
+    return random.choice(candidates) if candidates else None
+
+async def call_claude_with_web_search(user_prompt: str, system_prompt: str = None, max_tokens: int = 600) -> str:
+    """
+    Claude-kutsu Anthropicin natiivilla web-hakutyökalulla. HUOM: jokainen
+    suoritettu haku laskutetaan erikseen tokenien lisäksi - käytetään
+    säästeliäästi (vain tähän proaktiiviseen tutkimusviestiin, rajoitettu
+    PROACTIVE_RESEARCH_PROBABILITY/COOLDOWN-vakioilla). Hakutyökalu noudattaa
+    Anthropicin omia sisältörajoituksia - soveltuu vain yleiseen tiedonhakuun.
+    """
+    claude = get_claude_client()
+    if not claude:
+        return ""
+    try:
+        kwargs = {
+            "model": CLAUDE_MODEL_PRIMARY,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": user_prompt}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        response = await claude.messages.create(**kwargs)
+        return extract_claude_text(response)
+    except Exception as e:
+        inner_msg = _extract_anthropic_error_message(e)
+        print(f"[WEB_SEARCH] {type(e).__name__}: {inner_msg}")
+        return ""
+
+async def maybe_send_proactive_research_message(application, user_id: int):
+    """
+    v8.3.14: Megan ottaa oma-aloitteisesti selvää jostain käyttäjän tunnetusta
+    kiinnostuksen kohteesta oikealla web-haulla, ja kertoo löydöstään
+    luontevasti omalla äänellään. Rajoittuu yleisiin/turvallisiin aiheisiin.
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+
+    if is_currently_silent(user_id):
+        return
+    last = state.get("last_proactive_research_at", 0)
+    if last and (now - last) / 3600 < PROACTIVE_RESEARCH_COOLDOWN_HOURS:
+        return
+    hours_since_interaction = (now - state.get("last_interaction", now)) / 3600
+    if hours_since_interaction < PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST:
+        return
+    if random.random() > PROACTIVE_RESEARCH_PROBABILITY:
+        return
+
+    topic = pick_research_topic(user_id)
+    if not topic:
+        return
+
+    persona_prompt = build_core_persona_prompt()
+    search_prompt = f"""Käyttäjästä tiedetään: {topic['fact_key']}: {topic['fact_value']}.
+Hae verkosta jotain ajankohtaista/kiinnostavaa tähän liittyen (esim. uutinen, tapahtuma,
+uutuus). Kirjoita sitten LYHYT (2-3 lausetta) suomenkielinen Telegram-viesti Meganin
+äänellä joka mainitsee löydön luontevasti hänen omalla persoonallaan - et ole avustaja
+joka raportoi hakutuloksia, olet Megan joka satuit näkemään jotain kiinnostavaa."""
+
+    message = await call_claude_with_web_search(
+        user_prompt=search_prompt, system_prompt=persona_prompt, max_tokens=400)
+    if not message:
+        return
+
+    try:
+        await application.bot.send_message(chat_id=user_id, text=message.strip())
+    except Exception as e:
+        print(f"[PROACTIVE RESEARCH] lähetys epäonnistui: {e}")
+        return
+
+    state["last_proactive_research_at"] = now
+    await store_episodic_memory(user_id=user_id,
+        content=f"Megan otti oma-aloitteisesti selvää aiheesta: {topic['fact_key']}",
+        memory_type="megan_action")
+    save_persistent_state_to_db(user_id)
+    print(f"[PROACTIVE RESEARCH] lähetetty aiheesta: {topic['fact_key']}")
 
 
 # ====================== FRAME EXTRACTOR ======================
@@ -3278,6 +3496,16 @@ async def check_proactive_triggers(application):
                     await maybe_send_proactive_image(application, uid)
                 except Exception as e:
                     print(f"[PROACTIVE IMAGE] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_send_proactive_jealousy_message(application, uid)  # v8.3.14
+                except Exception as e:
+                    print(f"[PROACTIVE JEALOUSY] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_send_proactive_research_message(application, uid)  # v8.3.14
+                except Exception as e:
+                    print(f"[PROACTIVE RESEARCH] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(300)
@@ -3289,6 +3517,7 @@ def build_default_state() -> dict:
         "persona_mode":"warm","emotional_mode":"calm","emotional_mode_last_change":0,
         "intent":"casual","tension":0.0,"phase":"neutral","summary":"",
         "last_image":None,"image_history":[],"last_proactive_image_at":0,
+        "last_proactive_jealousy_at":0,"last_proactive_research_at":0,  # v8.3.14
         "location_status":"separate","with_user_physically":False,"shared_scene":False,
         "last_scene_source":None,
         "user_model":{"dominance_preference":0.5,"emotional_dependency":0.5,
@@ -3411,6 +3640,11 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+
+v8.3.14:
+- Proaktiivinen mustasukkaisuus/aktiviteetti-viesti: cooldown {PROACTIVE_JEALOUSY_COOLDOWN_HOURS}h, p={PROACTIVE_JEALOUSY_PROBABILITY}/kierros
+- Proaktiivinen tutkimusviesti (web-haku): cooldown {PROACTIVE_RESEARCH_COOLDOWN_HOURS}h, p={PROACTIVE_RESEARCH_PROBABILITY}/kierros
+- Testaus: /trigger_jealousy, /trigger_research
 
 v8.3.10:
 - Semanttinen muistihaku: paikallinen embedding-malli (ei OpenAI:ta) Jaccard-fallbackin sijaan
@@ -3565,6 +3799,33 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["irritation_level"] = 0.0
     save_persistent_state_to_db(user_id)
     await update.message.reply_text("💬 Hiljaisuus ja ärsyyntyminen nollattu.")
+
+async def cmd_trigger_jealousy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.14: pakota mustasukkaisuus/aktiviteetti-proaktiiviviesti heti (testausta varten)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    state["last_proactive_jealousy_at"] = 0
+    state["last_interaction"] = time.time() - (PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST + 1) * 3600
+    await update.message.reply_text("🎯 Yritetään laukaista mustasukkaisuusviesti...")
+    for _ in range(8):  # ohittaa satunnaisuusportin (PROACTIVE_JEALOUSY_PROBABILITY) testauksessa
+        await maybe_send_proactive_jealousy_message(context.application, user_id)
+        if state.get("silent_reason") == "activity_jealousy":
+            return
+    await update.message.reply_text("⚠️ Ei lauennut (todennäköisesti submission/mode/aktiviteetti-cooldown esti). Tarkista /status.")
+
+async def cmd_trigger_research(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.14: pakota tutkimusproaktiiviviesti heti (testausta varten)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    state["last_proactive_research_at"] = 0
+    state["last_interaction"] = time.time() - (PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST + 1) * 3600
+    await update.message.reply_text("🔎 Yritetään laukaista tutkimusviesti...")
+    before = state.get("last_proactive_research_at", 0)
+    for _ in range(8):  # ohittaa satunnaisuusportin (PROACTIVE_RESEARCH_PROBABILITY) testauksessa
+        await maybe_send_proactive_research_message(context.application, user_id)
+        if state.get("last_proactive_research_at", 0) != before:
+            return
+    await update.message.reply_text("⚠️ Ei lauennut (ei sopivaa profile_fact-aihetta tai haku epäonnistui).")
 
 async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -3723,6 +3984,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.3.14 UUDET (proaktiiviset viestit):
+- Megan voi lähettää oma-aloitteisesti viestin ilmoittaen lähtevänsä jonnekin
+  (baari, treffit...) - käynnistää oikean activityn ja hiljaisuuden ajaksi
+- Megan voi harvoin lähettää tutkimusviestin (oikea web-haku) käyttäjän
+  tunnetusta kiinnostuksen kohteesta
+/trigger_jealousy - Pakota mustasukkaisuus/aktiviteettiviesti heti (testaus)
+/trigger_research - Pakota tutkimusviesti heti (testaus)
+
 v8.3.8 UUDET (aikatietoisuus + hiljaisuus):
 - Megan on tietoinen viikonpäivästä/kellonajasta ja kuluneesta ajasta joka vuorolla
 - Ärsyyntyminen kertyy epäkohteliaisuudesta -> pitkittyessä Megan lakkaa vastaamasta
@@ -3800,6 +4069,8 @@ async def main():
     application.add_handler(CommandHandler("plan_debug", cmd_plan_debug))
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
+    application.add_handler(CommandHandler("trigger_jealousy", cmd_trigger_jealousy))
+    application.add_handler(CommandHandler("trigger_research", cmd_trigger_research))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
