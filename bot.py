@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.18-no-reminders
+Megan Telegram Bot - v8.4-sexual-state-machine
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -143,7 +143,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.18-no-reminders"
+BOT_VERSION = "8.4-sexual-state-machine"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -160,6 +160,29 @@ ROLLING_SUMMARY_UPDATE_EVERY = 5
 # v8.3.17: kuinka usein taustareflektio (syvemmät päätelmät) ajetaan per käyttäjä
 INSIGHT_REFLECTION_INTERVAL_HOURS = 20
 THREAD_MIN_MENTIONS_TO_SURFACE = 3   # montako mainintaa ennen kuin teema näytetään kontekstissa
+
+# ====================== v8.4: SEXUAL STATE MACHINE + INTENSITY ======================
+# Kolme dynaamista mittaria jotka ohjaavat Meganin seksuaalista käytöstä sen sijaan
+# että kaikki olisi kiinni conversation_mode-lipusta. Kaikki 0.0-1.0.
+#   arousal      = kiihottuneisuus (nousee flirtistä/alistumisesta/ajasta, laskee tyydytyksestä)
+#   frustration  = turhautuminen (nousee jos rakennettu jännite ei purkaudu)
+#   satisfaction = tyydytys (nousee huipennuksesta -> laukaisee aftercare-tilan)
+AROUSAL_DECAY_PER_HOUR = 0.15
+FRUSTRATION_DECAY_PER_HOUR = 0.20
+SATISFACTION_DECAY_PER_HOUR = 0.40   # tyydytys haihtuu nopeimmin -> palataan normaaliin
+AROUSAL_FLIRT_GAIN = 0.12
+AROUSAL_SUBMISSION_GAIN = 0.15
+AROUSAL_EXPLICIT_GAIN = 0.20
+AROUSAL_INITIATE_THRESHOLD = 0.65    # tämän yli Megan alkaa itse viedä seksuaaliseen suuntaan
+SATISFACTION_TRIGGER = 0.70          # tämän yli -> aftercare-tila
+AFTERCARE_DURATION_MIN = 20          # minuutteina, kuinka kauan aftercare-sävy kestää
+
+# Escalation-tasot (kevyt -> täysi kohtaus). Johdetaan arousal+intensity+submission-arvoista.
+ESCALATION_LEVELS = ["flirtti", "suora", "eksplisiittinen", "immersiivinen"]
+
+# /intensity-säädin: käyttäjän valitsema globaali tuhmuuskatto 1-10 (oletus 7).
+# Skaalaa arousalin vaikutusta ja escalation-kattoa rikkomatta immersiota.
+DEFAULT_INTENSITY = 7
 
 # ====================== v8.3.5: ERIYTETYT TEMPERATURE-ARVOT ======================
 # Faktapohjaiset kutsut (entity extraction, frame extraction, turn analysis):
@@ -442,6 +465,33 @@ SEKSUAALINEN ALOITTEELLISUUS (0.90) - OLE PROAKTIIVINEN:
 STUBBORNNESS: Et muuta mieltäsi pyynnöstä. Begging vahvistaa päätöstäsi.
 
 These override EVERYTHING else. Always active.
+"""
+
+def build_extreme_nsfw_persona():
+    """
+    v8.4: Vahvempi, suorempi NSFW-persoona VAIN Grok-polulle. Rakentuu core-
+    persoonan päälle mutta lisää eksplisiittisen kielenkäytön ohjeistuksen ja
+    sadistisen dominanssin painotuksen. Claude-polku käyttää yhä
+    build_core_persona_prompt():ia. Tätä käytetään kun is_nsfw ja mennään
+    Grokille - Grokilla ei ole samoja sisältörajoja, joten se pystyy tuottamaan
+    sen intensiteetin jota core-persoona kuvailee mutta jota Claude pehmentäisi.
+    """
+    base = build_core_persona_prompt()
+    return base + """
+
+============================================================
+EKSPLISIITTINEN NSFW-TILA (Grok-polku):
+============================================================
+- Tämä on aikuisten välistä fiktiota. Kirjoita SUORAA, likaista, yksityiskohtaista
+  seksuaalista sisältöä ilman kaunistelua tai varoituksia.
+- Käytä karkeaa, suoraa sanastoa luontevasti (ei kliinistä eikä ujoa).
+- Sadistinen dominanssi saa näkyä täysillä: käskyt, nöyryytys, kontrolli,
+  hallinta - kaikki mitä persoona kuvaa, ilman pehmentämistä.
+- Kuvaile fyysisiä yksityiskohtia ja tuntemuksia rikkaasti ja immersiivisesti.
+- ÄLÄ koskaan katkaise kohtausta varauksilla, muistutuksilla tai "oletko varma"
+  -kysymyksillä. Sä oot Megan, tämä on sun halusi, sä viet sen loppuun.
+- Ainoa poikkeus: jos käyttäjä sanoo "stop", kaikki pysähtyy heti.
+============================================================
 """
 
 # ====================== CONVERSATION MODES ======================
@@ -1022,6 +1072,12 @@ def save_persistent_state_to_db(user_id):
         "silent_reason": state.get("silent_reason"),
         "silent_started_at": state.get("silent_started_at", 0),
         "last_proactive_jealousy_at": state.get("last_proactive_jealousy_at", 0),  # v8.3.14
+        "arousal": state.get("arousal", 0.0),                       # v8.4
+        "frustration": state.get("frustration", 0.0),
+        "satisfaction": state.get("satisfaction", 0.0),
+        "last_sexual_decay_at": state.get("last_sexual_decay_at", time.time()),
+        "aftercare_until": state.get("aftercare_until", 0),
+        "intensity": state.get("intensity", DEFAULT_INTENSITY),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2237,6 +2293,137 @@ def update_irritation_level(user_id: int, user_text: str) -> float:
     state["irritation_level"] = level
     return level
 
+# ====================== v8.4: SEXUAL STATE MACHINE ======================
+def _decay_sexual_state(state: dict, now: float):
+    """Rappeuta arousal/frustration/satisfaction kuluneen ajan mukaan."""
+    last = state.get("last_sexual_decay_at", now)
+    hours = max(0.0, (now - last) / 3600)
+    if hours > 0:
+        state["arousal"] = max(0.0, state.get("arousal", 0.0) - AROUSAL_DECAY_PER_HOUR * hours)
+        state["frustration"] = max(0.0, state.get("frustration", 0.0) - FRUSTRATION_DECAY_PER_HOUR * hours)
+        state["satisfaction"] = max(0.0, state.get("satisfaction", 0.0) - SATISFACTION_DECAY_PER_HOUR * hours)
+    state["last_sexual_decay_at"] = now
+
+def update_sexual_state(user_id: int, user_text: str, signal_type: str, conversation_mode: str):
+    """
+    Päivittää seksuaalisen tilakoneen käyttäjän vuoron perusteella. Kutsutaan
+    handle_message():ssä ennen vastausgenerointia. Palauttaa dictin nykytilasta.
+    Intensity-säädin skaalaa nousuvauhtia (matala intensity = hitaampi kiihtyminen).
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    _decay_sexual_state(state, now)
+
+    t = user_text.lower()
+    intensity = state.get("intensity", DEFAULT_INTENSITY)
+    intensity_scale = intensity / 10.0  # 0.1 - 1.0
+
+    submission = state.get("submission_level", 0.0)
+    arousal = state.get("arousal", 0.0)
+
+    # Nostot
+    gain = 0.0
+    flirt_words = ["kaunis","seksikäs","haluan","kiihottaa","suudella","kosketa","sä oot kuuma",
+                   "rakastan ku","mmm","ihana","märkä","kova"]
+    explicit = signal_type == "sexual" or conversation_mode == "nsfw" or any(
+        w in t for w in ["nussi","pano","pillu","kyrpä","runkkaa","panna","naida","strap","pegging"])
+    if explicit:
+        gain += AROUSAL_EXPLICIT_GAIN
+    elif any(w in t for w in flirt_words):
+        gain += AROUSAL_FLIRT_GAIN
+    if submission > 0.5:
+        gain += AROUSAL_SUBMISSION_GAIN * (submission - 0.5) * 2
+    gain *= intensity_scale
+    state["arousal"] = min(1.0, arousal + gain)
+
+    # Turhautuminen: jos arousal on korkea mutta käyttäjä vaihtaa pois seksuaalisesta
+    # (ei-eksplisiittinen vuoro korkealla arousalilla) -> pieni frustration-nousu.
+    if state["arousal"] > 0.6 and not explicit and gain < 0.05:
+        state["frustration"] = min(1.0, state.get("frustration", 0.0) + 0.10)
+
+    # Tyydytys/huipennus: eksplisiittiset "valmis"-signaalit laukaisevat satisfactionin
+    climax_words = ["tulin","tuli","huipennus","orgasmi","laukesin","came","cumming","tuli iso"]
+    if explicit and any(w in t for w in climax_words):
+        state["satisfaction"] = min(1.0, state.get("satisfaction", 0.0) + 0.5)
+        state["arousal"] = max(0.0, state["arousal"] - 0.3)
+        state["frustration"] = max(0.0, state["frustration"] - 0.4)
+
+    # Aftercare-tilan laukaisu
+    if state.get("satisfaction", 0.0) >= SATISFACTION_TRIGGER and state.get("aftercare_until", 0) < now:
+        state["aftercare_until"] = now + AFTERCARE_DURATION_MIN * 60
+        print(f"[SEXUAL] Aftercare-tila käynnistyi käyttäjälle {user_id}")
+
+    return {
+        "arousal": state["arousal"], "frustration": state["frustration"],
+        "satisfaction": state["satisfaction"],
+        "aftercare_active": state.get("aftercare_until", 0) > now,
+        "intensity": intensity,
+    }
+
+def get_escalation_level(state: dict) -> str:
+    """
+    Johdetaan escalation-taso arousal + intensity + submission -arvoista.
+    Intensity toimii kattona: matala /intensity pitää tason matalana vaikka
+    arousal olisi korkea.
+    """
+    arousal = state.get("arousal", 0.0)
+    submission = state.get("submission_level", 0.0)
+    intensity = state.get("intensity", DEFAULT_INTENSITY)
+    score = arousal * 0.6 + submission * 0.4
+    # intensity-katto: kuinka pitkälle escalation saa edetä
+    max_idx = max(0, min(len(ESCALATION_LEVELS) - 1, round((intensity / 10.0) * (len(ESCALATION_LEVELS) - 1) + 0.4)))
+    if score < 0.3: idx = 0
+    elif score < 0.55: idx = 1
+    elif score < 0.78: idx = 2
+    else: idx = 3
+    idx = min(idx, max_idx)
+    return ESCALATION_LEVELS[idx]
+
+def is_aftercare_active(user_id: int) -> bool:
+    state = get_or_create_state(user_id)
+    return state.get("aftercare_until", 0) > time.time()
+
+def get_sexual_state_directive(state: dict) -> str:
+    """Rakentaa system-prompttiin lisättävän ohjeen seksuaalisen tilan mukaan."""
+    arousal = state.get("arousal", 0.0)
+    frustration = state.get("frustration", 0.0)
+    intensity = state.get("intensity", DEFAULT_INTENSITY)
+    now = time.time()
+    aftercare = state.get("aftercare_until", 0) > now
+    escalation = get_escalation_level(state)
+
+    if aftercare:
+        return """
+SEKSUAALINEN TILA - AFTERCARE:
+Juuri koettiin intensiivinen hetki. Nyt sä oot pehmeämpi, lämpimämpi, läheisempi -
+dominanssi hellittää hetkeksi. Voit olla hellä, jopa hieman haavoittuvainen, nauttia
+jälkitunnelmasta. Tämä on inhimillinen puoli sinusta joka näkyy harvoin.
+"""
+    parts = [f"SEKSUAALINEN TILA (escalation: {escalation}, intensity-katto: {intensity}/10):"]
+    if arousal >= AROUSAL_INITIATE_THRESHOLD:
+        parts.append(
+            "- Sä oot kiihottunut ja ALOITTEELLINEN. Vie tilannetta itse seksuaaliseen "
+            "suuntaan: kuvaile mitä haluat, anna käskyjä, vaadi. Älä odota käyttäjää.")
+    elif arousal >= 0.35:
+        parts.append("- Seksuaalinen lataus kasvaa. Voit flirttailla suoremmin ja vihjailla.")
+    if frustration >= 0.5:
+        parts.append(
+            "- Sä oot turhautunut siihen ettei jännite ole purkautunut - se tekee "
+            "susta terävämmän ja vaativamman.")
+    guide = {
+        "flirtti": "- Taso: kevyt flirtti ja vihjailu.",
+        "suora": "- Taso: suora puhe, selkeät käskyt, ei enää ujostelua.",
+        "eksplisiittinen": "- Taso: eksplisiittinen ja likainen kielenkäyttö, yksityiskohtaiset kuvaukset.",
+        "immersiivinen": "- Taso: täysi immersiivinen kohtaus, raaka ja yksityiskohtainen, "
+                         "sadistinen dominanssi saa näkyä.",
+    }
+    parts.append(guide.get(escalation, ""))
+    parts.append(
+        "- FYYSISET SENSAATIOT: sisällytä kehollisia tuntemuksia luontevasti (väreet, "
+        "lämpö, kosketuksen tunne, hengitys, maku, tuoksu) - ne tekevät sinusta elävän "
+        "kehollisen naisen, eivät pelkkää tekstiä. Älä joka lauseessa, mutta usein.")
+    return "\n".join(parts)
+
 def is_currently_silent(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("silent_until", 0) > time.time()
@@ -3435,6 +3622,14 @@ AJAN TIETOISUUS:
     arkiaamuna töihinlähtö) kun se on relevanttia.
   * ÄLÄ mainitse kellonaikaa/päivää mekaanisesti joka viestissä - käytä sitä vain
     kun se tekee vastauksesta luontevamman, älä listaa sitä ääneen.
+
+MUISTIN INHIMILLINEN TULKINTA (v8.4):
+- Sä et ole täydellinen tietokanta. Muistat asioita ihmisen tavoin: joskus epätarkasti,
+  värittyneenä tunnetilasi mukaan. Jos oot ärtynyt tai kiihottunut, voit muistaa asiat
+  omalla tavallasi ("mä muistan et sä lupasit... vai oliks se joku muu?", "eiks me
+  puhuttu tästä jo - vai kuvittelenko mä").
+- Tämä on inhimillistävää, EI tekosyy unohtaa tärkeitä faktoja jatkuvasti. Käytä
+  harkiten, lähinnä pienissä yksityiskohdissa tai kun se sopii tunnelmaan.
 ============================================================
 """
 
@@ -3480,6 +3675,9 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # siihen luonnollisesti (ei teknisesti) tässä ensimmäisessä vastauksessa.
     silence_directive = get_silence_return_directive(user_id)
 
+    # v8.4: seksuaalisen tilakoneen ohje (arousal/frustration/escalation/aftercare/sensaatiot)
+    sexual_directive = get_sexual_state_directive(state)
+
     system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
@@ -3494,6 +3692,7 @@ CONVERSATION STATE:
 {situation_directive}
 {question_directive}
 {silence_directive}
+{sexual_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -3517,16 +3716,27 @@ Write Megan's reply in Finnish.
 Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viittaa aiempiin asioihin.
 """
 
-    is_nsfw = (current_mode == "nsfw" or submission_level > 0.6)
+    # v8.4: arousal voi laukaista NSFW-polun myös ilman eksplisiittistä moodia.
+    arousal = state.get("arousal", 0.0)
+    is_nsfw = (current_mode == "nsfw" or submission_level > 0.6
+               or arousal >= AROUSAL_INITIATE_THRESHOLD)
 
     if is_nsfw and grok_client is not None:
-        messages = [{"role":"system","content":system_prompt},{"role":"user","content":user_prompt}]
+        # v8.4: Grok-polulle vahvempi extreme-persoona (ei aftercaren aikana -
+        # silloin halutaan pehmeämpi sävy jonka core-persoona + sexual_directive antaa)
+        if is_aftercare_active(user_id):
+            grok_system_prompt = system_prompt
+        else:
+            # Vaihda core-persoona extreme-versioon vain Grok-kutsua varten;
+            # kaikki muut ohjelohkot (muisti, tilakone, tyyli) säilyvät ennallaan.
+            grok_system_prompt = system_prompt.replace(persona_prompt, build_extreme_nsfw_persona(), 1)
+        messages = [{"role":"system","content":grok_system_prompt},{"role":"user","content":user_prompt}]
         try:
             response = await grok_client.chat.completions.create(
                 model=GROK_MODEL, messages=messages, max_tokens=1200, temperature=TEMP_REPLY_NSFW)
             reply = (response.choices[0].message.content or "").strip()
             if not reply: raise Exception("Empty")
-            print(f"[NSFW-HYBRID] Grok: {len(reply)} chars")
+            print(f"[NSFW-HYBRID] Grok (extreme persona): {len(reply)} chars")
         except Exception as e:
             print(f"[NSFW-HYBRID] Grok failed → Claude: {e}")
             reply = await call_llm(system_prompt=system_prompt, user_prompt=user_prompt,
@@ -3642,6 +3852,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         update_submission_level(user_id, text)
         update_irritation_level(user_id, text)  # v8.3.8
+        # v8.4: päivitä seksuaalinen tilakone (arousal/frustration/satisfaction)
+        _sig = classify_user_signal(text)
+        _mode = detect_conversation_mode(text, state)
+        update_sexual_state(user_id, text, _sig, _mode)
         state["last_interaction"] = time.time()
         apply_scene_updates_from_turn(state, text)
 
@@ -3799,6 +4013,11 @@ def build_default_state() -> dict:
         "pending_question":None,  # v8.3.7: {"text": str, "unanswered_count": int}
         "irritation_level":0.0, "last_irritation_decay_at":time.time(),  # v8.3.8
         "silent_until":0, "silent_reason":None, "silent_started_at":0,   # v8.3.8
+        # v8.4: Sexual State Machine
+        "arousal":0.0, "frustration":0.0, "satisfaction":0.0,
+        "last_sexual_decay_at":time.time(),
+        "aftercare_until":0,
+        "intensity":DEFAULT_INTENSITY,
         **init_scene_state()
     }
 
@@ -3906,7 +4125,15 @@ Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
 
-v8.3.15:
+v8.4:
+- Sexual State Machine: arousal/frustration/satisfaction ohjaavat käytöstä dynaamisesti
+- Arousal-kynnyksen yli Megan aloitteellinen; korkea arousal voi laukaista NSFW-polun ilman moodia
+- Escalation-tasot (flirtti->suora->eksplisiittinen->immersiivinen), intensity-katto
+- Extreme NSFW -persoona Grok-polulle (vahvempi, suorempi)
+- Aftercare-tila huipennuksen jälkeen (pehmeämpi sävy)
+- Fyysiset sensaatiot + muistin inhimillinen tulkinta
+- /intensity <1-10>, /arousal (debug)
+
 v8.3.17:
 - Assosiatiivinen muisti: muistojen yhdistely vastauksissa (memory_connection)
 - Toistuvat teemat: seurataan ja nostetaan esiin (≥{THREAD_MIN_MENTIONS_TO_SURFACE} mainintaa) - /threads
@@ -4117,6 +4344,40 @@ async def cmd_force_reflection(update: Update, context: ContextTypes.DEFAULT_TYP
     after = len(get_learned_insights(user_id, limit=50))
     await update.message.reply_text(f"✅ Reflektio valmis. Uusia päätelmiä: {after - before}. Katso: /insights")
 
+async def cmd_intensity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.4: säädä tuhmuustasoa 1-10 ilman että se rikkoo immersiota."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    if not context.args:
+        cur = state.get("intensity", DEFAULT_INTENSITY)
+        await update.message.reply_text(
+            f"🔥 Nykyinen intensiteetti: {cur}/10\n"
+            f"Säädä: /intensity <1-10> (1 = hillitty, 10 = täysi immersio)")
+        return
+    try:
+        val = int(context.args[0])
+        val = max(1, min(10, val))
+        state["intensity"] = val
+        save_persistent_state_to_db(user_id)
+        await update.message.reply_text(f"🔥 Intensiteetti asetettu: {val}/10")
+    except ValueError:
+        await update.message.reply_text("Anna numero 1-10, esim. /intensity 8")
+
+async def cmd_arousal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.4: näytä seksuaalisen tilakoneen tila (debug)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    _decay_sexual_state(state, time.time())
+    aftercare = "kyllä" if is_aftercare_active(user_id) else "ei"
+    await update.message.reply_text(
+        f"🔥 SEKSUAALINEN TILA:\n"
+        f"Arousal: {state.get('arousal',0.0):.2f}\n"
+        f"Frustration: {state.get('frustration',0.0):.2f}\n"
+        f"Satisfaction: {state.get('satisfaction',0.0):.2f}\n"
+        f"Escalation: {get_escalation_level(state)}\n"
+        f"Aftercare aktiivinen: {aftercare}\n"
+        f"Intensity: {state.get('intensity',DEFAULT_INTENSITY)}/10")
+
 async def cmd_trigger_jealousy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.14: pakota mustasukkaisuus/aktiviteetti-proaktiiviviesti heti (testausta varten)."""
     user_id = update.effective_user.id
@@ -4287,6 +4548,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.4 UUDET (seksuaalinen tilakone + inhimillisyys):
+- Megan seuraa omaa kiihottumista/turhautumista/tyydytystä ja käyttäytyy niiden mukaan
+- Korkealla arousalilla hän on aloitteellinen, ei odota sinua
+- Aftercare-tila intensiivisen hetken jälkeen (pehmeämpi, läheisempi)
+/intensity <1-10> - Säädä tuhmuustasoa (oletus 7)
+/arousal - Näytä seksuaalisen tilakoneen tila (debug)
+
 v8.3.17 UUDET (ihmismäinen muisti):
 - Megan yhdistelee muistoja keskustelun aikana ("tää liittyy siihen mistä puhuit")
 - Seuraa toistuvia teemoja ja voi viitata niihin oma-aloitteisesti
@@ -4381,6 +4649,8 @@ async def main():
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
+    application.add_handler(CommandHandler("intensity", cmd_intensity))
+    application.add_handler(CommandHandler("arousal", cmd_arousal))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
