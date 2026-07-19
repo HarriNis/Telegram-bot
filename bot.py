@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.16-stubborn-proactive
+Megan Telegram Bot - v8.3.17-associative-memory
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -106,6 +106,26 @@ Muutokset v8.3.15 → v8.3.16 (käyttäjän toiveiden mukaan, henkilökohtainen 
   (ei taivu pyynnöstä, vaatii ansaitsemaan, begging vahvistaa päätöstä; mutta
   "stop" pysäyttää aina) ja "SEKSUAALINEN ALOITTEELLISUUS" -lohko (proaktiivinen,
   suora ja eksplisiittinen kielenkäyttö, ottaa ohjat).
+
+Muutokset v8.3.16 → v8.3.17 (ihmismäinen muisti - assosiatiivinen yhdistely):
+Kolme osaa, keskiraskas toteutus (vain 1 laajennettu kutsu/vuoro + 1 harvakseltaan
+taustalla), ei erillisiä kalliita LLM-kutsuja per osa:
+- OSA 1 - Muistojen yhdistely keskustelun aikana: build_response_plan() saa nyt
+  relevantit muistot + toistuvat teemat + opitut päätelmät, ja tuottaa uuden
+  "memory_connection"-kentän (miten nykyinen viesti liittyy aiempaan). Tämä
+  syötetään reply-generointiin -> Megan vaikuttaa muistavan ja yhdistelevän
+  asioita. NOLLA uutta LLM-kutsua (laajennettu olemassa olevaa plan-kutsua).
+- OSA 2 - Teemojen/juonteiden seuranta: uusi threads-taulu. record_thread_mention()
+  kutsutaan apply_frame():sta (frame-extractorin topic + fantasy-kategoriat, ei
+  omaa kutsua). get_recurring_threads() nostaa esiin teemat jotka mainittu
+  >= THREAD_MIN_MENTIONS_TO_SURFACE kertaa -> näkyvät kontekstissa, Megan voi
+  viitata niihin ("sä palaat aina tähän"). /threads näyttää tilan.
+- OSA 3 - Syvemmät päätelmät ajan myötä: uusi learned_insights-taulu +
+  maybe_run_reflection() taustaprosessi (ajetaan ~INSIGHT_REFLECTION_INTERVAL_HOURS
+  välein per käyttäjä check_proactive_triggers-loopissa). Muodostaa korkeamman
+  tason päätelmiä käyttäjästä useiden muistojen/teemojen pohjalta - asioita joita
+  ei suoraan sanottu. Näkyvät kontekstissa ("mitä olet oppinut"), värittävät
+  Meganin suhtautumista mutta EI luetella ääneen. /insights, /force_reflection.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -123,7 +143,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.16-stubborn-proactive"
+BOT_VERSION = "8.3.17-associative-memory"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -137,6 +157,9 @@ MEMORY_DEDUP_HOURS = 24
 NARRATIVE_PAST_LINES = 15
 NARRATIVE_TODAY_LINES = 8
 ROLLING_SUMMARY_UPDATE_EVERY = 5
+# v8.3.17: kuinka usein taustareflektio (syvemmät päätelmät) ajetaan per käyttäjä
+INSIGHT_REFLECTION_INTERVAL_HOURS = 20
+THREAD_MIN_MENTIONS_TO_SURFACE = 3   # montako mainintaa ennen kuin teema näytetään kontekstissa
 
 # ====================== v8.3.5: ERIYTETYT TEMPERATURE-ARVOT ======================
 # Faktapohjaiset kutsut (entity extraction, frame extraction, turn analysis):
@@ -732,10 +755,22 @@ for _sql in [
         last_turn_id INTEGER DEFAULT 0,
         turn_count_since_update INTEGER DEFAULT 0,
         updated_at REAL DEFAULT 0)""",
+    # v8.3.17: toistuvat teemat/juonteet keskustelujen yli (Osa 2)
+    """CREATE TABLE IF NOT EXISTS threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, theme TEXT,
+        mention_count INTEGER DEFAULT 1, first_seen_at REAL, last_seen_at REAL,
+        active INTEGER DEFAULT 1)""",
+    # v8.3.17: syvemmät päätelmät käyttäjästä ajan myötä (Osa 3)
+    """CREATE TABLE IF NOT EXISTS learned_insights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, insight TEXT,
+        confidence REAL DEFAULT 0.6, created_at REAL, updated_at REAL,
+        active INTEGER DEFAULT 1)""",
+    """CREATE TABLE IF NOT EXISTS insight_state (
+        user_id TEXT PRIMARY KEY, last_reflection_at REAL DEFAULT 0)""",
 ]:
     conn.execute(_sql)
 conn.commit()
-print("✅ Database initialized (+ rolling_summary v8.3.4, logic layer v8.3.5)")
+print("✅ Database initialized (+ rolling_summary v8.3.4, logic layer v8.3.5, threads+insights v8.3.17)")
 
 # ====================== GLOBAL STATE ======================
 continuity_state = {}
@@ -1610,6 +1645,178 @@ Tiivistelmä:
         """, (str(user_id), new_summary, new_turn_id, time.time()))
         conn.commit()
     print(f"[ROLLING] Updated: {len(new_summary)} chars, turns ...{last_turn_id}→{new_turn_id}")
+
+
+# ====================== v8.3.17: TEEMOJEN/JUONTEIDEN SEURANTA (Osa 2) ======================
+def record_thread_mention(user_id: int, theme: str):
+    """
+    Kirjaa teeman maininnan. Jos sama (tai hyvin samankaltainen) teema on jo
+    olemassa, kasvattaa sen mainintalaskuria; muuten luo uuden. Näin toistuvat
+    aiheet nousevat esiin ajan myötä ilman että jokaista mainintaa tallennetaan
+    erikseen. Kutsutaan frame-extractorin tuloksesta - ei omaa LLM-kutsua.
+    """
+    theme = (theme or "").strip().lower()
+    if not theme or len(theme) < 3 or len(theme) > 80:
+        return
+    now = time.time()
+    with db_lock:
+        rows = conn.execute(
+            "SELECT id, theme, mention_count FROM threads WHERE user_id=? AND active=1",
+            (str(user_id),)).fetchall()
+    # etsi samankaltainen olemassa oleva teema (sanatason päällekkäisyys)
+    tw = set(theme.split())
+    best_id, best_overlap = None, 0.0
+    for row in rows:
+        ew = set((row[1] or "").split())
+        if not ew or not tw:
+            continue
+        overlap = len(tw & ew) / len(tw | ew)
+        if overlap > best_overlap:
+            best_overlap, best_id = overlap, row[0]
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            if best_id is not None and best_overlap >= 0.5:
+                conn.execute(
+                    "UPDATE threads SET mention_count=mention_count+1, last_seen_at=? WHERE id=?",
+                    (now, best_id))
+            else:
+                conn.execute("""
+                    INSERT INTO threads (user_id, theme, mention_count, first_seen_at, last_seen_at, active)
+                    VALUES (?,?,1,?,?,1)
+                """, (str(user_id), theme, now, now))
+            conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[THREAD] {e}")
+
+def get_recurring_threads(user_id: int, limit: int = 5):
+    """Palauttaa toistuvat teemat jotka on mainittu tarpeeksi usein noustakseen esiin."""
+    with db_lock:
+        rows = conn.execute("""
+            SELECT theme, mention_count, last_seen_at FROM threads
+            WHERE user_id=? AND active=1 AND mention_count >= ?
+            ORDER BY mention_count DESC, last_seen_at DESC LIMIT ?
+        """, (str(user_id), THREAD_MIN_MENTIONS_TO_SURFACE, limit)).fetchall()
+    return [{"theme": r[0], "mention_count": r[1], "last_seen_at": r[2]} for r in rows]
+
+# ====================== v8.3.17: SYVEMMÄT PÄÄTELMÄT (Osa 3) ======================
+def get_learned_insights(user_id: int, limit: int = 6):
+    with db_lock:
+        rows = conn.execute("""
+            SELECT insight, confidence FROM learned_insights
+            WHERE user_id=? AND active=1 ORDER BY confidence DESC, updated_at DESC LIMIT ?
+        """, (str(user_id), limit)).fetchall()
+    return [{"insight": r[0], "confidence": r[1]} for r in rows]
+
+def get_insight_state(user_id: int) -> float:
+    with db_lock:
+        row = conn.execute("SELECT last_reflection_at FROM insight_state WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+    return row[0] if row else 0.0
+
+def _store_insight(user_id: int, insight: str, confidence: float):
+    insight = (insight or "").strip()
+    if not insight or len(insight) < 10:
+        return
+    now = time.time()
+    # dedup: älä tallenna lähes samaa havaintoa uudelleen
+    with db_lock:
+        existing = conn.execute(
+            "SELECT insight FROM learned_insights WHERE user_id=? AND active=1",
+            (str(user_id),)).fetchall()
+    nw = set(normalize_text(insight).split())
+    for (ex,) in existing:
+        ew = set(normalize_text(ex).split())
+        if ew and nw and len(nw & ew) / len(nw | ew) > 0.6:
+            return
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("""
+                INSERT INTO learned_insights (user_id, insight, confidence, created_at, updated_at, active)
+                VALUES (?,?,?,?,?,1)
+            """, (str(user_id), insight, confidence, now, now))
+            conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[INSIGHT] {e}")
+
+async def maybe_run_reflection(user_id: int, force: bool = False):
+    """
+    Taustaprosessi joka muodostaa korkeamman tason päätelmiä käyttäjästä
+    useiden muistojen pohjalta - asioita joita ei suoraan sanottu vaan jotka
+    seuraavat useammasta havainnosta yhdessä. Ajetaan harvoin (kerran ~20h per
+    käyttäjä) jotta kustannus pysyy pienenä. Tämä on v8.3.17:n ainoa uusi
+    per-käyttäjä-taustakutsu.
+    """
+    now = time.time()
+    last = get_insight_state(user_id)
+    if not force and (now - last) / 3600 < INSIGHT_REFLECTION_INTERVAL_HOURS:
+        return
+
+    # kokoa aineisto: profiilifaktat + toistuvat teemat + viimeaikaiset muistot
+    facts = get_profile_facts(user_id, limit=15)
+    threads = get_recurring_threads(user_id, limit=8)
+    with db_lock:
+        mem_rows = conn.execute("""
+            SELECT content, memory_type FROM episodic_memories
+            WHERE user_id=? AND memory_type IN ('user_fact','user_action','fantasy','user_utterance')
+            ORDER BY created_at DESC LIMIT 40
+        """, (str(user_id),)).fetchall()
+    if len(facts) + len(threads) + len(mem_rows) < 5:
+        # liian vähän aineistoa mielekkääseen reflektioon
+        with db_lock:
+            conn.execute("INSERT OR REPLACE INTO insight_state (user_id, last_reflection_at) VALUES (?,?)",
+                         (str(user_id), now))
+            conn.commit()
+        return
+
+    facts_str = "\n".join(f"- {f['fact_key']}: {f['fact_value']}" for f in facts) or "ei faktoja"
+    threads_str = "\n".join(f"- {t['theme']} (mainittu {t['mention_count']}x)" for t in threads) or "ei teemoja"
+    mem_str = "\n".join(f"- {c[:120]}" for c, _ in mem_rows[:25]) or "ei muistoja"
+    existing_insights = get_learned_insights(user_id, limit=10)
+    existing_str = "\n".join(f"- {i['insight']}" for i in existing_insights) or "ei aiempia"
+
+    prompt = f"""Olet analysoimassa käyttäjää pitkäaikaista muistia varten. Return JSON only.
+
+Muodosta 2-4 KORKEAMMAN TASON PÄÄTELMÄÄ käyttäjästä - asioita joita ei ole suoraan
+sanottu, vaan jotka SEURAAVAT useammasta havainnosta yhdessä. Esim. jos käyttäjä
+mainitsee toistuvasti tietyn teeman ja tietyt faktat tukevat sitä, päättele mitä se
+kertoo hänestä. Vältä toistamasta jo tiedettyjä faktoja sellaisenaan - yhdistele.
+
+Schema: {{"insights":[{{"insight":"lyhyt suomenkielinen päätelmä","confidence":0.0}}]}}
+
+Vältä toistamasta näitä jo muodostettuja päätelmiä:
+{existing_str}
+
+FAKTAT:
+{facts_str}
+
+TOISTUVAT TEEMAT:
+{threads_str}
+
+VIIMEAIKAISET MUISTOT:
+{mem_str}"""
+
+    raw = await call_llm(user_prompt=prompt, max_tokens=400,
+                         temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
+    if raw:
+        result = parse_json_object(raw, {"insights": []})
+        for ins in (result.get("insights", []) or [])[:4]:
+            try:
+                conf = max(0.0, min(1.0, float(ins.get("confidence", 0.6))))
+            except (TypeError, ValueError):
+                conf = 0.6
+            _store_insight(user_id, ins.get("insight", ""), conf)
+        print(f"[REFLECTION] {user_id}: {len(result.get('insights', []))} uutta päätelmää")
+
+    with db_lock:
+        conn.execute("INSERT OR REPLACE INTO insight_state (user_id, last_reflection_at) VALUES (?,?)",
+                     (str(user_id), now))
+        conn.commit()
 
 
 # ====================== STICKY MEMORIES ======================
@@ -2724,6 +2931,17 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
     resolve_open_loops(user_id, frame.get("user_text",""), frame)
     save_topic_state_to_db(user_id)
 
+    # v8.3.17 (Osa 2): kirjaa teema/juonne toistuvien aiheiden seurantaan.
+    # Käytetään frame-extractorin jo tuottamaa topic-kenttää + fantasioiden
+    # kategorioita - ei omaa LLM-kutsua.
+    topic = (frame.get("topic") or "").strip()
+    if topic and topic.lower() not in ("general", "none", ""):
+        record_thread_mention(user_id, topic)
+    for fantasy in (frame.get("fantasies", []) or [])[:3]:
+        cat = (fantasy.get("category") or "").strip()
+        if cat and cat != "other":
+            record_thread_mention(user_id, cat)
+
     valid_facts = [f for f in (validate_fact(fact) for fact in (frame.get("facts",[]) or [])[:8]) if f]
 
     for fact in valid_facts:
@@ -2788,6 +3006,8 @@ async def build_context_pack(user_id: int, user_text: str):
     narrative_timeline = build_narrative_timeline(user_id)
     sticky_memories = get_sticky_memories(user_id, limit=50)
     rolling_summary_data = get_rolling_summary(user_id)  # v8.3.4
+    recurring_threads = get_recurring_threads(user_id, limit=5)      # v8.3.17
+    learned_insights = get_learned_insights(user_id, limit=6)        # v8.3.17
 
     return {
         "topic_state": state.get("topic_state", {}),
@@ -2804,6 +3024,8 @@ async def build_context_pack(user_id: int, user_text: str):
         "temporal_context": build_full_temporal_context(state),
         "sticky_memories": sticky_memories,
         "rolling_summary": rolling_summary_data.get("summary", ""),  # v8.3.4
+        "recurring_threads": recurring_threads,   # v8.3.17
+        "learned_insights": learned_insights,     # v8.3.17
     }
 
 def format_context_pack(context_pack: dict):
@@ -2870,10 +3092,33 @@ käyttäjä mainitsee aiempia asioita. Ristiriidassa → luota viimeisimpiin vuo
     open_questions = topic_state.get("open_questions", [])
     open_loops = topic_state.get("open_loops", [])
 
+    # v8.3.17: toistuvat teemat + opitut päätelmät
+    recurring_threads = context_pack.get("recurring_threads", []) or []
+    threads_block = ""
+    if recurring_threads:
+        tl = [f"- {t['theme']} (esillä {t['mention_count']}x)" for t in recurring_threads]
+        threads_block = ("\n=====================================\n"
+                         "🔁 TOISTUVAT TEEMAT (asioita joihin käyttäjä palaa usein):\n"
+                         "=====================================\n" + "\n".join(tl) +
+                         "\nVoit viitata näihin luontevasti Meganina (esim. 'sä puhut aina täst'), "
+                         "kun se sopii - ei väkisin joka vuorolla.")
+
+    learned_insights = context_pack.get("learned_insights", []) or []
+    insights_block = ""
+    if learned_insights:
+        il = [f"- {i['insight']}" for i in learned_insights]
+        insights_block = ("\n=====================================\n"
+                          "💡 MITÄ OLET OPPINUT KÄYTTÄJÄSTÄ (päätelmiä, ei suoraan sanottua):\n"
+                          "=====================================\n" + "\n".join(il) +
+                          "\nNämä ovat sun omia havaintojasi ajan myötä. Anna niiden värittää "
+                          "suhtautumistasi luontevasti - ÄLÄ luettele niitä ääneen käyttäjälle.")
+
     return f"""
 {narrative_timeline}
 {rolling_block}
 {sticky_block}
+{threads_block}
+{insights_block}
 {plans_block}
 {agreements_block}
 
@@ -2986,21 +3231,30 @@ async def build_response_plan(user_id: int, user_text: str, context_pack: dict, 
     sticky_memories = context_pack.get("sticky_memories", [])
     scene = context_pack.get("scene", "neutral")
     location_status = context_pack.get("location_status", "separate")
+    relevant_memories = context_pack.get("relevant_memories", [])   # v8.3.17
+    recurring_threads = context_pack.get("recurring_threads", [])   # v8.3.17
+    learned_insights = context_pack.get("learned_insights", [])     # v8.3.17
 
     facts_str = "\n".join(f"- {f['fact_key']}: {f['fact_value']}" for f in profile_facts) or "none"
     sticky_str = "\n".join(f"- [{s['sticky_type']}] {s['content'][:100]}"
                            for s in sticky_memories[:15]) or "none"
+    # v8.3.17: aineisto yhteyksien muodostamiseen
+    mem_str = "\n".join(f"- {m['content'][:120]}" for m in relevant_memories[:6]) or "none"
+    threads_str = "\n".join(f"- {t['theme']} ({t['mention_count']}x)" for t in recurring_threads[:5]) or "none"
+    insights_str = "\n".join(f"- {i['insight']}" for i in learned_insights[:5]) or "none"
 
     default_plan = {"relevant_facts": [], "potential_contradiction": None,
                      "scene_consistent": True, "turn_goal": "vastaa luonnollisesti",
                      "should_reference_rolling_summary": False,
-                     "emotional_undertone": "neutraali, itsevarma"}
+                     "emotional_undertone": "neutraali, itsevarma",
+                     "memory_connection": None}
 
     prompt = f"""Analysoi tilanne ennen Meganin vastauksen kirjoittamista. Return JSON only.
 
 Schema:
 {{"relevant_facts":[],"potential_contradiction":null,"scene_consistent":true,
-"turn_goal":"","should_reference_rolling_summary":false,"emotional_undertone":""}}
+"turn_goal":"","should_reference_rolling_summary":false,"emotional_undertone":"",
+"memory_connection":null}}
 
 Rules:
 - relevant_facts: max 3 faktaa jotka ovat suoraan relevantteja käyttäjän viimeisimpään viestiin
@@ -3013,6 +3267,11 @@ Rules:
   ottaen huomioon hänen persoonansa (dominoiva, itsenäinen, ei tarvitseva), nykyinen
   mieliala/jännite/ärsyyntyminen alla, ja äskeinen historia. Esim. "leikkisän ärsyyntynyt",
   "lämmin mutta pidättyväinen", "kiihottunut ja määräilevä", "kylmän etäinen"
+- memory_connection: TÄRKEIN uusi kenttä. Yhdistä ihmismäisesti: liittyykö käyttäjän
+  nykyinen viesti johonkin aiempaan muistoon, toistuvaan teemaan tai päätelmään?
+  Jos kyllä, kuvaa yhteys yhdellä lauseella jonka Megan voisi luontevasti tuoda esiin
+  (esim. "tämä liittyy siihen mitä käyttäjä kertoi X:stä - voi viitata siihen"). Jos ei
+  aitoa yhteyttä, null. ÄLÄ pakota yhteyttä väkisin.
 - should_reference_rolling_summary: true jos käyttäjä viittaa johonkin joka löytyy
   todennäköisesti vain pitkän aikavälin historiasta, ei viimeisimmistä vuoroista
 
@@ -3025,10 +3284,13 @@ Meganin nykyinen sisäinen tila:
 Rolling summary (lyhennetty): {rolling_summary[:600] or 'ei vielä'}
 Profile facts: {facts_str}
 Sticky memories: {sticky_str}
+Relevantit muistot (yhteyksien muodostamiseen): {mem_str}
+Toistuvat teemat: {threads_str}
+Opitut päätelmät: {insights_str}
 Turn analysis: {json.dumps(turn_analysis, ensure_ascii=False)}
 Käyttäjän viesti: {user_text}"""
 
-    raw = await call_llm(user_prompt=prompt, max_tokens=350,
+    raw = await call_llm(user_prompt=prompt, max_tokens=450,
                          temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
     if not raw:
         return format_response_plan(default_plan)
@@ -3040,6 +3302,12 @@ def format_response_plan(plan: dict) -> str:
     rf = plan.get("relevant_facts", []) or []
     if rf:
         lines.append("Relevantit faktat: " + "; ".join(str(x) for x in rf[:3]))
+    connection = plan.get("memory_connection")
+    if connection:
+        lines.append(f"🔗 YHTEYS AIEMPAAN: {connection}")
+        lines.append("→ Voit tuoda tämän yhteyden esiin luontevasti Meganina - se saa "
+                      "sinut vaikuttamaan siltä että muistat ja yhdistelet asioita "
+                      "ihmismäisesti. Älä kuitenkaan pakota sitä jos se ei istu vastaukseen.")
     contradiction = plan.get("potential_contradiction")
     if contradiction:
         lines.append(f"⚠️ MAHDOLLINEN RISTIRIITA: {contradiction}")
@@ -3508,6 +3776,11 @@ async def check_proactive_triggers(application):
                     await maybe_send_proactive_jealousy_message(application, uid)  # v8.3.14
                 except Exception as e:
                     print(f"[PROACTIVE JEALOUSY] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_run_reflection(uid)  # v8.3.17: syvemmät päätelmät (harvoin)
+                except Exception as e:
+                    print(f"[REFLECTION] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(300)
@@ -3583,6 +3856,8 @@ def create_database_indexes():
                 "CREATE INDEX IF NOT EXISTS idx_agreements_user ON agreements(user_id, status, agreed_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_summaries_user ON summaries(user_id, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_sticky_user ON sticky_memories(user_id, active, sticky_type)",
+                "CREATE INDEX IF NOT EXISTS idx_threads_user ON threads(user_id, active, mention_count DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_insights_user ON learned_insights(user_id, active, confidence DESC)",
             ]:
                 conn.execute(idx)
             conn.commit()
@@ -3606,7 +3881,8 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with db_lock:
         for table in ["memories","profiles","planned_events","topic_state","turns",
                       "episodic_memories","profile_facts","summaries","activity_log",
-                      "agreements","location_state","sticky_memories","rolling_summary"]:
+                      "agreements","location_state","sticky_memories","rolling_summary",
+                      "threads","learned_insights","insight_state"]:
             conn.execute(f"DELETE FROM {table} WHERE user_id=?", (str(user_id),))
         conn.commit()
     await update.message.reply_text("🗑️ Kaikki poistettu. Täysi uusi alku.")
@@ -3644,6 +3920,11 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 
 v8.3.15:
+v8.3.17:
+- Assosiatiivinen muisti: muistojen yhdistely vastauksissa (memory_connection)
+- Toistuvat teemat: seurataan ja nostetaan esiin (≥{THREAD_MIN_MENTIONS_TO_SURFACE} mainintaa) - /threads
+- Syvemmät päätelmät: taustareflektio ~{INSIGHT_REFLECTION_INTERVAL_HOURS}h välein - /insights, /force_reflection
+
 v8.3.16:
 - Web-haku/tutkimusviesti POISTETTU kokonaan (sotki narratiivia)
 - Oikea raja = vain "stop" (+ kriisisanat); muu vastustelu kuuluu leikkiin
@@ -3809,6 +4090,45 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["irritation_level"] = 0.0
     save_persistent_state_to_db(user_id)
     await update.message.reply_text("💬 Hiljaisuus ja ärsyyntyminen nollattu.")
+
+async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
+    user_id = update.effective_user.id
+    insights = get_learned_insights(user_id, limit=20)
+    if not insights:
+        await update.message.reply_text("💡 Ei vielä opittuja päätelmiä. Ne muodostuvat ajan myötä (taustareflektio ~20h välein). Pakota: /force_reflection")
+        return
+    lines = ["💡 MITÄ MEGAN ON OPPINUT SINUSTA:\n"]
+    for i in insights:
+        lines.append(f"- {i['insight']} (varmuus {i['confidence']:.1f})")
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+async def cmd_threads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.17: näytä toistuvat teemat."""
+    user_id = update.effective_user.id
+    with db_lock:
+        rows = conn.execute("""
+            SELECT theme, mention_count FROM threads WHERE user_id=? AND active=1
+            ORDER BY mention_count DESC LIMIT 20
+        """, (str(user_id),)).fetchall()
+    if not rows:
+        await update.message.reply_text("🔁 Ei vielä seurattuja teemoja.")
+        return
+    surfaced = THREAD_MIN_MENTIONS_TO_SURFACE
+    lines = [f"🔁 TEEMAT (näkyvät kontekstissa kun ≥{surfaced} mainintaa):\n"]
+    for theme, count in rows:
+        mark = "✅" if count >= surfaced else "  "
+        lines.append(f"{mark} {theme}: {count}x")
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+async def cmd_force_reflection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.3.17: pakota taustareflektio heti (testausta varten)."""
+    user_id = update.effective_user.id
+    await update.message.reply_text("🧠 Ajetaan reflektio...")
+    before = len(get_learned_insights(user_id, limit=50))
+    await maybe_run_reflection(user_id, force=True)
+    after = len(get_learned_insights(user_id, limit=50))
+    await update.message.reply_text(f"✅ Reflektio valmis. Uusia päätelmiä: {after - before}. Katso: /insights")
 
 async def cmd_trigger_jealousy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.14: pakota mustasukkaisuus/aktiviteetti-proaktiiviviesti heti (testausta varten)."""
@@ -3980,6 +4300,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.3.17 UUDET (ihmismäinen muisti):
+- Megan yhdistelee muistoja keskustelun aikana ("tää liittyy siihen mistä puhuit")
+- Seuraa toistuvia teemoja ja voi viitata niihin oma-aloitteisesti
+- Muodostaa syvempiä päätelmiä sinusta ajan myötä (oppii huomaamatta)
+/insights - Näytä mitä Megan on oppinut sinusta
+/threads - Näytä seuratut toistuvat teemat
+/force_reflection - Pakota päätelmien muodostus heti (testaus)
+
 v8.3.14 UUDET (proaktiiviset viestit):
 - Megan voi lähettää oma-aloitteisesti viestin ilmoittaen lähtevänsä jonnekin
   (baari, treffit...) - käynnistää oikean activityn ja hiljaisuuden ajaksi
@@ -4063,6 +4391,9 @@ async def main():
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("trigger_jealousy", cmd_trigger_jealousy))
+    application.add_handler(CommandHandler("insights", cmd_insights))
+    application.add_handler(CommandHandler("threads", cmd_threads))
+    application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
