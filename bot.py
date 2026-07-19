@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.17-associative-memory
+Megan Telegram Bot - v8.3.18-no-reminders
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -143,7 +143,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.17-associative-memory"
+BOT_VERSION = "8.3.18-no-reminders"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -3739,25 +3739,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_proactive_triggers(application):
     while True:
         try:
-            now_ts = time.time()
-            with db_lock:
-                rows = conn.execute("""
-                    SELECT user_id, id, description, target_time, last_reminded_at
-                    FROM planned_events WHERE status='planned' AND target_time IS NOT NULL
-                """).fetchall()
-            for row in rows:
-                user_id, plan_id, description, target_time, last_reminded = row
-                if not target_time: continue
-                should = (0 <= target_time - now_ts <= 900) or (0 <= now_ts - target_time <= 1800)
-                if not should: continue
-                if last_reminded and (now_ts - last_reminded) < 3600: continue
-                try:
-                    await application.bot.send_message(chat_id=int(user_id), text=f"Muistutus: {description}")
-                    with db_lock:
-                        conn.execute("UPDATE planned_events SET last_reminded_at=? WHERE id=?", (now_ts, plan_id))
-                        conn.commit()
-                except Exception as e:
-                    print(f"[REMINDER] {e}")
+            # v8.3.18: "Muistutus: ..." -viestit POISTETTU käyttäjän toiveesta.
+            # Ne olivat vanhan planned_events-järjestelmän raakoja ilmoituksia
+            # (esim. "Muistutus: Ottaa päiväunet") jotka tulivat Megan-persoonan
+            # ohi ja rikkoivat narratiivin. planned_events-taulu on yhä olemassa
+            # ja plan-seuranta toimii keskustelun sisällä normaalisti - vain
+            # nämä automaattiset push-muistutukset on poistettu.
             for uid in list(continuity_state.keys()):
                 try:
                     last_save = continuity_state[uid].get("_last_save_at", 0)
