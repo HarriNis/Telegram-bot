@@ -56,7 +56,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.13-thinking-block-fix"
+BOT_VERSION = "8.3.11-claude-temp-fix"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -679,94 +679,39 @@ def get_time_block():
     return "late_evening"
 
 # ====================== LLM ======================
-def _extract_anthropic_error_message(e: Exception) -> str:
-    """
-    v8.3.12: Poimii Anthropic-SDK:n virheestä pelkän sisemmän 'message'-kentän
-    sen sijaan että tulostettaisiin koko str(e) (joka sisältää paljon
-    JSON-kääretekstiä ennen varsinaista syytä). anthropic-kirjaston
-    APIStatusError-tyyppisillä poikkeuksilla on yleensä .body (jäsennetty
-    JSON) ja/tai .message-attribuutti - käytetään niitä jos löytyvät,
-    muuten pudotaan str(e):hen.
-    """
-    try:
-        body = getattr(e, "body", None)
-        if isinstance(body, dict):
-            inner = body.get("error", {})
-            if isinstance(inner, dict) and inner.get("message"):
-                return str(inner["message"])
-    except Exception:
-        pass
-    msg = getattr(e, "message", None)
-    if msg:
-        return str(msg)
-    return str(e)
-
-def extract_claude_text(response) -> str:
-    """
-    v8.3.13: Uudemmat Claude-mallit (mm. claude-sonnet-5) voivat palauttaa
-    "extended thinking" -lohkoja (ThinkingBlock) ENNEN varsinaista tekstiä
-    content-listassa. response.content[0] ei siis ole enää luotettavasti
-    tekstilohko - täytyy etsiä ensimmäinen lohko jolla on ei-tyhjä
-    'text'-attribuutti sen sijaan että oletetaan sen olevan indeksissä 0.
-    """
-    if not response or not response.content:
-        return ""
-    for block in response.content:
-        text = getattr(block, "text", None)
-        if text:
-            return text
-    return ""
-
 async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                    temperature=0.8, prefer_light=False, json_mode=False):
     """v8.3.6: vain Claude -> Grok. OpenAI-fallback poistettu.
     v8.3.11: jos Claude palauttaa 400-virheen joka mainitsee temperature-
     parametrin, yritetään kerran uudelleen ilman sitä ennen Grok-fallbackia.
-    v8.3.12: virheviesti tulostetaan omalle rivilleen ilman JSON-kääretekstiä
-    ympärillä - monet lokinäkymät (mm. Render) katkaisevat pitkät rivit, ja
-    kääre ("Error code: 400 - {'type': 'error', ...") söi suurimman osan
-    merkkibudjetista ennen kuin varsinainen viesti edes alkoi.
-    v8.3.13: temperature EI enää lähetetä Claudelle ollenkaan - Anthropic
-    on deprecatoinut sen parametrina uusimmille malleille (esim. Sonnet 5).
-    Retry-logiikka jätetty varalle tulevia vastaavia deprecaatioita varten.
-    Lisäksi tekstin poiminta käyttää nyt extract_claude_text():ia, koska
-    content[0] voi olla ThinkingBlock eikä tekstilohko."""
+    Virhelokit myös pidennetty 100->400 merkkiin ettei todellinen syy jää
+    piiloon."""
     claude = get_claude_client()
     if claude:
         model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
         messages = [{"role": "user", "content": user_prompt}]
         kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
-        # HUOM: temperature EI lähetetä Claudelle (deprecated uusimmilla malleilla).
-        # temperature-parametria käytetään yhä Grok-kutsuun alempana.
+        if prefer_light: kwargs["temperature"] = temperature
         if system_prompt: kwargs["system"] = system_prompt
         try:
             response = await claude.messages.create(**kwargs)
-            text = extract_claude_text(response)
-            if text and text.strip(): return text.strip()
+            if response.content:
+                text = response.content[0].text
+                if text and text.strip(): return text.strip()
         except Exception as e:
-            inner_msg = _extract_anthropic_error_message(e)
-            print(f"[LLM] Claude error: {type(e).__name__}")
-            print(f"[LLM] Claude error message: {inner_msg}")
-            # Varakeino: jos virhe mainitsee jonkin tunnetun deprecatoidun
-            # parametrin joka meillä sattuisi vielä olemaan kwargs:ssa,
-            # poista se ja yritä uudelleen kerran.
-            retry_kwargs = dict(kwargs)
-            removed_any = False
-            for param_name in ("temperature", "top_p", "top_k"):
-                if param_name in inner_msg.lower() and param_name in retry_kwargs:
-                    del retry_kwargs[param_name]
-                    removed_any = True
-            if removed_any:
+            err_str = str(e)
+            print(f"[LLM] Claude error: {type(e).__name__}: {err_str[:400]}")
+            if "temperature" in err_str.lower() and "temperature" in kwargs:
                 try:
+                    retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
                     response = await claude.messages.create(**retry_kwargs)
-                    text = extract_claude_text(response)
-                    if text and text.strip():
-                        print("[LLM] Claude retry (deprecatoitu parametri poistettu) onnistui")
-                        return text.strip()
+                    if response.content:
+                        text = response.content[0].text
+                        if text and text.strip():
+                            print("[LLM] Claude retry ilman temperature-parametria onnistui")
+                            return text.strip()
                 except Exception as e2:
-                    inner_msg2 = _extract_anthropic_error_message(e2)
-                    print(f"[LLM] Claude retry error: {type(e2).__name__}")
-                    print(f"[LLM] Claude retry error message: {inner_msg2}")
+                    print(f"[LLM] Claude retry error: {type(e2).__name__}: {str(e2)[:400]}")
     if grok_client:
         try:
             messages = []
@@ -779,8 +724,7 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
             text = response.choices[0].message.content
             if text and text.strip(): return text.strip()
         except Exception as e:
-            print(f"[LLM] Grok error: {type(e).__name__}")
-            print(f"[LLM] Grok error message: {str(e)}")
+            print(f"[LLM] Grok error: {type(e).__name__}: {str(e)[:400]}")
     print("[LLM] ALL PROVIDERS FAILED (Claude + Grok)")
     return ""
 
@@ -2292,7 +2236,7 @@ Analyze the ACTUAL image. caption_seed natural for dominant Megan."""
                 ],
             }],
         )
-        text = extract_claude_text(response) or "{}"
+        text = response.content[0].text if response.content else "{}"
         return parse_json_object(text, default)
     except Exception as e:
         print(f"[VISION] {e}")
