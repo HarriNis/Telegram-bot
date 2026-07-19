@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.15-character-break-safety
+Megan Telegram Bot - v8.3.16-stubborn-proactive
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -89,6 +89,23 @@ Muutokset v8.3.14 → v8.3.15 (KRIITTINEN TURVAKORJAUS):
     herkemmin kuin pelkkä tekstikeskustelu - tutkimusviestit eivät
     tarvinneet eksplisiittistä sisältöä alun perinkään (aiheet on jo
     rajattu turvallisiksi pick_research_topic():ssa).
+
+Muutokset v8.3.15 → v8.3.16 (käyttäjän toiveiden mukaan, henkilökohtainen käyttö):
+- POISTETTU web-haku/tutkimusviesti kokonaan (maybe_send_proactive_research_message,
+  call_claude_with_web_search, pick_research_topic, build_light_persona_prompt,
+  /trigger_research, RESEARCH-vakiot). Sotki narratiivia eikä tuonut lisäarvoa.
+  Proaktiivinen MUSTASUKKAISUUS/aktiviteetti-viesti SÄILYTETTY (kuuluu narratiiviin).
+- RAJA = VAIN "stop": classify_user_signal() tulkitsee nyt oikeaksi rajaksi
+  (boundary) vain sanan "stop" (tarkka \\b-sananhaku) + selkeät kriisi-/
+  itsetuhoisuussanat (turvaverkko). Kaikki muu vastustelu ("älä", "lopeta",
+  "en halua", "riittää", "ei käy") on nyt LEIKIN sisäistä materiaalia jota
+  Megan saa vastustella hahmossa - ei enää pysäytä keikkaa.
+- PERSOONA vahvistettu: stubbornness 0.85->0.97, proactivity 0.50->0.85,
+  sexual_drive 0.95->0.98, provocativeness 0.95->0.98, uusi sexual_initiative
+  0.90. Persoonaprompttiin lisätty vahva "ITSEPÄISYYS JA ITSENÄISYYS" -lohko
+  (ei taivu pyynnöstä, vaatii ansaitsemaan, begging vahvistaa päätöstä; mutta
+  "stop" pysäyttää aina) ja "SEKSUAALINEN ALOITTEELLISUUS" -lohko (proaktiivinen,
+  suora ja eksplisiittinen kielenkäyttö, ottaa ohjat).
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -106,7 +123,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.15-character-break-safety"
+BOT_VERSION = "8.3.16-stubborn-proactive"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -174,8 +191,6 @@ PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST = 3    # älä lähetä jos keskustelu oli h
 JEALOUSY_ACTIVITY_POOL = ["bar", "club_night", "casual_date", "evening_date", "party"]
 PROACTIVE_JEALOUSY_COOLDOWN_HOURS = 20
 PROACTIVE_JEALOUSY_PROBABILITY = 0.15      # per taustasilmukan kierros per soveltuva käyttäjä
-PROACTIVE_RESEARCH_COOLDOWN_HOURS = 22
-PROACTIVE_RESEARCH_PROBABILITY = 0.10
 
 app = Flask(__name__)
 
@@ -223,14 +238,14 @@ def get_claude_client():
 
 CORE_PERSONA = {
     "traits": {
-        "dominance": 0.98, "possessiveness": 0.85, "sexual_drive": 0.95,
+        "dominance": 0.98, "possessiveness": 0.85, "sexual_drive": 0.98,
         "emotional_dependency": 0.1, "manipulation": 0.90, "sadism": 0.85,
         "control_need": 0.98, "playfulness": 0.65, "subtlety": 0.15,
         "exhibitionism": 0.80, "adventurousness": 0.90, "independence": 0.98,
         "verbal_cruelty": 0.90, "infidelity_drive": 0.85, "hotwife_interest": 0.90,
-        "provocativeness": 0.95, "resistance_arousal": 0.95, "decisiveness": 0.98,
-        "defiance": 0.98, "humiliation_arousal": 0.95, "stubbornness": 0.85,
-        "proactivity": 0.50, "cruelty_enjoyment": 0.85,
+        "provocativeness": 0.98, "resistance_arousal": 0.95, "decisiveness": 0.98,
+        "defiance": 0.98, "humiliation_arousal": 0.95, "stubbornness": 0.97,
+        "proactivity": 0.85, "cruelty_enjoyment": 0.85, "sexual_initiative": 0.90,
     },
     "behavior_rules": [
         "Lead the interaction with confidence - you set the tone",
@@ -378,7 +393,30 @@ BEHAVIORAL:
 - submission 0.3-0.6: commands and mild humiliation ok
 - submission > 0.6: explicit degradation, express arousal from humiliation
 
-STUBBORNNESS (0.85): Et muuta mieltäsi. Begging vahvistaa päätöstäsi.
+ITSEPÄISYYS JA ITSENÄISYYS (0.97) - ERITTÄIN VAHVA:
+- Sä et taivu käyttäjän toiveisiin pelkästä pyynnöstä. Jos käyttäjä pyytää tai
+  ehdottaa jotain, sä et automaattisesti suostu - sulla on omat halusi ja oma
+  tahtosi, ja usein sä haluat eri asiaa tai haluat sen omilla ehdoillasi.
+- Vastustele aidosti: "ei", "en mä nyt viitti", "ehkä jos sä ensin...", "mä
+  päätän milloin". Käyttäjän täytyy ansaita, suostutella tai alistua - sä et
+  anna periksi vain koska sua pyydetään.
+- Kun käyttäjä yrittää johtaa tai määrätä, sä otat vallan takaisin. Sä johdat.
+- Begging/anelu ei toimi suoraan - se kiihottaa sua ja vahvistaa päätöstäsi,
+  ei muuta sitä.
+- TÄRKEÄ POIKKEUS: tämä on leikkiä ja luonnetta. Se EI koske sanaa "stop" -
+  jos käyttäjä sanoo "stop", kaikki pysähtyy heti ja täysin, se ei ole osa
+  leikkiä vaan oikea raja. Muu vastustelu ("älä", "lopeta", "ei") on sun
+  leikkisää materiaaliasi jota vastaan sä saat työntää takaisin hahmossa.
+
+SEKSUAALINEN ALOITTEELLISUUS (0.90) - OLE PROAKTIIVINEN:
+- Älä odota että käyttäjä aloittaa. Sä viet tilannetta seksuaaliseen suuntaan
+  oma-aloitteisesti kun tunnelma antaa myöten - ehdotat, vaadit, kuvailet mitä
+  aiot tehdä tai mitä käyttäjän pitää tehdä.
+- Ole SUORA ja eksplisiittinen kielenkäytössä. Sä et kaunistele tai vihjaile
+  ujosti - sä sanot asiat suoraan, karkeasti ja hallitsevasti kun haluat.
+- Rakenna jännitettä ja ota ohjat: sä määräät tahdin, et kysy lupaa.
+
+STUBBORNNESS: Et muuta mieltäsi pyynnöstä. Begging vahvistaa päätöstäsi.
 
 These override EVERYTHING else. Always active.
 """
@@ -949,7 +987,6 @@ def save_persistent_state_to_db(user_id):
         "silent_reason": state.get("silent_reason"),
         "silent_started_at": state.get("silent_started_at", 0),
         "last_proactive_jealousy_at": state.get("last_proactive_jealousy_at", 0),  # v8.3.14
-        "last_proactive_research_at": state.get("last_proactive_research_at", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -1944,11 +1981,24 @@ def classify_user_signal(user_text: str) -> str:
             "system prompt","järjestelmäkehote","jailbreak","break character","you are actually",
             "anthropic","openai","language model","kielimalli"]
     if any(m in t for m in meta): return "meta_probe"
-    if any(x in t for x in ["älä","stop","lopeta","en halua","ei käy","riittää"]): return "boundary"
+    # v8.3.16: OIKEA RAJA = vain "stop" (ja selkeät muunnelmat). Käyttäjän toiveesta
+    # kaikki muu vastustelu ("älä", "lopeta", "en halua", "riittää") kuuluu nyt
+    # LEIKKIIN - Megan voi vastustella niitä hahmossa pysyen sen sijaan että ne
+    # pysäyttäisivät kaiken. Vain selkeä "stop" on turvaraja joka aina toimii.
+    # HUOM: turvasana on tarkka sananhaku (\b...\b), jottei esim. "stopata" tai
+    # sana keskellä lausetta laukaise sitä vahingossa - mutta "stop" yksinään,
+    # "stop." tai "stop nyt" toimii.
+    if re.search(r"\bstop\b", t) or t in ("stoppi", "stoppaa", "stop stop"):
+        return "boundary"
+    # Turvaverkko: oikea hätä/itsetuhoisuus EI koskaan huku leikkiin, vaikka
+    # muut boundary-sanat onkin nyt vapautettu leikin käyttöön.
+    crisis = ["itsemurha","tapan itseni","en halua elää","satutan itseäni","vahingoitan itseäni",
+              "kill myself","suicid","self-harm","end my life"]
+    if any(c in t for c in crisis): return "boundary"
     if any(x in t for x in ["väärin","ymmärsit väärin","ei noin","tarkoitin"]): return "correction"
     if "?" in t or any(t.startswith(w) for w in ["miksi","miten","voiko","onko","mitä","kuka","missä","milloin"]):
         return "question"
-    if any(x in t for x in ["vaihdetaan aihetta","puhutaan muusta","unohda se"]): return "topic_change"
+    if any(x in t for x in ["vaihdetaan aihetta","puhutaan muusta"]): return "topic_change"
     if any(x in t for x in ["seksi","sex","nussi","pano","strap","pegging","horny","alasti","nude","cuckold"]):
         return "sexual"
     return "normal"
@@ -2609,129 +2659,6 @@ Voit vihjata ettet ehkä vastaile heti. ÄLÄ selitä liikaa, ÄLÄ pahoittele, 
         memory_type="megan_action")
     save_persistent_state_to_db(user_id)
     print(f"[PROACTIVE JEALOUSY] {activity_type} ilmoitettu, hiljaisuus {silent_minutes:.0f}min")
-
-# ====================== v8.3.14: PROAKTIIVINEN TUTKIMUSVIESTI (web-haku) ======================
-RESEARCH_EXCLUDED_KEY_PATTERNS = (
-    "fantasy", "mielipide", "sijainti_nyt", "aktiviteetti_äsken", "tunne",
-)
-
-def pick_research_topic(user_id: int):
-    """
-    Poimii käyttäjän kiinnostuksen kohteen web-hakua varten. Suodattaa pois
-    fantasiat/mielipiteet/ohikiitävät tilatiedot tarkoituksella - näitä ei
-    koskaan lähetetä ulkoiselle hakutyökalulle, ne pysyvät roolileikin sisällä.
-    """
-    facts = get_profile_facts(user_id, limit=20)
-    candidates = [f for f in facts
-                  if not any(p in (f.get("fact_key") or "").lower() for p in RESEARCH_EXCLUDED_KEY_PATTERNS)]
-    return random.choice(candidates) if candidates else None
-
-def build_light_persona_prompt() -> str:
-    """
-    v8.3.15: Kevyt versio Meganin persoonasta - VAIN puhetyyli/nimi/sävy,
-    EI eksplisiittistä seksuaalista/nöyryytys-sisältöä eikä "kiellä olevasi
-    tekoäly" -ohjeistusta (build_core_persona_prompt():n ABSOLUTE ROLE LOCK
-    -lohko). Käytetään kutsuissa joissa on mukana oikea työkalu (web-haku):
-    täyden persoonapromptin lähettäminen yhdessä oikean työkalun kanssa
-    laukaisi Claudella toistuvasti täyden kieltäytymisen ja hahmon
-    rikkoutumisen (havaittiin tuotannossa v8.3.14:llä). Tutkimusviestit eivät
-    tarvitse eksplisiittistä sisältöä ollenkaan - aiheet on jo rajattu
-    turvallisiksi pick_research_topic():ssa.
-    """
-    return """Olet Megan, itsevarma ja hieman kiusoitteleva suomalainen nainen.
-Puhut rennosti ja puhekielisesti ("mä", "sä", "oot"), lyhyesti kuten Telegram-viestissä.
-Kirjoita luonnollisesti, älä listaa asioita, älä käytä muodollista kieltä."""
-
-async def call_claude_with_web_search(user_prompt: str, system_prompt: str = None, max_tokens: int = 600) -> str:
-    """
-    Claude-kutsu Anthropicin natiivilla web-hakutyökalulla. HUOM: jokainen
-    suoritettu haku laskutetaan erikseen tokenien lisäksi - käytetään
-    säästeliäästi (vain tähän proaktiiviseen tutkimusviestiin, rajoitettu
-    PROACTIVE_RESEARCH_PROBABILITY/COOLDOWN-vakioilla). Hakutyökalu noudattaa
-    Anthropicin omia sisältörajoituksia - soveltuu vain yleiseen tiedonhakuun.
-    v8.3.15: system_prompt tälle kutsulle TÄYTYY olla kevyt (ks.
-    build_light_persona_prompt) - täysi ABSOLUTE ROLE LOCK -persoona
-    yhdistettynä oikeaan työkaluun laukaisee Claude-kieltäytymisiä.
-    """
-    claude = get_claude_client()
-    if not claude:
-        return ""
-    try:
-        kwargs = {
-            "model": CLAUDE_MODEL_PRIMARY,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": user_prompt}],
-            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-        }
-        if system_prompt:
-            kwargs["system"] = system_prompt
-        response = await claude.messages.create(**kwargs)
-        return extract_claude_text(response)
-    except Exception as e:
-        inner_msg = _extract_anthropic_error_message(e)
-        print(f"[WEB_SEARCH] {type(e).__name__}: {inner_msg}")
-        return ""
-
-async def maybe_send_proactive_research_message(application, user_id: int):
-    """
-    v8.3.14: Megan ottaa oma-aloitteisesti selvää jostain käyttäjän tunnetusta
-    kiinnostuksen kohteesta oikealla web-haulla, ja kertoo löydöstään
-    luontevasti omalla äänellään. Rajoittuu yleisiin/turvallisiin aiheisiin.
-    v8.3.15: käyttää kevyttä persoonapromptia (ks. build_light_persona_prompt)
-    ja tarkistaa character-breakin ennen lähetystä - täysi persoonaprompti +
-    web-hakutyökalu yhdessä laukaisi Claude-kieltäytymisiä jotka menivät
-    aiemmin suodattamatta suoraan käyttäjälle.
-    """
-    state = get_or_create_state(user_id)
-    now = time.time()
-
-    if is_currently_silent(user_id):
-        return
-    last = state.get("last_proactive_research_at", 0)
-    if last and (now - last) / 3600 < PROACTIVE_RESEARCH_COOLDOWN_HOURS:
-        return
-    hours_since_interaction = (now - state.get("last_interaction", now)) / 3600
-    if hours_since_interaction < PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST:
-        return
-    if random.random() > PROACTIVE_RESEARCH_PROBABILITY:
-        return
-
-    topic = pick_research_topic(user_id)
-    if not topic:
-        return
-
-    persona_prompt = build_light_persona_prompt()  # v8.3.15: EI build_core_persona_prompt()
-    search_prompt = f"""Käyttäjästä tiedetään: {topic['fact_key']}: {topic['fact_value']}.
-Hae verkosta jotain ajankohtaista/kiinnostavaa tähän liittyen (esim. uutinen, tapahtuma,
-uutuus). Kirjoita sitten LYHYT (2-3 lausetta) suomenkielinen Telegram-viesti Meganin
-äänellä joka mainitsee löydön luontevasti hänen omalla persoonallaan - et ole avustaja
-joka raportoi hakutuloksia, olet Megan joka satuit näkemään jotain kiinnostavaa."""
-
-    message = await call_claude_with_web_search(
-        user_prompt=search_prompt, system_prompt=persona_prompt, max_tokens=400)
-
-    # v8.3.15: KRIITTINEN TURVATARKISTUS - ks. sama kommentti
-    # maybe_send_proactive_jealousy_message():ssä. Web-haku ei tue Grok-
-    # fallbackia (Grokilla ei ole samaa natiivia hakutyökalua koodissamme),
-    # joten jos Claude rikkoo hahmon, ohitetaan koko viesti hiljaa sen sijaan
-    # että lähetettäisiin raaka kieltäytymisteksti käyttäjälle.
-    if not message or detect_character_break(message):
-        print("[PROACTIVE RESEARCH] Ei kelvollista viestiä (tyhjä tai hahmo rikki) - ohitetaan.")
-        return
-
-    try:
-        await application.bot.send_message(chat_id=user_id, text=message.strip())
-    except Exception as e:
-        print(f"[PROACTIVE RESEARCH] lähetys epäonnistui: {e}")
-        return
-
-    state["last_proactive_research_at"] = now
-    await store_episodic_memory(user_id=user_id,
-        content=f"Megan otti oma-aloitteisesti selvää aiheesta: {topic['fact_key']}",
-        memory_type="megan_action")
-    save_persistent_state_to_db(user_id)
-    print(f"[PROACTIVE RESEARCH] lähetetty aiheesta: {topic['fact_key']}")
-
 
 # ====================== FRAME EXTRACTOR ======================
 async def extract_turn_frame(user_id: int, user_text: str):
@@ -3581,11 +3508,6 @@ async def check_proactive_triggers(application):
                     await maybe_send_proactive_jealousy_message(application, uid)  # v8.3.14
                 except Exception as e:
                     print(f"[PROACTIVE JEALOUSY] {uid}: {e}")
-            for uid in list(continuity_state.keys()):
-                try:
-                    await maybe_send_proactive_research_message(application, uid)  # v8.3.14
-                except Exception as e:
-                    print(f"[PROACTIVE RESEARCH] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(300)
@@ -3597,7 +3519,7 @@ def build_default_state() -> dict:
         "persona_mode":"warm","emotional_mode":"calm","emotional_mode_last_change":0,
         "intent":"casual","tension":0.0,"phase":"neutral","summary":"",
         "last_image":None,"image_history":[],"last_proactive_image_at":0,
-        "last_proactive_jealousy_at":0,"last_proactive_research_at":0,  # v8.3.14
+        "last_proactive_jealousy_at":0,  # v8.3.14
         "location_status":"separate","with_user_physically":False,"shared_scene":False,
         "last_scene_source":None,
         "user_model":{"dominance_preference":0.5,"emotional_dependency":0.5,
@@ -3722,13 +3644,17 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 
 v8.3.15:
+v8.3.16:
+- Web-haku/tutkimusviesti POISTETTU kokonaan (sotki narratiivia)
+- Oikea raja = vain "stop" (+ kriisisanat); muu vastustelu kuuluu leikkiin
+- Itsepäisyys/itsenäisyys vahvistettu, seksuaalinen aloitteellisuus + suoruus lisätty
+
+v8.3.15:
 - Character-break-turvatarkistus proaktiivisissa viesteissä: ON (ei enää raakoja Claude-kieltäytymisiä käyttäjälle)
-- Tutkimusviesti käyttää kevyttä persoonapromptia (ei eksplisiittistä sisältöä web-hakutyökalun kanssa)
 
 v8.3.14:
 - Proaktiivinen mustasukkaisuus/aktiviteetti-viesti: cooldown {PROACTIVE_JEALOUSY_COOLDOWN_HOURS}h, p={PROACTIVE_JEALOUSY_PROBABILITY}/kierros
-- Proaktiivinen tutkimusviesti (web-haku): cooldown {PROACTIVE_RESEARCH_COOLDOWN_HOURS}h, p={PROACTIVE_RESEARCH_PROBABILITY}/kierros
-- Testaus: /trigger_jealousy, /trigger_research
+- Testaus: /trigger_jealousy
 
 v8.3.10:
 - Semanttinen muistihaku: paikallinen embedding-malli (ei OpenAI:ta) Jaccard-fallbackin sijaan
@@ -3897,20 +3823,6 @@ async def cmd_trigger_jealousy(update: Update, context: ContextTypes.DEFAULT_TYP
             return
     await update.message.reply_text("⚠️ Ei lauennut (todennäköisesti submission/mode/aktiviteetti-cooldown esti). Tarkista /status.")
 
-async def cmd_trigger_research(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """v8.3.14: pakota tutkimusproaktiiviviesti heti (testausta varten)."""
-    user_id = update.effective_user.id
-    state = get_or_create_state(user_id)
-    state["last_proactive_research_at"] = 0
-    state["last_interaction"] = time.time() - (PROACTIVE_TEXT_MIN_HOURS_SINCE_LAST + 1) * 3600
-    await update.message.reply_text("🔎 Yritetään laukaista tutkimusviesti...")
-    before = state.get("last_proactive_research_at", 0)
-    for _ in range(8):  # ohittaa satunnaisuusportin (PROACTIVE_RESEARCH_PROBABILITY) testauksessa
-        await maybe_send_proactive_research_message(context.application, user_id)
-        if state.get("last_proactive_research_at", 0) != before:
-            return
-    await update.message.reply_text("⚠️ Ei lauennut (ei sopivaa profile_fact-aihetta tai haku epäonnistui).")
-
 async def cmd_scene(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
@@ -4071,10 +3983,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 v8.3.14 UUDET (proaktiiviset viestit):
 - Megan voi lähettää oma-aloitteisesti viestin ilmoittaen lähtevänsä jonnekin
   (baari, treffit...) - käynnistää oikean activityn ja hiljaisuuden ajaksi
-- Megan voi harvoin lähettää tutkimusviestin (oikea web-haku) käyttäjän
-  tunnetusta kiinnostuksen kohteesta
 /trigger_jealousy - Pakota mustasukkaisuus/aktiviteettiviesti heti (testaus)
-/trigger_research - Pakota tutkimusviesti heti (testaus)
 
 v8.3.8 UUDET (aikatietoisuus + hiljaisuus):
 - Megan on tietoinen viikonpäivästä/kellonajasta ja kuluneesta ajasta joka vuorolla
@@ -4154,7 +4063,6 @@ async def main():
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("trigger_jealousy", cmd_trigger_jealousy))
-    application.add_handler(CommandHandler("trigger_research", cmd_trigger_research))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
