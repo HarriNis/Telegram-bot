@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.3.14-proactive-messages
+Megan Telegram Bot - v8.3.15-character-break-safety
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -65,6 +65,30 @@ Muutokset v8.3.10 → v8.3.14:
   * Molemmat ajetaan check_proactive_triggers-taustasilmukassa, rajoitettu
     cooldown+todennäköisyys-vakioilla. /trigger_jealousy ja /trigger_research
     debug-komennot testaukseen.
+
+Muutokset v8.3.14 → v8.3.15 (KRIITTINEN TURVAKORJAUS):
+- Tuotannossa havaittiin että v8.3.14:n proaktiiviset funktiot
+  (maybe_send_proactive_jealousy_message, maybe_send_proactive_research_message)
+  lähettivät käyttäjälle RAAKOJA Claude-kieltäytymisiä ("I'm Claude, an AI
+  assistant made by Anthropic...") Meganin nimissä, koska ne eivät
+  tarkistaneet detect_character_break():ia ennen lähetystä - toisin kuin
+  generate_llm_reply(), joka on aina tehnyt tämän. call_llm() palauttaa
+  minkä tahansa ei-tyhjän Claude-vastauksen "onnistumisena" riippumatta
+  siitä onko se aito vastaus vai kieltäytyminen, joten automaattinen
+  Grok-fallback ei laukea kieltäytymistapauksessa.
+  * Molemmat funktiot tarkistavat nyt detect_character_break() ennen
+    lähetystä. Jos hahmo rikkoutuu, viestiä EI lähetetä (hiljainen ohitus,
+    yritetään uudelleen seuraavalla kierroksella/cooldownin jälkeen).
+  * maybe_send_proactive_jealousy_message(): character-breakin sattuessa
+    yritetään lisäksi suoraan Grok-uudelleenyritys ennen luovuttamista.
+  * build_light_persona_prompt(): UUSI, kevyt persoonaprompti (vain nimi/
+    puhetyyli, EI eksplisiittistä sisältöä, EI "kiellä olevasi tekoäly"
+    -ohjeistusta) - käytetään call_claude_with_web_search():ssa. Todettiin
+    että täyden ABSOLUTE ROLE LOCK -persoonapromptin lähettäminen yhdessä
+    oikean web-hakutyökalun kanssa laukaisi Claude-kieltäytymisiä paljon
+    herkemmin kuin pelkkä tekstikeskustelu - tutkimusviestit eivät
+    tarvinneet eksplisiittistä sisältöä alun perinkään (aiheet on jo
+    rajattu turvallisiksi pick_research_topic():ssa).
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -82,7 +106,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.3.14-proactive-messages"
+BOT_VERSION = "8.3.15-character-break-safety"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -2529,7 +2553,33 @@ Voit vihjata ettet ehkä vastaile heti. ÄLÄ selitä liikaa, ÄLÄ pahoittele, 
 
     message = await call_llm(system_prompt=persona_prompt, user_prompt=prompt,
                              max_tokens=150, temperature=TEMP_REPLY)
-    if not message:
+
+    # v8.3.15: KRIITTINEN TURVATARKISTUS. call_llm() palauttaa Claudelta minkä
+    # tahansa kelvollisen (ei-tyhjän) vastauksen "onnistumisena" - myös silloin
+    # kun Claude on TODELLISUUDESSA kieltäytynyt ja rikkonut hahmon (esim.
+    # "I'm Claude, an AI assistant made by Anthropic..."). Tällainen teksti EI
+    # heittänyt poikkeusta, joten call_llm():n sisäinen Grok-fallback ei
+    # laukea automaattisesti. Toisin kuin generate_llm_reply(), tämä funktio
+    # ei aiemmin tarkistanut tätä lainkaan - raaka kieltäytymisteksti meni
+    # suoraan käyttäjälle Meganin nimissä. Korjataan eksplisiittisellä
+    # detect_character_break()-tarkistuksella + Grok-uudelleenyrityksellä.
+    if message and detect_character_break(message):
+        print("[PROACTIVE JEALOUSY] Claude rikkoi hahmon - yritetään suoraan Grokilla.")
+        message = None
+        if grok_client:
+            try:
+                grok_response = await grok_client.chat.completions.create(
+                    model=GROK_MODEL,
+                    messages=[{"role": "system", "content": persona_prompt},
+                              {"role": "user", "content": prompt}],
+                    max_tokens=150, temperature=TEMP_REPLY_NSFW)
+                message = (grok_response.choices[0].message.content or "").strip()
+            except Exception as e:
+                print(f"[PROACTIVE JEALOUSY] Grok-uudelleenyritys epäonnistui: {e}")
+                message = None
+
+    if not message or detect_character_break(message):
+        print("[PROACTIVE JEALOUSY] Ei kelvollista viestiä (hahmo rikki) - ohitetaan tämä kierros, yritetään uudelleen myöhemmin.")
         return
 
     try:
@@ -2576,6 +2626,22 @@ def pick_research_topic(user_id: int):
                   if not any(p in (f.get("fact_key") or "").lower() for p in RESEARCH_EXCLUDED_KEY_PATTERNS)]
     return random.choice(candidates) if candidates else None
 
+def build_light_persona_prompt() -> str:
+    """
+    v8.3.15: Kevyt versio Meganin persoonasta - VAIN puhetyyli/nimi/sävy,
+    EI eksplisiittistä seksuaalista/nöyryytys-sisältöä eikä "kiellä olevasi
+    tekoäly" -ohjeistusta (build_core_persona_prompt():n ABSOLUTE ROLE LOCK
+    -lohko). Käytetään kutsuissa joissa on mukana oikea työkalu (web-haku):
+    täyden persoonapromptin lähettäminen yhdessä oikean työkalun kanssa
+    laukaisi Claudella toistuvasti täyden kieltäytymisen ja hahmon
+    rikkoutumisen (havaittiin tuotannossa v8.3.14:llä). Tutkimusviestit eivät
+    tarvitse eksplisiittistä sisältöä ollenkaan - aiheet on jo rajattu
+    turvallisiksi pick_research_topic():ssa.
+    """
+    return """Olet Megan, itsevarma ja hieman kiusoitteleva suomalainen nainen.
+Puhut rennosti ja puhekielisesti ("mä", "sä", "oot"), lyhyesti kuten Telegram-viestissä.
+Kirjoita luonnollisesti, älä listaa asioita, älä käytä muodollista kieltä."""
+
 async def call_claude_with_web_search(user_prompt: str, system_prompt: str = None, max_tokens: int = 600) -> str:
     """
     Claude-kutsu Anthropicin natiivilla web-hakutyökalulla. HUOM: jokainen
@@ -2583,6 +2649,9 @@ async def call_claude_with_web_search(user_prompt: str, system_prompt: str = Non
     säästeliäästi (vain tähän proaktiiviseen tutkimusviestiin, rajoitettu
     PROACTIVE_RESEARCH_PROBABILITY/COOLDOWN-vakioilla). Hakutyökalu noudattaa
     Anthropicin omia sisältörajoituksia - soveltuu vain yleiseen tiedonhakuun.
+    v8.3.15: system_prompt tälle kutsulle TÄYTYY olla kevyt (ks.
+    build_light_persona_prompt) - täysi ABSOLUTE ROLE LOCK -persoona
+    yhdistettynä oikeaan työkaluun laukaisee Claude-kieltäytymisiä.
     """
     claude = get_claude_client()
     if not claude:
@@ -2608,6 +2677,10 @@ async def maybe_send_proactive_research_message(application, user_id: int):
     v8.3.14: Megan ottaa oma-aloitteisesti selvää jostain käyttäjän tunnetusta
     kiinnostuksen kohteesta oikealla web-haulla, ja kertoo löydöstään
     luontevasti omalla äänellään. Rajoittuu yleisiin/turvallisiin aiheisiin.
+    v8.3.15: käyttää kevyttä persoonapromptia (ks. build_light_persona_prompt)
+    ja tarkistaa character-breakin ennen lähetystä - täysi persoonaprompti +
+    web-hakutyökalu yhdessä laukaisi Claude-kieltäytymisiä jotka menivät
+    aiemmin suodattamatta suoraan käyttäjälle.
     """
     state = get_or_create_state(user_id)
     now = time.time()
@@ -2627,7 +2700,7 @@ async def maybe_send_proactive_research_message(application, user_id: int):
     if not topic:
         return
 
-    persona_prompt = build_core_persona_prompt()
+    persona_prompt = build_light_persona_prompt()  # v8.3.15: EI build_core_persona_prompt()
     search_prompt = f"""Käyttäjästä tiedetään: {topic['fact_key']}: {topic['fact_value']}.
 Hae verkosta jotain ajankohtaista/kiinnostavaa tähän liittyen (esim. uutinen, tapahtuma,
 uutuus). Kirjoita sitten LYHYT (2-3 lausetta) suomenkielinen Telegram-viesti Meganin
@@ -2636,7 +2709,14 @@ joka raportoi hakutuloksia, olet Megan joka satuit näkemään jotain kiinnostav
 
     message = await call_claude_with_web_search(
         user_prompt=search_prompt, system_prompt=persona_prompt, max_tokens=400)
-    if not message:
+
+    # v8.3.15: KRIITTINEN TURVATARKISTUS - ks. sama kommentti
+    # maybe_send_proactive_jealousy_message():ssä. Web-haku ei tue Grok-
+    # fallbackia (Grokilla ei ole samaa natiivia hakutyökalua koodissamme),
+    # joten jos Claude rikkoo hahmon, ohitetaan koko viesti hiljaa sen sijaan
+    # että lähetettäisiin raaka kieltäytymisteksti käyttäjälle.
+    if not message or detect_character_break(message):
+        print("[PROACTIVE RESEARCH] Ei kelvollista viestiä (tyhjä tai hahmo rikki) - ohitetaan.")
         return
 
     try:
@@ -3640,6 +3720,10 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+
+v8.3.15:
+- Character-break-turvatarkistus proaktiivisissa viesteissä: ON (ei enää raakoja Claude-kieltäytymisiä käyttäjälle)
+- Tutkimusviesti käyttää kevyttä persoonapromptia (ei eksplisiittistä sisältöä web-hakutyökalun kanssa)
 
 v8.3.14:
 - Proaktiivinen mustasukkaisuus/aktiviteetti-viesti: cooldown {PROACTIVE_JEALOUSY_COOLDOWN_HOURS}h, p={PROACTIVE_JEALOUSY_PROBABILITY}/kierros
