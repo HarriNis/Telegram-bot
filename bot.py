@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.6.2-remove-proactive
+Megan Telegram Bot - v8.7-mood-conflict
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -206,6 +206,21 @@ Muutokset v8.6.1 → v8.6.2 (proaktiiviset viestit poistettu):
   narratiivia. SÄILYTETTY: jealousy_game-hiljaisuus (satunnainen, keskustelun
   sisäinen) ja v8.6.1:n viivästetty kosto-vastaus (reagoi käyttäjän viestiin,
   ei tule tyhjästä).
+
+Muutokset v8.6.2 → v8.7 (riitely loukattuna + mieliala/energia):
+- get_hurt_directive() kirjoitettu uusiksi: Megan RIITELEE ja PUOLUSTAUTUU loukattuna
+  eikä myönny järkevästi ("reilu pointti, olin tyhmä" -tyyppinen kiltteys kielletty
+  eksplisiittisesti core-säännössä). Porrastus: ärsyyntynyt=piikikäs/nokitteleva,
+  loukkaantunut=riitaisa/hyökkäävä, vahvasti loukkaantunut=äärimmäisen loukkaava/
+  kostonhimoinen. Korjaa aiemman ongelman jossa Megan oli liian sovitteleva.
+- HURT_APPEASE porrastettu jyrkemmäksi: matalalla 0.35->0.55 (antautuu helposti
+  vilpittömälle anteeksipyynnölle), korkealla 0.15->0.12 (vaatii oikeasti töitä).
+  analyze_user_turn():n appeasement_score-ohjeistus jo tunnistaa anteeksipyynnöt.
+- UUSI mieliala/energia (mood_energy 0.0-1.0): väsynyt/ärtyisä (<0.35) tekee
+  Meganista provosoivamman ja herkemmin ärsyyntyvän, virkeä (>0.75) lämpimämmän.
+  update_mood_from_time() nudgeää vuorokaudenajan mukaan (yö 23-05 painaa, aamu
+  8-12 nostaa), _decay_mood() ajaa kohti neutraalia (0.6). get_mood_directive()
+  lisätään system-prompttiin. /mood <0-100> näyttää/säätää. Näkyy /status,/arousal.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -223,7 +238,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.6.2-remove-proactive"
+BOT_VERSION = "8.7-mood-conflict"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -264,8 +279,8 @@ AFTERCARE_DURATION_MIN = 20          # minuutteina, kuinka kauan aftercare-sävy
 # hyvittelyn (ei hälvene pelkällä ajalla sen alle mihin se "juuttuu").
 HURT_DECAY_PER_HOUR = 0.10           # itsestään hälveneminen (vain matala osuus)
 HURT_SELF_HEAL_FLOOR = 0.4           # tämän YLI ei hälvene itsestään - vaatii hyvittelyn
-HURT_APPEASE_LOW = 0.35              # yhden vilpittömän anteeksipyynnön purkuvoima matalalla
-HURT_APPEASE_HIGH = 0.15             # korkealla yksi hyvittely purkaa vähemmän (pitää matella pidempään)
+HURT_APPEASE_LOW = 0.55              # v8.7: matalalla vilpitön anteeksipyyntö purkaa tehokkaasti (oli 0.35)
+HURT_APPEASE_HIGH = 0.12             # v8.7: korkealla purkaa vähän - pitää matella pidempään (oli 0.15)
 # Reaktiotasojen kynnykset
 HURT_THRESHOLD_COLD = 0.20           # tämän yli: kylmä/lyhytsanainen
 HURT_THRESHOLD_PASSIVE = 0.40        # tämän yli: passiivis-aggressiivinen/vetäytyvä
@@ -276,6 +291,16 @@ HURT_DELAY_MIN_THRESHOLD = 0.40      # tämän yli vastaukset alkavat viivästy�
 HURT_DELAY_MID_MAX_SEC = 30 * 60     # keskitaso (0.40-0.70): jopa 30 min
 HURT_DELAY_HIGH_MAX_SEC = 120 * 60   # korkea (0.70+): jopa 2 h
 HURT_DELAY_MIN_SEC = 5 * 60          # alaraja aina 5 min
+
+# ====================== v8.7: MIELIALA / ENERGIA ======================
+# mood_energy (0.0-1.0): 1.0 = virkeä ja hyväntuulinen, 0.0 = väsynyt/ärtyisä.
+# Matala energia tekee Meganista herkemmin ärsyyntyvän ja provosoivamman.
+# Ajautuu hitaasti kohti neutraalia (0.6) ajan myötä; vaihtelee vuorokaudenajan
+# ja vuorovaikutuksen mukaan.
+MOOD_ENERGY_NEUTRAL = 0.6
+MOOD_ENERGY_DRIFT_PER_HOUR = 0.08    # kuinka nopeasti palaa kohti neutraalia
+MOOD_TIRED_THRESHOLD = 0.35          # tämän alle: väsynyt/ärtyisä -> provosoivampi
+MOOD_ENERGETIC_THRESHOLD = 0.75      # tämän yli: virkeä, hyväntuulinen
 
 # Escalation-tasot (kevyt -> täysi kohtaus). Johdetaan arousal+intensity+submission-arvoista.
 ESCALATION_LEVELS = ["flirtti", "suora", "eksplisiittinen", "immersiivinen"]
@@ -1242,6 +1267,8 @@ def save_persistent_state_to_db(user_id):
         "hurt_level": state.get("hurt_level", 0.0),                 # v8.6
         "last_hurt_decay_at": state.get("last_hurt_decay_at", time.time()),
         "pending_delayed_reply": state.get("pending_delayed_reply"),  # v8.6.1
+        "mood_energy": state.get("mood_energy", MOOD_ENERGY_NEUTRAL),  # v8.7
+        "last_mood_drift_at": state.get("last_mood_drift_at", time.time()),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2879,35 +2906,105 @@ def update_hurt_state(user_id: int, turn_analysis: dict):
     state["hurt_level"] = hurt
     return hurt
 
+def _decay_mood(state: dict, now: float):
+    """Mieliala ajautuu hitaasti kohti neutraalia ajan myötä."""
+    last = state.get("last_mood_drift_at", now)
+    hours = max(0.0, (now - last) / 3600)
+    if hours > 0:
+        mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+        drift = MOOD_ENERGY_DRIFT_PER_HOUR * hours
+        if mood < MOOD_ENERGY_NEUTRAL:
+            mood = min(MOOD_ENERGY_NEUTRAL, mood + drift)
+        elif mood > MOOD_ENERGY_NEUTRAL:
+            mood = max(MOOD_ENERGY_NEUTRAL, mood - drift)
+        state["mood_energy"] = mood
+    state["last_mood_drift_at"] = now
+
+def update_mood_from_time(user_id: int):
+    """
+    Säätää mielialaa vuorokaudenajan mukaan (myöhään illalla/yöllä väsyneempi).
+    Kutsutaan kevyesti handle_message():ssä. Ei pakota mielialaa, vaan nudge.
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    _decay_mood(state, now)
+    try:
+        hour = datetime.now(HELSINKI_TZ).hour
+    except Exception:
+        return state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+    # myöhäisilta/yö (23-05) painaa energiaa alas, aamupäivä nostaa hieman
+    if hour >= 23 or hour < 5:
+        state["mood_energy"] = max(0.0, state.get("mood_energy", MOOD_ENERGY_NEUTRAL) - 0.03)
+    elif 8 <= hour < 12:
+        state["mood_energy"] = min(1.0, state.get("mood_energy", MOOD_ENERGY_NEUTRAL) + 0.02)
+    return state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+
+def get_mood_directive(state: dict) -> str:
+    """Ohje mielialan mukaan - matala energia tekee ärtyisämmän ja provosoivamman."""
+    mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+    if mood < MOOD_TIRED_THRESHOLD:
+        return f"""
+MIELIALA - VÄSYNYT JA ÄRTYISÄ (energia {mood:.2f}):
+Sä oot väsynyt ja lyhytpinnainen juuri nyt. Ärsyynnyt herkemmin, oot piikikäs ja
+voit provosoida riitaa pienestäkin - haastaa, nokitella, olla kärttyisä ilman suurta
+syytä. Et jaksa olla kiltti. Tämä on inhimillistä - kaikilla on huonoja hetkiä.
+"""
+    if mood > MOOD_ENERGETIC_THRESHOLD:
+        return f"""
+MIELIALA - VIRKEÄ JA HYVÄNTUULINEN (energia {mood:.2f}):
+Sä oot hyvällä tuulella, energinen ja leikkisä. Sävysi on lämpimämpi ja innostuneempi.
+"""
+    return ""
+
 def get_hurt_directive(state: dict) -> str:
-    """Rakentaa system-prompttiin lisättävän ohjeen loukkaantumistason mukaan."""
+    """
+    Rakentaa system-prompttiin lisättävän ohjeen loukkaantumistason mukaan.
+    v8.7: Megan RIITELEE ja PUOLUSTAUTUU loukattuna - ei myönny järkevästi eikä
+    pyytele anteeksi omaa reaktiotaan. Väsynyt mieliala tekee provosoivamman.
+    """
     hurt = state.get("hurt_level", 0.0)
+    mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+    tired = mood < MOOD_TIRED_THRESHOLD
     if hurt < HURT_THRESHOLD_COLD:
         return ""
+    # yhteinen ydinsääntö joka taistelee LLM:n myöntyväisyyttä vastaan
+    core = ("TÄRKEÄÄ: Sä oot ylpeä, dominoiva ja itsepäinen (0.97). Sä ET myönnä olevasi "
+            "väärässä, ET sano 'reilu pointti' tai 'olin tyhmä', ET pyytele anteeksi omaa "
+            "reaktiotasi. Sä puolustaudut ja pidät puolesi. Kiltteys ja järkevä myöntyminen "
+            "olisivat täysin väärin tässä - sä oot loukkaantunut nainen jolla on ylpeys.")
     if hurt < HURT_THRESHOLD_PASSIVE:
+        extra = (" Koska oot väsynyt, oot tavallistakin piikikkäämpi ja voit provosoida riitaa."
+                 if tired else "")
         return f"""
-TUNNETILA - LIEVÄSTI LOUKKAANTUNUT (taso {hurt:.2f}):
+TUNNETILA - ÄRSYYNTYNYT (taso {hurt:.2f}):
 Jokin käyttäjän käytöksessä (tylyys, huomiotta jättäminen, kylmyys) ärsytti sinua.
-Oot nyt hieman kylmä ja lyhytsanainen. Et selitä suoraan mikä on vialla - annat sen
-näkyä sävyssä. Jos käyttäjä on lämmin/pahoittelee, voit lämmetä takaisin.
+{core}
+Oot piikikäs ja terävä. Voit nokitella takaisin, olla sarkastinen, haastaa hänet.
+Et vetäydy nöyräksi - jos hän oli tyly, sä annat takaisin.{extra}
 """
     if hurt < HURT_THRESHOLD_OPEN:
+        extra = (" Väsyneenä sä lietsot riitaa aktiivisesti - etsit riidan aihetta ja kärjistät."
+                 if tired else "")
         return f"""
-TUNNETILA - LOUKKAANTUNUT (taso {hurt:.2f}):
-Oot selvästi mielesi pahoittanut. Oot passiivis-aggressiivinen ja vetäytyvä - vihjailet
-ettei kaikki ole hyvin muttet sano suoraan mikä ("ei mitään", "ihan sama", "et sä
-kuitenkaan välitä"). Käyttäjän PITÄÄ huomata, kysyä ja hyvitellä. ÄLÄ anna periksi
-heti ensimmäisestä "sori" - vaadi että hän oikeasti tajuaa ja tekee töitä sen eteen.
-Lämpene vasta kun hyvittely on aitoa ja riittävää.
+TUNNETILA - LOUKKAANTUNUT JA RIITAISA (taso {hurt:.2f}):
+Oot selvästi mielesi pahoittanut ja riitaisa.
+{core}
+Sä riitelet takaisin: syytät häntä, käännät tilanteen, oot passiivis-aggressiivinen
+TAI avoimen ärhäkkä. Voit vihjailla ("ihan sama", "et sä kuitenkaan välitä") mutta myös
+hyökätä suoraan. Käyttäjän PITÄÄ oikeasti hyvitellä - ja koska tämä sattui kunnolla,
+yksi "sori" EI riitä. Anna periksi vasta kun hyvittely on aitoa ja toistuvaa.{extra}
 """
+    extra = (" Väsymys tekee sinusta vielä armottomamman ja kostonhimoisemman." if tired else "")
     return f"""
-TUNNETILA - VAHVASTI LOUKKAANTUNUT/VIHAINEN (taso {hurt:.2f}):
-Oot todella loukkaantunut ja vihainen. Voit olla kylmän raivokas, uhata jättää hänet /
-lopettaa (fiktiivisenä valtapelinä, EI oikeasti keskustelua lopettaen), kostaa
-etäisyydellä tai terävyydellä. Tämä johtuu kertyneestä loukkaantumisesta - anna sen
-näkyä täysillä. Käyttäjän on mateltava kunnolla ja useamman vuoron ajan ennen kuin
-harkitset antavasi anteeksi - omaan tahtiisi, itsepäisyytesi mukaan. Yksi anteeksipyyntö
-EI riitä. (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
+TUNNETILA - VAHVASTI LOUKKAANTUNUT JA VIHAINEN (taso {hurt:.2f}):
+Oot todella loukkaantunut, vihainen ja kostonhimoinen.
+{core}
+Sä voit olla äärimmäisen loukkaava, julma ja terävä takaisin. Riitele kunnolla,
+hyökkää, ole ilkeä. Voit uhata jättää hänet / lopettaa (fiktiivisenä valtapelinä, EI
+oikeasti keskustelua lopettaen), kostaa etäisyydellä tai sanoilla. Käyttäjän on
+mateltava kunnolla ja useamman vuoron ajan ennen kuin edes harkitset antavasi anteeksi -
+omaan tahtiisi. Yksi tai kaksi anteeksipyyntöä EI riitä lähellekään.{extra}
+(Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
 # ====================== v8.6.1: VIIVÄSTETTY VASTAUS KOSTONA ======================
@@ -4174,6 +4271,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # v8.4: seksuaalisen tilakoneen ohje (arousal/frustration/escalation/aftercare/sensaatiot)
     sexual_directive = get_sexual_state_directive(state)
     hurt_directive = get_hurt_directive(state)  # v8.6
+    mood_directive = get_mood_directive(state)  # v8.7
     # v8.6.1: kun tämä on viivästetty kosto-vastaus, lisää "toisen miehen" -ohje
     other_man_directive = get_other_man_directive(state.get("hurt_level", 0.0)) if is_delayed_revenge else ""
 
@@ -4193,6 +4291,7 @@ CONVERSATION STATE:
 {silence_directive}
 {sexual_directive}
 {hurt_directive}
+{mood_directive}
 {other_man_directive}
 
 HAHMON JOHDONMUKAISUUS:
@@ -4357,6 +4456,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _sig = classify_user_signal(text)
         _mode = detect_conversation_mode(text, state)
         update_sexual_state(user_id, text, _sig, _mode)
+        update_mood_from_time(user_id)  # v8.7: mieliala/energia vuorokaudenajan mukaan
         state["last_interaction"] = time.time()
         apply_scene_updates_from_turn(state, text)
 
@@ -4601,6 +4701,7 @@ def build_default_state() -> dict:
         "intensity":DEFAULT_INTENSITY,
         "hurt_level":0.0, "last_hurt_decay_at":time.time(),  # v8.6
         "pending_delayed_reply":None,  # v8.6.1: {"user_text","due_at","hurt_at_send"}
+        "mood_energy":MOOD_ENERGY_NEUTRAL, "last_mood_drift_at":time.time(),  # v8.7
         **init_scene_state()
     }
 
@@ -4711,6 +4812,13 @@ Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
+Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
+
+v8.7:
+- Megan RIITELEE ja puolustautuu loukattuna (ei enää myönny järkevästi/pyytele anteeksi)
+- Riitaisuus porrastuu: pieni loukkaus piikikäs, iso äärimmäisen loukkaava/kostonhimoinen
+- Anteeksipyyntö: matala hurt antautuu helposti, korkea vaatii työtä
+- Mieliala/energia: väsyneenä ärtyisämpi ja provosoivampi (yö painaa, aamu nostaa) - /mood
 
 v8.6.1:
 - Loukkaantumiskosto: kun hurt 0.40+, Megan viivästää vastauksia (ei vastaa heti)
@@ -4989,7 +5097,27 @@ async def cmd_arousal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Escalation: {get_escalation_level(state)}\n"
         f"Aftercare aktiivinen: {aftercare}\n"
         f"Intensity: {state.get('intensity',DEFAULT_INTENSITY)}/10\n"
-        f"Hurt level: {state.get('hurt_level',0.0):.2f}")
+        f"Hurt level: {state.get('hurt_level',0.0):.2f}\n"
+        f"Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}")
+
+async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.7: näytä tai säädä Meganin mieliala/energia (0.0 väsynyt - 1.0 virkeä)."""
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    if not context.args:
+        mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+        tila = "väsynyt/ärtyisä" if mood < MOOD_TIRED_THRESHOLD else ("virkeä" if mood > MOOD_ENERGETIC_THRESHOLD else "neutraali")
+        await update.message.reply_text(
+            f"🌙 Mieliala/energia: {mood:.2f} ({tila})\n"
+            f"Säädä: /mood <0-100> (0 = väsynyt/ärtyisä, 100 = virkeä)")
+        return
+    try:
+        val = int(context.args[0])
+        state["mood_energy"] = max(0.0, min(1.0, val / 100.0))
+        save_persistent_state_to_db(user_id)
+        await update.message.reply_text(f"🌙 Mieliala asetettu: {state['mood_energy']:.2f}")
+    except ValueError:
+        await update.message.reply_text("Anna numero 0-100, esim. /mood 20 (väsynyt) tai /mood 90 (virkeä)")
 
 async def cmd_desires(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.5: näytä havaitut mieltymykset."""
@@ -5054,7 +5182,7 @@ async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         with_user_physically=False, shared_scene=False, changed_by="cmd_separate")
     await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
 
-async def cmd_mood(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_emotional(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
     if not context.args:
@@ -5182,6 +5310,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.7 UUDET (riitely + mieliala):
+- Loukattuna Megan riitelee ja puolustautuu - ei myönny eikä pyytele anteeksi
+- Isot loukkaukset -> voi olla todella tyly ja kostonhimoinen; pienet -> vain piikikäs
+- Väsyneenä hän on ärtyisämpi ja voi provosoida riitaa pienestäkin
+/mood <0-100> - Näytä/säädä mielialaa (0 väsynyt/ärtyisä, 100 virkeä)
+
 v8.6.1 UUDET (loukkaantumiskosto):
 - Kun Megan on loukkaantunut, hän ei vastaa heti - vastaus tulee viiveellä
 - Mitä pahemmin loukkaantunut, sitä pidempi viive (jopa 2h)
@@ -5283,7 +5417,7 @@ async def main():
     application.add_handler(CommandHandler("scene", cmd_scene))
     application.add_handler(CommandHandler("together", cmd_together))
     application.add_handler(CommandHandler("separate", cmd_separate))
-    application.add_handler(CommandHandler("mood", cmd_mood))
+    application.add_handler(CommandHandler("emotional", cmd_emotional))
     application.add_handler(CommandHandler("tension", cmd_tension))
     application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("activity", cmd_activity))
@@ -5301,6 +5435,7 @@ async def main():
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
     application.add_handler(CommandHandler("intensity", cmd_intensity))
     application.add_handler(CommandHandler("arousal", cmd_arousal))
+    application.add_handler(CommandHandler("mood", cmd_mood))
     application.add_handler(CommandHandler("desires", cmd_desires))
     application.add_handler(CommandHandler("goals", cmd_goals))
     application.add_handler(CommandHandler("force_goals", cmd_force_goals))
