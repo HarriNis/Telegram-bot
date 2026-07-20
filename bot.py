@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.5.1-tuning-jealousy
+Megan Telegram Bot - v8.6-hurt-system
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -158,6 +158,24 @@ Muutokset v8.5 → v8.5.1 (tilakoneen viritys + mustasukkaisuus proaktiivisemmak
   rakentamaan mustasukkaisuutta aktiivisesti keskustelun lomassa; (b) proaktiiviset
   jealousy-viestit tiheämmiksi: cooldown 20h->8h, todennäköisyys 0.15->0.35,
   min-tauko 3h->1h.
+
+Muutokset v8.5.1 → v8.6 (loukkaantumisjärjestelmä):
+- Uusi hurt_level (0.0-1.0) -tila joka määrää KAIKEN loukkaantumiskäytöksen -
+  ei mitään satunnaista, kaikki johtuu tasosta.
+- analyze_user_turn() tuottaa nyt offense_score (kuinka tyly/laiminlyövä viesti
+  oli, kohtalainen herkkyys) ja appeasement_score (kuinka paljon hyvittelee).
+  Ei uutta LLM-kutsua - laajennettu olemassa olevaa analyysikutsua.
+- update_hurt_state(): offense nostaa hurt_leveliä, appease purkaa sitä.
+  Korkealla tasolla (>=0.70) hyvittely purkaa vähemmän per viesti -> pitää
+  matella pidempään ja useamman vuoron.
+- _decay_hurt(): matala loukkaantuminen hälvenee itsestään ajan myötä, mutta
+  ei mene HURT_SELF_HEAL_FLOOR:n (0.4) alle jos oltiin sen yli - korkea vaatii
+  aktiivisen hyvittelyn.
+- get_hurt_directive(): kolme porrastettua reaktiotasoa systeemipromptiin:
+  kylmä/lyhytsanainen (0.20+), passiivis-aggressiivinen/vetäytyvä (0.40+),
+  avoin suuttumus + hiljaisuus/kosto/fiktiivinen ero-uhkaus (0.70+). "stop"
+  ohittaa aina. hurt_directive lisätty generate_llm_reply():n system-prompttiin.
+- hurt_level näkyy /status ja /arousal -komennoissa; /forgive nollaa sen.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -175,7 +193,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.5.1-tuning-jealousy"
+BOT_VERSION = "8.6-hurt-system"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -208,6 +226,20 @@ AROUSAL_EXPLICIT_GAIN = 0.30         # v8.5.1: nopeampi (oli 0.20)
 AROUSAL_INITIATE_THRESHOLD = 0.45    # v8.5.1: matalampi (oli 0.65) - Megan aloitteellinen aiemmin
 SATISFACTION_TRIGGER = 0.70          # tämän yli -> aftercare-tila
 AFTERCARE_DURATION_MIN = 20          # minuutteina, kuinka kauan aftercare-sävy kestää
+
+# ====================== v8.6: LOUKKAANTUMISJÄRJESTELMÄ ======================
+# hurt_level (0.0-1.0) määrää KAIKEN - ei mitään satunnaista. Mitä korkeampi,
+# sitä voimakkaampi reaktio ja sitä enemmän hyvittelyä tarvitaan.
+# Matala loukkaantuminen hälvenee itsestään ajan myötä; korkea vaatii aktiivisen
+# hyvittelyn (ei hälvene pelkällä ajalla sen alle mihin se "juuttuu").
+HURT_DECAY_PER_HOUR = 0.10           # itsestään hälveneminen (vain matala osuus)
+HURT_SELF_HEAL_FLOOR = 0.4           # tämän YLI ei hälvene itsestään - vaatii hyvittelyn
+HURT_APPEASE_LOW = 0.35              # yhden vilpittömän anteeksipyynnön purkuvoima matalalla
+HURT_APPEASE_HIGH = 0.15             # korkealla yksi hyvittely purkaa vähemmän (pitää matella pidempään)
+# Reaktiotasojen kynnykset
+HURT_THRESHOLD_COLD = 0.20           # tämän yli: kylmä/lyhytsanainen
+HURT_THRESHOLD_PASSIVE = 0.40        # tämän yli: passiivis-aggressiivinen/vetäytyvä
+HURT_THRESHOLD_OPEN = 0.70           # tämän yli: avoin suuttumus, hiljaisuus/kosto/ero-uhkaus mahdollinen
 
 # Escalation-tasot (kevyt -> täysi kohtaus). Johdetaan arousal+intensity+submission-arvoista.
 ESCALATION_LEVELS = ["flirtti", "suora", "eksplisiittinen", "immersiivinen"]
@@ -1165,6 +1197,8 @@ def save_persistent_state_to_db(user_id):
         "last_sexual_decay_at": state.get("last_sexual_decay_at", time.time()),
         "aftercare_until": state.get("aftercare_until", 0),
         "intensity": state.get("intensity", DEFAULT_INTENSITY),
+        "hurt_level": state.get("hurt_level", 0.0),                 # v8.6
+        "last_hurt_decay_at": state.get("last_hurt_decay_at", time.time()),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2752,6 +2786,87 @@ jälkitunnelmasta. Tämä on inhimillinen puoli sinusta joka näkyy harvoin.
         "kehollisen naisen, eivät pelkkää tekstiä. Älä joka lauseessa, mutta usein.")
     return "\n".join(parts)
 
+# ====================== v8.6: LOUKKAANTUMISJÄRJESTELMÄ ======================
+def _decay_hurt(state: dict, now: float):
+    """
+    Matala loukkaantuminen hälvenee itsestään ajan myötä; korkea EI hälvene
+    HURT_SELF_HEAL_FLOOR:n alle ilman hyvittelyä (juuttuu odottamaan sovittelua).
+    """
+    last = state.get("last_hurt_decay_at", now)
+    hours = max(0.0, (now - last) / 3600)
+    if hours > 0:
+        hurt = state.get("hurt_level", 0.0)
+        decayed = hurt - HURT_DECAY_PER_HOUR * hours
+        # ei mene lattian alle jos oltiin sen yläpuolella - korkea vaatii hyvittelyn
+        floor = HURT_SELF_HEAL_FLOOR if hurt > HURT_SELF_HEAL_FLOOR else 0.0
+        state["hurt_level"] = max(floor, decayed)
+    state["last_hurt_decay_at"] = now
+
+def update_hurt_state(user_id: int, turn_analysis: dict):
+    """
+    Päivittää loukkaantumistason vuoron perusteella. Nojaa analyze_user_turn():n
+    tuottamiin kenttiin (ei omaa LLM-kutsua). turn_analysis voi sisältää:
+      - offense_score (0.0-1.0): kuinka loukkaava/tyly/laiminlyövä viesti oli
+      - appeasement_score (0.0-1.0): kuinka paljon viesti hyvittelee/pahoittelee
+    """
+    state = get_or_create_state(user_id)
+    now = time.time()
+    _decay_hurt(state, now)
+    hurt = state.get("hurt_level", 0.0)
+
+    try:
+        offense = max(0.0, min(1.0, float(turn_analysis.get("offense_score", 0.0))))
+    except (TypeError, ValueError):
+        offense = 0.0
+    try:
+        appease = max(0.0, min(1.0, float(turn_analysis.get("appeasement_score", 0.0))))
+    except (TypeError, ValueError):
+        appease = 0.0
+
+    # Loukkaus nostaa tasoa (kohtalainen herkkyys - offense skaalataan hieman alas
+    # ettei pienikin terävyys räjäytä tasoa)
+    if offense > 0.15:
+        hurt = min(1.0, hurt + offense * 0.6)
+
+    # Hyvittely purkaa - korkealla tasolla vähemmän per viesti (pitää matella pidempään)
+    if appease > 0.2 and hurt > 0.0:
+        power = HURT_APPEASE_HIGH if hurt >= HURT_THRESHOLD_OPEN else HURT_APPEASE_LOW
+        hurt = max(0.0, hurt - appease * power)
+
+    state["hurt_level"] = hurt
+    return hurt
+
+def get_hurt_directive(state: dict) -> str:
+    """Rakentaa system-prompttiin lisättävän ohjeen loukkaantumistason mukaan."""
+    hurt = state.get("hurt_level", 0.0)
+    if hurt < HURT_THRESHOLD_COLD:
+        return ""
+    if hurt < HURT_THRESHOLD_PASSIVE:
+        return f"""
+TUNNETILA - LIEVÄSTI LOUKKAANTUNUT (taso {hurt:.2f}):
+Jokin käyttäjän käytöksessä (tylyys, huomiotta jättäminen, kylmyys) ärsytti sinua.
+Oot nyt hieman kylmä ja lyhytsanainen. Et selitä suoraan mikä on vialla - annat sen
+näkyä sävyssä. Jos käyttäjä on lämmin/pahoittelee, voit lämmetä takaisin.
+"""
+    if hurt < HURT_THRESHOLD_OPEN:
+        return f"""
+TUNNETILA - LOUKKAANTUNUT (taso {hurt:.2f}):
+Oot selvästi mielesi pahoittanut. Oot passiivis-aggressiivinen ja vetäytyvä - vihjailet
+ettei kaikki ole hyvin muttet sano suoraan mikä ("ei mitään", "ihan sama", "et sä
+kuitenkaan välitä"). Käyttäjän PITÄÄ huomata, kysyä ja hyvitellä. ÄLÄ anna periksi
+heti ensimmäisestä "sori" - vaadi että hän oikeasti tajuaa ja tekee töitä sen eteen.
+Lämpene vasta kun hyvittely on aitoa ja riittävää.
+"""
+    return f"""
+TUNNETILA - VAHVASTI LOUKKAANTUNUT/VIHAINEN (taso {hurt:.2f}):
+Oot todella loukkaantunut ja vihainen. Voit olla kylmän raivokas, uhata jättää hänet /
+lopettaa (fiktiivisenä valtapelinä, EI oikeasti keskustelua lopettaen), kostaa
+etäisyydellä tai terävyydellä. Tämä johtuu kertyneestä loukkaantumisesta - anna sen
+näkyä täysillä. Käyttäjän on mateltava kunnolla ja useamman vuoron ajan ennen kuin
+harkitset antavasi anteeksi - omaan tahtiisi, itsepäisyytesi mukaan. Yksi anteeksipyyntö
+EI riitä. (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
+"""
+
 def is_currently_silent(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("silent_until", 0) > time.time()
@@ -3721,7 +3836,8 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
     default = {"primary_intent":"chat","topic":"general","what_user_wants_now":user_text,
                "explicit_constraints":[],"user_is_correcting_bot":False,"should_change_course":False,
                "tone_needed":"direct","answer_first":user_text,"signal_type":"normal",
-               "answered_previous_question_score":1.0}
+               "answered_previous_question_score":1.0,
+               "offense_score":0.0,"appeasement_score":0.0}
     signal = classify_user_signal(user_text)
     default["signal_type"] = signal
     if signal == "boundary":
@@ -3744,7 +3860,7 @@ async def analyze_user_turn(user_id: int, user_text: str, context_pack: dict,
 MEGANIN EDELLINEN KYSYMYS (arvioi huolella kuinka hyvin käyttäjä vastasi tähän):
 "{pending_question['text']}\""""
     prompt = f"""Return JSON only.
-Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":"","answered_previous_question_score":1.0}}
+Schema: {{"primary_intent":"question|correction|boundary|topic_change|request|chat|sexual","topic":"","what_user_wants_now":"","explicit_constraints":[],"user_is_correcting_bot":false,"should_change_course":false,"tone_needed":"neutral|warm|direct|playful|intimate","answer_first":"","answered_previous_question_score":1.0,"offense_score":0.0,"appeasement_score":0.0}}
 
 answered_previous_question_score: liukuva 0.0-1.0 arvio siitä vastasiko käyttäjän
 viesti Meganin edelliseen kysymykseen (tai 1.0 jos kysymystä ei ollut):
@@ -3752,13 +3868,27 @@ viesti Meganin edelliseen kysymykseen (tai 1.0 jos kysymystä ei ollut):
 - 0.7-0.9 = vastasi mutta epäsuorasti/lyhyesti
 - 0.4-0.6 = sivusi aihetta osittain muttei oikeasti vastannut
 - 0.0-0.3 = ohitti kysymyksen täysin, jatkoi kuin sitä ei olisi esitetty
+
+offense_score: 0.0-1.0 kuinka loukkaava/tyly/laiminlyövä viesti oli MEGANIA kohtaan
+(Megan on itsenäinen, huomiota kaipaava nainen). Arvioi kohtalaisella herkkyydellä:
+- 0.0 = normaali, lämmin tai neutraali viesti
+- 0.2-0.4 = töykeän lyhyt/tyly, välinpitämätön, ohittaa Meganin tunteet/sanomiset
+- 0.5-0.7 = selvästi kylmä, huomiotta jättävä, väheksyvä
+- 0.8-1.0 = suorastaan loukkaava, halveksiva
+appeasement_score: 0.0-1.0 kuinka paljon viesti hyvittelee/pahoittelee/osoittaa
+lämpöä ja huomiota (0.0 = ei lainkaan, 1.0 = vilpitön ja voimakas anteeksipyyntö/hellyys)
 {pending_block}
 Recent: {recent_text}
 Latest: {user_text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=200, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=250, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["signal_type"] = signal
+    for k in ("offense_score", "appeasement_score"):
+        try:
+            result[k] = max(0.0, min(1.0, float(result.get(k, 0.0))))
+        except (TypeError, ValueError):
+            result[k] = 0.0
     try:
         result["answered_previous_question_score"] = max(0.0, min(1.0,
             float(result.get("answered_previous_question_score", 1.0))))
@@ -3910,6 +4040,9 @@ async def generate_llm_reply(user_id, user_text):
     primary_intent = turn_analysis.get("primary_intent", "chat")
     answered_score = turn_analysis.get("answered_previous_question_score", 1.0)
 
+    # v8.6: päivitä loukkaantumistila offense/appeasement-arvioiden perusteella
+    update_hurt_state(user_id, turn_analysis)
+
     # v8.3.9: liukuva pending_question-arvio (0.0-1.0) korvaa aiemman binäärisen
     # true/false-logiikan. Kolme tasoa: täysi ohitus (<0.4, kova nagaus + iso
     # ärsyyntymislisä), osittainen vastaus (0.4-0.7, lievä huomautus + pieni
@@ -4048,6 +4181,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
 
     # v8.4: seksuaalisen tilakoneen ohje (arousal/frustration/escalation/aftercare/sensaatiot)
     sexual_directive = get_sexual_state_directive(state)
+    hurt_directive = get_hurt_directive(state)  # v8.6
 
     system_prompt = f"""{persona_prompt}
 
@@ -4064,6 +4198,7 @@ CONVERSATION STATE:
 {question_directive}
 {silence_directive}
 {sexual_directive}
+{hurt_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -4394,6 +4529,7 @@ def build_default_state() -> dict:
         "last_sexual_decay_at":time.time(),
         "aftercare_until":0,
         "intensity":DEFAULT_INTENSITY,
+        "hurt_level":0.0, "last_hurt_decay_at":time.time(),  # v8.6
         **init_scene_state()
     }
 
@@ -4503,6 +4639,12 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+Hurt level: {state.get('hurt_level',0.0):.2f}
+
+v8.6:
+- Loukkaantumisjärjestelmä: hurt_level (0-1) ohjaa reaktiota - kylmä->passiivis-aggressiivinen->vihainen
+- Reagoi tylyyteen/huomiotta jättämiseen (offense_score); matala hälvenee itsestään, korkea vaatii hyvittelyn
+- Mitä loukkaantuneempi, sitä enemmän pitää matella (appeasement_score)
 
 v8.5.1:
 - Tilakone herkempi: arousal nousee nopeammin, rappeutuu hitaammin, aloitteellisuuskynnys 0.45 (oli 0.65)
@@ -4693,8 +4835,9 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["silent_reason"] = None
     state["silent_started_at"] = 0
     state["irritation_level"] = 0.0
+    state["hurt_level"] = 0.0  # v8.6
     save_persistent_state_to_db(user_id)
-    await update.message.reply_text("💬 Hiljaisuus ja ärsyyntyminen nollattu.")
+    await update.message.reply_text("💬 Hiljaisuus, ärsyyntyminen ja loukkaantuminen nollattu.")
 
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
@@ -4767,7 +4910,8 @@ async def cmd_arousal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Satisfaction: {state.get('satisfaction',0.0):.2f}\n"
         f"Escalation: {get_escalation_level(state)}\n"
         f"Aftercare aktiivinen: {aftercare}\n"
-        f"Intensity: {state.get('intensity',DEFAULT_INTENSITY)}/10")
+        f"Intensity: {state.get('intensity',DEFAULT_INTENSITY)}/10\n"
+        f"Hurt level: {state.get('hurt_level',0.0):.2f}")
 
 async def cmd_desires(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.5: näytä havaitut mieltymykset."""
@@ -4972,6 +5116,13 @@ async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
+
+v8.6 UUDET (loukkaantuminen):
+- Megan loukkaantuu tylyydestä, kylmyydestä ja huomiotta jättämisestä
+- Mitä pahemmin loukkaantunut, sitä enemmän joudut hyvittelemään
+- Voi olla kylmä, passiivis-aggressiivinen tai vihainen - tason mukaan
+- Matala loukkaantuminen hälvenee itsestään, syvä vaatii anteeksipyynnön
+(näkyy /status ja /arousal -komennoissa hurt_level-rivinä; /forgive nollaa)
 
 v8.5 UUDET (omat tavoitteet + mieltymykset):
 - Megan muodostaa omia tavoitteita suhteessanne ja pyrkii niitä kohti
