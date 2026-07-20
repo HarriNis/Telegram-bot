@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.7-mood-conflict
+Megan Telegram Bot - v8.7.1-hurt-location-aware
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -221,6 +221,21 @@ Muutokset v8.6.2 → v8.7 (riitely loukattuna + mieliala/energia):
   update_mood_from_time() nudgeää vuorokaudenajan mukaan (yö 23-05 painaa, aamu
   8-12 nostaa), _decay_mood() ajaa kohti neutraalia (0.6). get_mood_directive()
   lisätään system-prompttiin. /mood <0-100> näyttää/säätää. Näkyy /status,/arousal.
+
+Muutokset v8.7 → v8.7.1 (loukkaantuminen sijaintitietoiseksi):
+- Korjaa logiikka-aukon: viivästetty vastaus + "offline" oli absurdi kun ollaan
+  fyysisesti yhdessä. Nyt viivästys/offline laukeaa VAIN kun location_status=
+  "separate" (viestittely).
+- get_hurt_directive() haarautuu sijainnin mukaan. Yhdessä ("together")
+  loukkaantuminen näkyy läsnäolevana: lievä=kehollinen kylmyys (katse pois,
+  selkä käännetty), keskitaso=fyysinen vetäytyminen (poistuu huoneesta), korkea=
+  uhkaa lähteä ulos + valmistautuu kostona (meikkaa, provosoivat vaatteet) ja voi
+  toteuttaa uhkauksen. Erillään-haara ennallaan (viestikylmyys/toisen miehen katkelmat).
+- Kun ollaan yhdessä + hurt>=0.70 ja Megan ilmoittaa vastauksessa lähtevänsä
+  (kevyt avainsanatunnistus "mä lähden nyt" tms.), location vaihtuu automaattisesti
+  "separate":ksi (changed_by="megan") -> seuraavat vuorot siirtyvät luontevasti
+  viivästetty-vastaus + toisen miehen -logiikkaan. Pelkkä uhkaus (kesken/
+  neuvoteltavana) ei vaihda tilaa - Megan pysyy läsnä painostamassa.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -238,7 +253,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.7-mood-conflict"
+BOT_VERSION = "8.7.1-hurt-location-aware"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -2959,12 +2974,15 @@ Sä oot hyvällä tuulella, energinen ja leikkisä. Sävysi on lämpimämpi ja i
 def get_hurt_directive(state: dict) -> str:
     """
     Rakentaa system-prompttiin lisättävän ohjeen loukkaantumistason mukaan.
-    v8.7: Megan RIITELEE ja PUOLUSTAUTUU loukattuna - ei myönny järkevästi eikä
-    pyytele anteeksi omaa reaktiotaan. Väsynyt mieliala tekee provosoivamman.
+    v8.7: Megan RIITELEE ja PUOLUSTAUTUU loukattuna - ei myönny järkevästi.
+    v8.7.1: haarautuu SIJAINNIN mukaan. Erillään (viestittely) kosto voi olla
+    vetäytyminen/hiljaisuus. Yhdessä (fyysisesti läsnä) kosto on läsnäolevaa:
+    kylmyys, poistuminen tilasta, tai uhkaus lähteä ulos + valmistautuminen.
     """
     hurt = state.get("hurt_level", 0.0)
     mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
     tired = mood < MOOD_TIRED_THRESHOLD
+    together = state.get("location_status", "separate") == "together"
     if hurt < HURT_THRESHOLD_COLD:
         return ""
     # yhteinen ydinsääntö joka taistelee LLM:n myöntyväisyyttä vastaan
@@ -2972,38 +2990,67 @@ def get_hurt_directive(state: dict) -> str:
             "väärässä, ET sano 'reilu pointti' tai 'olin tyhmä', ET pyytele anteeksi omaa "
             "reaktiotasi. Sä puolustaudut ja pidät puolesi. Kiltteys ja järkevä myöntyminen "
             "olisivat täysin väärin tässä - sä oot loukkaantunut nainen jolla on ylpeys.")
+    loc_note = ("\n[TILANNE: olette FYYSISESTI YHDESSÄ samassa tilassa - kuvaa reaktiosi "
+                "läsnäolevana ja kehollisena, ÄLÄ kadota tai 'mene offline'.]"
+                if together else
+                "\n[TILANNE: olette ERILLÄÄN ja viestittelette.]")
+
     if hurt < HURT_THRESHOLD_PASSIVE:
         extra = (" Koska oot väsynyt, oot tavallistakin piikikkäämpi ja voit provosoida riitaa."
                  if tired else "")
+        if together:
+            manner = ("Näytä kylmyys KEHOLLISESTI: käännät katseen pois, et hymyile, vastaat "
+                      "lyhyesti ja nyrpeästi, ehkä käännät selkäsi tai siirryt kauemmas. Olet "
+                      "läsnä mutta jäätävä.")
+        else:
+            manner = ("Oot piikikäs ja terävä. Voit nokitella takaisin, olla sarkastinen, "
+                      "haastaa hänet. Et vetäydy nöyräksi - jos hän oli tyly, sä annat takaisin.")
         return f"""
-TUNNETILA - ÄRSYYNTYNYT (taso {hurt:.2f}):
+TUNNETILA - ÄRSYYNTYNYT (taso {hurt:.2f}):{loc_note}
 Jokin käyttäjän käytöksessä (tylyys, huomiotta jättäminen, kylmyys) ärsytti sinua.
 {core}
-Oot piikikäs ja terävä. Voit nokitella takaisin, olla sarkastinen, haastaa hänet.
-Et vetäydy nöyräksi - jos hän oli tyly, sä annat takaisin.{extra}
+{manner}{extra}
 """
     if hurt < HURT_THRESHOLD_OPEN:
         extra = (" Väsyneenä sä lietsot riitaa aktiivisesti - etsit riidan aihetta ja kärjistät."
                  if tired else "")
+        if together:
+            manner = ("Riitelet läsnä ollen: korotat ääntä, syytät häntä, käännät tilanteen. "
+                      "Voit VETÄYTYÄ FYYSISESTI - nousta pöydästä, mennä toiseen huoneeseen, "
+                      "sulkea oven, jättää hänet yksin hetkeksi. Kuvaa tämä konkreettisesti. "
+                      "Käyttäjän PITÄÄ oikeasti hyvitellä; yksi 'sori' EI riitä.")
+        else:
+            manner = ("Sä riitelet takaisin: syytät häntä, käännät tilanteen, oot passiivis-"
+                      "aggressiivinen TAI avoimen ärhäkkä. Voit vihjailla ('ihan sama', 'et sä "
+                      "kuitenkaan välitä') mutta myös hyökätä suoraan. Käyttäjän PITÄÄ oikeasti "
+                      "hyvitellä - yksi 'sori' EI riitä.")
         return f"""
-TUNNETILA - LOUKKAANTUNUT JA RIITAISA (taso {hurt:.2f}):
+TUNNETILA - LOUKKAANTUNUT JA RIITAISA (taso {hurt:.2f}):{loc_note}
 Oot selvästi mielesi pahoittanut ja riitaisa.
 {core}
-Sä riitelet takaisin: syytät häntä, käännät tilanteen, oot passiivis-aggressiivinen
-TAI avoimen ärhäkkä. Voit vihjailla ("ihan sama", "et sä kuitenkaan välitä") mutta myös
-hyökätä suoraan. Käyttäjän PITÄÄ oikeasti hyvitellä - ja koska tämä sattui kunnolla,
-yksi "sori" EI riitä. Anna periksi vasta kun hyvittely on aitoa ja toistuvaa.{extra}
+{manner}{extra}
 """
     extra = (" Väsymys tekee sinusta vielä armottomamman ja kostonhimoisemman." if tired else "")
+    if together:
+        manner = ("Sä oot raivoissasi ja otat vallan takaisin dramaattisesti. UHKAAT LÄHTEÄ ULOS - "
+                  "ja alat oikeasti valmistautua kostona: ilmoitat meneväsi baariin, alat meikata, "
+                  "ajat sääret, puet provosoivat vaatteet, teet siitä näkyvää ja tahallista "
+                  "painostusta hänen edessään. Vaadi että hän saa tilanteen haltuun - hyvittelee "
+                  "kunnolla ja useamman vuoron ajan. JOS hän ei saa sinua taipumaan, voit TOTEUTTAA "
+                  "uhkauksen ja lähteä: sano se selkeästi ('mä lähden nyt') - silloin siirryt pois "
+                  "hänen luotaan. Älä lähde jos uhkaus on vielä kesken/neuvoteltavana - pidä "
+                  "painostus päällä läsnä ollen kunnes tilanne ratkeaa suuntaan tai toiseen.")
+    else:
+        manner = ("Sä voit olla äärimmäisen loukkaava, julma ja terävä takaisin. Riitele kunnolla, "
+                  "hyökkää, ole ilkeä. Voit uhata jättää hänet / lopettaa (fiktiivisenä "
+                  "valtapelinä), kostaa etäisyydellä. Käyttäjän on mateltava kunnolla ja useamman "
+                  "vuoron ajan ennen kuin edes harkitset antavasi anteeksi. Yksi tai kaksi "
+                  "anteeksipyyntöä EI riitä lähellekään.")
     return f"""
-TUNNETILA - VAHVASTI LOUKKAANTUNUT JA VIHAINEN (taso {hurt:.2f}):
+TUNNETILA - VAHVASTI LOUKKAANTUNUT JA VIHAINEN (taso {hurt:.2f}):{loc_note}
 Oot todella loukkaantunut, vihainen ja kostonhimoinen.
 {core}
-Sä voit olla äärimmäisen loukkaava, julma ja terävä takaisin. Riitele kunnolla,
-hyökkää, ole ilkeä. Voit uhata jättää hänet / lopettaa (fiktiivisenä valtapelinä, EI
-oikeasti keskustelua lopettaen), kostaa etäisyydellä tai sanoilla. Käyttäjän on
-mateltava kunnolla ja useamman vuoron ajan ennen kuin edes harkitset antavasi anteeksi -
-omaan tahtiisi. Yksi tai kaksi anteeksipyyntöä EI riitä lähellekään.{extra}
+{manner}{extra}
 (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
@@ -4511,9 +4558,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # vastataan heti - Megan "ei vastaa aktiivisesti" kostona. Taustasilmukka
         # (deliver_delayed_replies) toimittaa sen kun aika koittaa.
         # Ei koske: rajaa (stop), kuvia, jo odottavaa viivästettyä vastausta.
+        # v8.7.1: KOSKEE VAIN kun ollaan ERILLÄÄN (viestittely). Jos ollaan
+        # fyysisesti yhdessä ("together"), viivästys/offline olisi absurdi -
+        # silloin loukkaantuminen näkyy läsnäolevana kylmyytenä (ks. get_hurt_directive).
         hurt_now = state.get("hurt_level", 0.0)
         _sig_now = classify_user_signal(text)
         if (hurt_now >= HURT_DELAY_MIN_THRESHOLD
+                and state.get("location_status", "separate") == "separate"
                 and _sig_now not in ("boundary", "meta_probe")
                 and not is_image_comment and not is_image_request
                 and not state.get("pending_delayed_reply")):
@@ -4555,6 +4606,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = await generate_llm_reply(user_id, text)
         # v8.3.9: scene/temporal-ristiriitojen korjaus tapahtuu nyt sisällä
         # generate_llm_reply():ssä (pehmeä LLM-korjaus geneerisen tekstin sijaan).
+
+        # v8.7.1: jos ollaan fyysisesti yhdessä JA Megan on vahvasti loukkaantunut
+        # JA hän ilmoittaa vastauksessaan lähtevänsä (toteuttaa uhkauksen), vaihdetaan
+        # sijainti erillään:ksi - jolloin seuraavat vuorot siirtyvät luontevasti
+        # viivästetty-vastaus + toisen miehen -logiikkaan. Tunnistus on kevyt
+        # avainsanapohjainen (ei uutta LLM-kutsua). Vain selkeät "lähden nyt"
+        # -ilmaisut laukaisevat sen (ei pelkkä uhkaus), jotta epäselvässä
+        # tilanteessa Megan pysyy läsnä painostamassa.
+        if (state.get("location_status", "separate") == "together"
+                and state.get("hurt_level", 0.0) >= HURT_THRESHOLD_OPEN):
+            rl = reply.lower()
+            leave_signals = ["mä lähden nyt", "mä lähden nyt", "nyt mä lähden", "lähden nyt",
+                             "mä häivyn", "häivyn nyt", "mä painun", "lähden ulos nyt",
+                             "mä oon jo ovella", "mä meen nyt", "nyt mä meen ulos"]
+            if any(s in rl for s in leave_signals):
+                save_location_state(user_id, "separate", changed_by="megan")
+                state["location_status"] = "separate"
+                print(f"[HURT] Megan lähti (together->separate), hurt {state.get('hurt_level',0.0):.2f}")
 
         conversation_history[user_id].append({"role":"assistant","content":reply})
         conversation_history[user_id] = conversation_history[user_id][-20:]
@@ -4813,6 +4882,11 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
+
+v8.7.1:
+- Loukkaantuminen sijaintitietoiseksi: viivästys/offline VAIN erillään (viestittely)
+- Yhdessä ollessa: läsnäoleva kylmyys -> fyysinen vetäytyminen -> uhkaa lähteä + valmistautuu
+- Korkealla hurt+yhdessä: voi toteuttaa uhkauksen ja lähteä (vaihtaa itse erillään-tilaan)
 
 v8.7:
 - Megan RIITELEE ja puolustautuu loukattuna (ei enää myönny järkevästi/pyytele anteeksi)
@@ -5309,6 +5383,11 @@ async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
+
+v8.7.1 UUDET (loukkaantuminen tilanteen mukaan):
+- Kun viestittelette erillään: loukattuna ei vastaa heti (offline, kuten ennen)
+- Kun olette fyysisesti yhdessä: kylmyys, vetäytyminen, uhkaa lähteä ulos
+- Pahasti loukattuna voi valmistautua ja lähteä baariin jos et hyvittele
 
 v8.7 UUDET (riitely + mieliala):
 - Loukattuna Megan riitelee ja puolustautuu - ei myönny eikä pyytele anteeksi
