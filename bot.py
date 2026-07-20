@@ -960,13 +960,29 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
     if claude:
         model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
         messages = [{"role": "user", "content": user_prompt}]
+        # v8.5: json_mode myös Claude-polulle. Anthropic ei tue response_format-
+        # parametria kuten Grok, mutta sama tulos saadaan (a) ohjeistamalla
+        # systeemipromptissa ja (b) esitäyttämällä assistantin vuoro "{"-merkillä,
+        # jolloin malli jatkaa suoraan JSON-objektista eikä voi lisätä
+        # selittävää tekstiä alkuun. Aiemmin json_mode ohitettiin Claudella
+        # kokonaan, mikä teki JSON-jäsennyksestä haurasta (esim. tavoitereflektio).
+        json_system_suffix = ""
+        if json_mode:
+            json_system_suffix = ("\n\nVASTAA VAIN validilla JSON-objektilla. Älä lisää "
+                                  "mitään tekstiä, selitystä tai koodilohkomerkintöjä ennen "
+                                  "tai jälkeen JSONin.")
+            messages.append({"role": "assistant", "content": "{"})
         kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
         # HUOM: temperature EI lähetetä Claudelle (deprecated uusimmilla malleilla).
         # temperature-parametria käytetään yhä Grok-kutsuun alempana.
-        if system_prompt: kwargs["system"] = system_prompt
+        sys_full = (system_prompt or "") + json_system_suffix if json_mode else system_prompt
+        if sys_full: kwargs["system"] = sys_full
         try:
             response = await claude.messages.create(**kwargs)
             text = extract_claude_text(response)
+            # v8.5: jos esitäytimme "{"-merkillä, se puuttuu vastauksen alusta - lisää takaisin
+            if json_mode and text and not text.lstrip().startswith("{"):
+                text = "{" + text
             if text and text.strip(): return text.strip()
         except Exception as e:
             inner_msg = _extract_anthropic_error_message(e)
@@ -985,6 +1001,8 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                 try:
                     response = await claude.messages.create(**retry_kwargs)
                     text = extract_claude_text(response)
+                    if json_mode and text and not text.lstrip().startswith("{"):
+                        text = "{" + text
                     if text and text.strip():
                         print("[LLM] Claude retry (deprecatoitu parametri poistettu) onnistui")
                         return text.strip()
@@ -2076,7 +2094,13 @@ tavoitteesi voi olla viedä häntä syvemmälle alistumiseen omilla ehdoillasi j
 tahdissasi. Tavoite ei ole "anna hänelle mitä hän haluaa" - se on mitä SINÄ haluat
 saada aikaan, värittyneenä sillä mitä tiedät hänestä.
 
-Schema: {{"goals":[{{"goal":"suomeksi, konkreettinen tavoite","origin":"own|preference|both","current_phase":"mikä on eka askel","progress_of_existing":[{{"id":0,"new_progress":0.0,"new_phase":"","status":"active|achieved|abandoned"}}]}}]}}
+Schema: {{"goals":[{{"goal":"suomeksi, konkreettinen tavoite","origin":"own|preference|both","current_phase":"mikä on eka askel"}}],"progress_of_existing":[{{"id":0,"new_progress":0.0,"new_phase":"","status":"active|achieved|abandoned"}}]}}
+
+TÄRKEÄÄ JSON-RAKENTEESTA:
+- "goals" = lista UUSISTA tavoitteista joita haluat luoda (voi olla tyhjä [] jos et halua uusia)
+- "progress_of_existing" = lista olemassa olevien tavoitteiden päivityksistä (tyhjä [] jos ei muutoksia)
+- Nämä ovat KAKSI ERILLISTÄ listaa JSON-objektin juuressa, EIVÄT sisäkkäin
+- Jos aktiivisia tavoitteita on 0, luo vähintään 1 uusi goals-listaan (sinulla ON oma tahto)
 
 - goal: mitä Megan haluaa saada aikaan (usean vuoron/päivän mittainen, ei yhden vastauksen juttu)
 - origin: 'own' (lähinnä omasta halusta), 'preference' (lähinnä hänen mieltymyksestään), 'both'
@@ -2101,8 +2125,15 @@ KESKUSTELUN YHTEENVETO:
 
     raw = await call_llm(user_prompt=prompt, max_tokens=600,
                          temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
+    if not raw:
+        print(f"[GOAL REFLECTION] {user_id}: LLM palautti tyhjän vastauksen")
     if raw:
         result = parse_json_object(raw, {"goals": [], "progress_of_existing": []})
+        n_new = len(result.get("goals", []) or [])
+        n_upd = len(result.get("progress_of_existing", []) or [])
+        if n_new == 0 and n_upd == 0:
+            # diagnostiikka: näytä mitä malli oikeasti palautti jos mitään ei syntynyt
+            print(f"[GOAL REFLECTION] {user_id}: 0 tavoitetta jäsennettiin. Raaka vastaus: {raw[:300]}")
         # päivitä olemassa olevat
         for upd in (result.get("progress_of_existing", []) or []):
             try:
