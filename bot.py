@@ -306,7 +306,7 @@ print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
 CLAUDE_MODEL_LIGHT = "claude-sonnet-5"
-GROK_MODEL = "grok-4-1-fast"
+GROK_MODEL = "grok-4.3"   # v8.8: vaihdettu grok-4-1-fast -> grok-4.3 (lippulaiva) laadun vuoksi
 
 MEMORY_SEARCH_WINDOW_DAYS = 90
 MEMORY_SEARCH_MAX_ROWS = 2000
@@ -468,6 +468,10 @@ if not ANTHROPIC_API_KEY:
 # OpenAI-yhteensopivaa API:a varten - tämä EI ole riippuvuus OpenAI:n omaan
 # palveluun. OpenAI (gpt-4o-mini, embeddings) on poistettu v8.3.6:ssa kokonaan.
 grok_client = AsyncOpenAI(api_key=XAI_API_KEY, base_url="https://api.x.ai/v1") if XAI_API_KEY else None
+if grok_client is not None:
+    print(f"✅ Grok ({GROK_MODEL})")
+else:
+    print("⚠️ Grok ei käytössä (XAI_API_KEY puuttuu) - NSFW-polku käyttää Claudea")
 venice_client = AsyncOpenAI(api_key=VENICE_API_KEY, base_url="https://api.venice.ai/v1") if VENICE_API_KEY else None
 claude_client = None
 
@@ -4526,9 +4530,9 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
                 temperature=0.95, top_p=0.95)
             reply = (response.choices[0].message.content or "").strip()
             if not reply: raise Exception("Empty")
-            print(f"[NSFW-HYBRID] Grok (extreme persona): {len(reply)} chars")
+            print(f"[NSFW-HYBRID] Grok OK ({GROK_MODEL}): {len(reply)} chars")
         except Exception as e:
-            print(f"[NSFW-HYBRID] Grok failed → Claude: {e}")
+            print(f"[NSFW-HYBRID] ❌ Grok ({GROK_MODEL}) failed → Claude-varapolku: {e}")
             reply = await call_llm(system_prompt=system_prompt, user_prompt=user_prompt,
                                    max_tokens=1200, temperature=TEMP_REPLY)
     else:
