@@ -284,6 +284,12 @@ Muutokset v8.7.4 → v8.8 (Grokin koodikatselmus - kohta 3 + kohta 2):
   vastauksessa väh. yksi uusi fyysinen yksityiskohta joka ei toistu), ja kysymysohje
   muutettu muotoon "vastaus päättyy tekoon/käskyyn, ei avoimeen kysymykseen ellei
   retorinen".
+- NSFW-TARJOAJA vaihdettavissa: NSFW_PROVIDER-ympäristömuuttuja ("grok" oletus tai
+  "openrouter"). OpenRouter-tuki (OpenAI-yhteensopiva) mahdollistaa esim. DeepSeek-V3:n
+  kokeilun (OPENROUTER_API_KEY + OPENROUTER_MODEL, oletus deepseek/deepseek-chat).
+  GROK_MODEL myös ympäristömuuttujalla vaihdettavissa (oletus grok-4-1-fast, koska
+  grok-4.3 kieltäytyi NSFW:stä mallitason moderoinnilla). Tarjoaja valitaan
+  ajonaikaisesti; jos valittu tarjoaja puuttuu, putoaa turvallisesti toiseen/Claudeen.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -306,7 +312,7 @@ print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
 CLAUDE_MODEL_LIGHT = "claude-sonnet-5"
-GROK_MODEL = "grok-4.3"   # v8.8: vaihdettu grok-4-1-fast -> grok-4.3 (lippulaiva) laadun vuoksi
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4-1-fast")   # v8.8: takaisin toimivaan (grok-4.3 kieltäytyi NSFW:stä); ympäristömuuttujalla vaihdettavissa
 
 MEMORY_SEARCH_WINDOW_DAYS = 90
 MEMORY_SEARCH_MAX_ROWS = 2000
@@ -458,6 +464,12 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 REPLICATE_API_KEY = os.getenv("REPLICATE_API_TOKEN")
+# v8.8: OpenRouter-tuki vaihtoehtoisena NSFW-tarjoajana (esim. DeepSeek-V3).
+# NSFW_PROVIDER ohjaa kumpaa NSFW-polku käyttää: "grok" (oletus) tai "openrouter".
+# Vaihdetaan Renderin ympäristömuuttujalla ilman koodimuutosta.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+NSFW_PROVIDER = os.getenv("NSFW_PROVIDER", "grok").lower()
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
@@ -473,6 +485,12 @@ if grok_client is not None:
 else:
     print("⚠️ Grok ei käytössä (XAI_API_KEY puuttuu) - NSFW-polku käyttää Claudea")
 venice_client = AsyncOpenAI(api_key=VENICE_API_KEY, base_url="https://api.venice.ai/v1") if VENICE_API_KEY else None
+# v8.8: OpenRouter-client (OpenAI-yhteensopiva) vaihtoehtoiselle NSFW-tarjoajalle
+openrouter_client = (AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
+                     if OPENROUTER_API_KEY else None)
+if openrouter_client is not None:
+    print(f"✅ OpenRouter ({OPENROUTER_MODEL})")
+print(f"ℹ️ NSFW-tarjoaja: {NSFW_PROVIDER}")
 claude_client = None
 
 def get_claude_client():
@@ -4514,25 +4532,32 @@ Write Megan's reply in Finnish.
 Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viittaa aiempiin asioihin.
 """
 
-    if is_nsfw and grok_client is not None:
-        # v8.4: Grok-polulle vahvempi extreme-persoona (ei aftercaren aikana -
+    # v8.8: valitse NSFW-tarjoaja (grok tai openrouter) NSFW_PROVIDER:n mukaan.
+    # Molemmat ovat OpenAI-yhteensopivia, joten sama kutsurakenne toimii kummallekin.
+    if NSFW_PROVIDER == "openrouter" and openrouter_client is not None:
+        nsfw_client, nsfw_model, nsfw_label = openrouter_client, OPENROUTER_MODEL, "OpenRouter"
+    else:
+        nsfw_client, nsfw_model, nsfw_label = grok_client, GROK_MODEL, "Grok"
+
+    if is_nsfw and nsfw_client is not None:
+        # v8.4: NSFW-polulle vahvempi extreme-persoona (ei aftercaren aikana -
         # silloin halutaan pehmeämpi sävy jonka core-persoona + sexual_directive antaa)
         if is_aftercare_active(user_id):
-            grok_system_prompt = system_prompt
+            nsfw_system_prompt = system_prompt
         else:
-            # Vaihda core-persoona extreme-versioon vain Grok-kutsua varten;
+            # Vaihda core-persoona extreme-versioon vain NSFW-kutsua varten;
             # kaikki muut ohjelohkot (muisti, tilakone, tyyli) säilyvät ennallaan.
-            grok_system_prompt = system_prompt.replace(persona_prompt, build_extreme_nsfw_persona(), 1)
-        messages = [{"role":"system","content":grok_system_prompt},{"role":"user","content":user_prompt}]
+            nsfw_system_prompt = system_prompt.replace(persona_prompt, build_extreme_nsfw_persona(), 1)
+        messages = [{"role":"system","content":nsfw_system_prompt},{"role":"user","content":user_prompt}]
         try:
-            response = await grok_client.chat.completions.create(
-                model=GROK_MODEL, messages=messages, max_tokens=1400,
+            response = await nsfw_client.chat.completions.create(
+                model=nsfw_model, messages=messages, max_tokens=1400,
                 temperature=0.95, top_p=0.95)
             reply = (response.choices[0].message.content or "").strip()
-            if not reply: raise Exception("Empty")
-            print(f"[NSFW-HYBRID] Grok OK ({GROK_MODEL}): {len(reply)} chars")
+            if not reply: raise Exception("Empty (malli palautti tyhjän - mahdollinen moderointi)")
+            print(f"[NSFW-HYBRID] {nsfw_label} OK ({nsfw_model}): {len(reply)} chars")
         except Exception as e:
-            print(f"[NSFW-HYBRID] ❌ Grok ({GROK_MODEL}) failed → Claude-varapolku: {e}")
+            print(f"[NSFW-HYBRID] ❌ {nsfw_label} ({nsfw_model}) failed → Claude-varapolku: {e}")
             reply = await call_llm(system_prompt=system_prompt, user_prompt=user_prompt,
                                    max_tokens=1200, temperature=TEMP_REPLY)
     else:
