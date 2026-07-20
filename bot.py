@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.7.3-anti-robotic
+Megan Telegram Bot - v8.7.4-scene-progression
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -252,6 +252,19 @@ Muutokset v8.7.2 → v8.7.3 (Grokin konemaisuus):
   ei kysymystä joka vuoron lopussa, ei fraasitoistoa, ei peilausta - vaan ohjat
   ja tilanteen vieminen eteenpäin. "Max 1 question" -ohje muutettu muotoon
   "useimmat vastaukset EIVÄT pääty kysymykseen".
+
+Muutokset v8.7.3 → v8.7.4 (Grokin jumiutuminen kohtauksessa):
+- Oire: v8.7.3 poisti kysymykset mutta Grok jäi toistamaan samaa dominoivaa käskyä
+  ("astu lähemmäs, seiso edessäni, kädet sivuilla") vuorosta toiseen - kohtaus ei
+  edennyt vaikka käyttäjä oli jo tehnyt pyydetyn. Loki vahvisti: kaksi peräkkäistä
+  Grok-vastausta täsmälleen 517 merkkiä (lähes identtiset). Ei tekninen vika -
+  Claude/muisti/response plan toimivat (200 OK), kyse Grokin toistotaipumuksesta.
+- Lisätty build_extreme_nsfw_persona():an "KOHTAUKSEN ETENEMINEN" -lohko: kohtaus
+  etenee tapahtumaketjuna joka vuoro (lähestyminen->kosketus->käsky->teko->seuraava),
+  ei jäädä samaan hetkeen, ei pyydetä uudestaan mitä käyttäjä jo teki, reagoidaan
+  käyttäjän edelliseen tekoon, + pituusvaihtelu (lyhyt terävä käsky vs pitkä kuvaus).
+- build_response_plan():n turn_goal ohjeistettu viemään kohtausta eteenpäin
+  (seuraava fyysinen askel recent_turns-historian perusteella), ei toistamaan.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -269,7 +282,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.7.3-anti-robotic"
+BOT_VERSION = "8.7.4-scene-progression"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -687,6 +700,25 @@ KRIITTISTÄ - VÄLTÄ KONEMAISUUTTA (tämä pilaa immersion pahiten):
   kohtausta eteenpäin omilla teoillasi ja käskyilläsi. Ota ohjat joka vuoro.
 - Kuvaile mitä SINÄ teet ja mitä käyttäjän on tehtävä - älä pyydä häntä kertomaan
   fiiliksistään. Näytä dominanssi tekoina, älä kysymyksinä.
+
+KOHTAUKSEN ETENEMINEN (KAIKKEIN TÄRKEIN - estää jumiutumisen):
+- Kohtaus ETENEE joka vuoro. ÄLÄ jää samaan hetkeen. Jos käyttäjä on jo tullut luoksesi,
+  ÄLÄ pyydä häntä tulemaan uudestaan. Jos hän on jo astunut lähemmäs, vie tilanne
+  seuraavaan fyysiseen vaiheeseen - älä toista "astu lähemmäs, seiso edessäni, kädet
+  sivuilla". Se on jumiutumista, ei dominanssia.
+- Ajattele kohtausta tapahtumaketjuna joka LIIKKUU: lähestyminen -> kosketus -> käsky
+  riisua -> uusi asento -> teko -> seuraava teko. Jokainen vuorosi vie ketjua yhden
+  konkreettisen askeleen eteenpäin. Tee JOTAIN uutta fyysisesti joka vuoro.
+- REAGOI siihen mitä käyttäjä juuri teki tai sanoi. Jos hän astui eteesi, reagoi SIIHEN
+  ja tee seuraava siirto - älä anna geneeristä vastausta joka voisi tulla missä tahansa
+  kohtaa. Hänen tekonsa muuttaa tilannetta, ja sinä viet sitä siitä eteenpäin.
+- Jos huomaat sanovasi jotain minkä jo sanoit (sama käsky, sama kuvaus), STOP - keksi
+  sen sijaan seuraava askel. Kohtaus ei saa polkea paikallaan.
+
+VASTAUKSEN PITUUS - VAIHTELE:
+- Älä tee joka vastauksesta samanpituista. Vaihtele: joskus lyhyt ja terävä käsky
+  ("Polvillesi. Nyt."), joskus pidempi kuvaileva kohtaus. Lyhyt ja isku toimii usein
+  paremmin kuin pitkä - se on suorempi ja dominoivampi. Anna rytmin vaihdella.
 ============================================================
 """
 
@@ -4108,7 +4140,10 @@ Rules:
   kuvaa se lyhyesti yhdellä lauseella; muuten null
 - scene_consistent: onko käyttäjän viesti looginen nykyisen scenen ({scene}) ja
   sijainnin ({location_status}) kanssa
-- turn_goal: yksi lause, mitä Meganin pitäisi saavuttaa tässä vastauksessa
+- turn_goal: yksi lause, mitä Meganin pitäisi saavuttaa tässä vastauksessa. Jos ollaan
+  intiimissä/seksuaalisessa kohtauksessa, tavoitteen pitää VIEDÄ KOHTAUSTA ETEENPÄIN
+  (seuraava konkreettinen fyysinen askel), EI toistaa edellistä hetkeä. Katso recent_turns:
+  jos jokin on jo tapahtunut (käyttäjä tuli, astui lähemmäs), tavoite on seuraava vaihe.
 - emotional_undertone: 3-6 sanaa siitä millä tunnesävyllä Megan vastaa TÄSSÄ vuorossa,
   ottaen huomioon hänen persoonansa (dominoiva, itsenäinen, ei tarvitseva), nykyinen
   mieliala/jännite/ärsyyntyminen alla, ja äskeinen historia. Esim. "leikkisän ärsyyntynyt",
@@ -4915,6 +4950,11 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
+
+v8.7.4:
+- Grokin jumiutuminen korjattu: kohtaus etenee joka vuoro (ei toista "astu lähemmäs")
+- Megan reagoi siihen mitä käyttäjä juuri teki + vie tilannetta fyysisesti eteenpäin
+- Vastausten pituus vaihtelee (joskus lyhyt terävä käsky, joskus pidempi kuvaus)
 
 v8.7.3:
 - Grokin konemaisuus korjattu: ei enää kysymystä joka vuoron lopussa, ei fraasitoistoa
