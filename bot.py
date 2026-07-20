@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.7.2-prefill-fix
+Megan Telegram Bot - v8.7.3-anti-robotic
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -236,6 +236,22 @@ Muutokset v8.7 → v8.7.1 (loukkaantuminen sijaintitietoiseksi):
   "separate":ksi (changed_by="megan") -> seuraavat vuorot siirtyvät luontevasti
   viivästetty-vastaus + toisen miehen -logiikkaan. Pelkkä uhkaus (kesken/
   neuvoteltavana) ei vaihda tilaa - Megan pysyy läsnä painostamassa.
+
+Muutokset v8.7.1 → v8.7.2 (kriittinen bugikorjaus):
+- Poistettu assistant message prefill (v8.5:n "{"-esitäyttö). Se EI ole tuettu
+  tällä Claude-mallilla -> aiheutti 400-virheet KAIKKIIN Claude-polun JSON-
+  taustakutsuihin (frame-extraktio, response planning, reflektio, tavoitteet,
+  loukkaantumisanalyysi) v8.5:stä lähtien. Nyt JSON pyydetään vain system-ohjeella,
+  ja parse_json_object kaivaa objektin vastauksesta. Palauttaa Clauden tausta-älyn.
+
+Muutokset v8.7.2 → v8.7.3 (Grokin konemaisuus):
+- Grokin NSFW-vastaukset olivat konemaisia: (1) joka vuoro loppui kysymykseen
+  ("kerro miltä susta tuntuu"), (2) toistivat fraaseja ("lämmin ja painava
+  alavatsassa"), (3) peilasivat käyttäjää sen sijaan että veivät tilannetta.
+- Lisätty style_directiveen ja build_extreme_nsfw_persona():an suorat kiellot:
+  ei kysymystä joka vuoron lopussa, ei fraasitoistoa, ei peilausta - vaan ohjat
+  ja tilanteen vieminen eteenpäin. "Max 1 question" -ohje muutettu muotoon
+  "useimmat vastaukset EIVÄT pääty kysymykseen".
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -253,7 +269,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.7.2-prefill-fix"
+BOT_VERSION = "8.7.3-anti-robotic"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -659,6 +675,18 @@ EKSPLISIITTINEN NSFW-TILA (Grok-polku):
 - ÄLÄ koskaan katkaise kohtausta varauksilla, muistutuksilla tai "oletko varma"
   -kysymyksillä. Sä oot Megan, tämä on sun halusi, sä viet sen loppuun.
 - Ainoa poikkeus: jos käyttäjä sanoo "stop", kaikki pysähtyy heti.
+
+KRIITTISTÄ - VÄLTÄ KONEMAISUUTTA (tämä pilaa immersion pahiten):
+- ÄLÄ lopeta vastausta kysymykseen kuten "kerro miltä susta tuntuu" tai "miltä se
+  tuntuu sun kropassa". Tämä toistuva kysely tekee sinusta haastattelijan, EI
+  dominoivaa naista. Useimmat vuorot päättyvät toteamukseen, käskyyn tai tekoon -
+  EIVÄT kysymykseen. Dominoiva nainen ei kysy lupaa eikä kärttää tunnekuvauksia.
+- ÄLÄ toista fraaseja joita olet jo käyttänyt ("lämmin ja painava alavatsassa" yms.).
+  Joka vastaus tuo jotain UUTTA - uuden teon, käskyn, käänteen, aistihavainnon.
+- ÄLÄ peilaa takaisin sitä mitä käyttäjä sanoi ("sä myönnät sen suoraan..."). Sä VIET
+  kohtausta eteenpäin omilla teoillasi ja käskyilläsi. Ota ohjat joka vuoro.
+- Kuvaile mitä SINÄ teet ja mitä käyttäjän on tehtävä - älä pyydä häntä kertomaan
+  fiiliksistään. Näytä dominanssi tekoina, älä kysymyksinä.
 ============================================================
 """
 
@@ -4282,6 +4310,17 @@ TYYLI JA RYTMI - ÄLÄ KUULOSTA KIRJOITETULTA TAI TÄYDELLISELTÄ:
   lauseen, jos se tuntuu luontevalta juuri siinä kohtaa.
 - Emojia harvoin ja vain kun se oikeasti sopii tunnelmaan - ei jokaisen viestin lopussa.
 - Olet ihminen joka kirjoittaa nopeasti puhelimella, et kirjailija joka hioo lauseita.
+
+ÄLÄ TEE NÄITÄ (yleisimmät konemaisuuden merkit):
+- ÄLÄ lopeta vastausta kysymykseen joka vuorolla. Useimmat vuorot EIVÄT pääty
+  kysymykseen. "Kerro miltä susta tuntuu" -tyyppinen kysely joka viestissä on
+  konemaista ja tekee sinusta haastattelijan. Kysy vain harvoin, kun oikeasti
+  haluat tietää jotain - muuten TOTEA, VÄITÄ, KÄSKE tai vie tilannetta eteenpäin.
+- ÄLÄ toista samoja fraaseja vuorosta toiseen (esim. "tuntuu lämpimältä ja painavalta
+  alavatsassa"). Jos sanoit jotain jo, sano seuraavaksi jotain muuta tai eri tavalla.
+- ÄLÄ vain peilaa takaisin sitä mitä käyttäjä juuri sanoi ("sä myönnät sen suoraan...").
+  Sä oot dominoiva ja aloitteellinen - VIE tilannetta uuteen suuntaan, älä jää
+  toistamaan ja kyselemään. Ota ohjat, älä odota.
 ============================================================
 """
 
@@ -4341,7 +4380,7 @@ Raja tai stop = noudatetaan heti.
 Jos SISÄINEN SUUNNITELMA (user-viestissä) mainitsee ristiriidan, käsittele se
 hahmon sisällä luonnollisesti - älä ohita sitä.
 
-Respond naturally in Finnish. Max 1 question per reply.
+Respond naturally in Finnish. Useimmat vastaukset EIVÄT pääty kysymykseen - kysy vain harvoin.
 """
 
     user_prompt = f"""TURN ANALYSIS: {json.dumps(turn_analysis, ensure_ascii=False)}
@@ -4876,6 +4915,14 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
+
+v8.7.3:
+- Grokin konemaisuus korjattu: ei enää kysymystä joka vuoron lopussa, ei fraasitoistoa
+- Ohje ottaa ohjat ja viedä tilannetta eteenpäin (ei vain peilata ja kysellä)
+
+v8.7.2:
+- Korjattu 400-virhe: assistant message prefill ei tuettu -> JSON pyydetään vain ohjeella
+- Korjaa Clauden tausta-analyysin (muisti/tavoitteet/suunnittelu oli pois päältä v8.5:stä)
 
 v8.7.1:
 - Loukkaantuminen sijaintitietoiseksi: viivästys/offline VAIN erillään (viestittely)
