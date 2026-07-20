@@ -4458,6 +4458,19 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
     composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge)
 
+    # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
+    # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
+    # nsfw_extra-tyyliohje voidaan liittää system_prompttiin.
+    arousal = state.get("arousal", 0.0)
+    is_nsfw = (current_mode == "nsfw" or submission_level > 0.6
+               or arousal >= AROUSAL_INITIATE_THRESHOLD)
+    # nsfw_extra: kevyt tyyli-/intensiteettiohje NSFW-polulle. Varsinaisen
+    # eksplisiittisen sisällön ohjaus tulee build_extreme_nsfw_persona():sta
+    # Grok-kutsussa; tämä vain vahvistaa suoruutta ja aloitteellisuutta.
+    nsfw_extra = ("\nKun tilanne on intiimi ja lataus korkea: ole suora, aloitteellinen ja "
+                  "aistivoimainen, älä hillitse tai kaunistele. Vie kohtausta eteenpäin.\n"
+                  if is_nsfw else "")
+
     system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
@@ -4473,6 +4486,7 @@ CONVERSATION STATE:
 {question_directive}
 {silence_directive}
 {composite_state_directive}
+{nsfw_extra}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -4496,11 +4510,6 @@ Write Megan's reply in Finnish.
 Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viittaa aiempiin asioihin.
 """
 
-    # v8.4: arousal voi laukaista NSFW-polun myös ilman eksplisiittistä moodia.
-    arousal = state.get("arousal", 0.0)
-    is_nsfw = (current_mode == "nsfw" or submission_level > 0.6
-               or arousal >= AROUSAL_INITIATE_THRESHOLD)
-
     if is_nsfw and grok_client is not None:
         # v8.4: Grok-polulle vahvempi extreme-persoona (ei aftercaren aikana -
         # silloin halutaan pehmeämpi sävy jonka core-persoona + sexual_directive antaa)
@@ -4513,7 +4522,8 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
         messages = [{"role":"system","content":grok_system_prompt},{"role":"user","content":user_prompt}]
         try:
             response = await grok_client.chat.completions.create(
-                model=GROK_MODEL, messages=messages, max_tokens=1200, temperature=TEMP_REPLY_NSFW)
+                model=GROK_MODEL, messages=messages, max_tokens=1400,
+                temperature=0.95, top_p=0.95)
             reply = (response.choices[0].message.content or "").strip()
             if not reply: raise Exception("Empty")
             print(f"[NSFW-HYBRID] Grok (extreme persona): {len(reply)} chars")
