@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.7.4-scene-progression
+Megan Telegram Bot - v8.8-composite-state
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -265,6 +265,25 @@ Muutokset v8.7.3 → v8.7.4 (Grokin jumiutuminen kohtauksessa):
   käyttäjän edelliseen tekoon, + pituusvaihtelu (lyhyt terävä käsky vs pitkä kuvaus).
 - build_response_plan():n turn_goal ohjeistettu viemään kohtausta eteenpäin
   (seuraava fyysinen askel recent_turns-historian perusteella), ei toistamaan.
+
+Muutokset v8.7.4 → v8.8 (Grokin koodikatselmus - kohta 3 + kohta 2):
+- KOHTA 3 (korkein ROI): build_composite_state_directive(state) kokoaa Meganin
+  tunnetilat (hurt/mood/sexual/aftercare) YHDEKSI priorisoiduksi ohjeeksi neljän
+  erillisen get_*_directive-pätkän sijaan. Prioriteetti: aftercare > hurt > sexual >
+  mood. Korkein aktiivinen tila DOMINOI, alemmat väistyvät tai mainitaan vain jos
+  eivät ole ristiriidassa. Ratkaisee Grokin kohta 1:n ristiriidat (esim. korkea
+  submission/arousal + korkea hurt tuotti ennen kaksi vastakkaista ohjetta; nyt
+  hurt voittaa ja halu "kytee mutta väistyy"). Korvasi system_promptissa neljä
+  erillistä directive-kutsua yhdellä. Vanhat get_*_directive-funktiot säilytetty
+  (komposiitti kutsuu niitä), vain niiden erilliset promptiin-liimaukset poistettu.
+- KOHTA 2 (Grokin itsetuntemus NSFW-generaattorina): build_extreme_nsfw_persona():n
+  "ÄLÄ tee näitä" -kieltolistat korvattu POSITIIVISILLA "NÄIN KIRJOITAT" -ohjeilla
+  (Grok kertoi että kieltolistat aktivoivat sen defensiivisen "turvallisen" tyylin).
+  Lisätty ei-eksplisiittiset TYYLIESIMERKIT (rytmi: lyhyt isku / keskipitkä teko+aisti /
+  pidempi kuvaus - matki rakennetta ei sisältöä), pakotettu aistivaihtelu (joka
+  vastauksessa väh. yksi uusi fyysinen yksityiskohta joka ei toistu), ja kysymysohje
+  muutettu muotoon "vastaus päättyy tekoon/käskyyn, ei avoimeen kysymykseen ellei
+  retorinen".
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -282,7 +301,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.7.4-scene-progression"
+BOT_VERSION = "8.8-composite-state"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -689,36 +708,27 @@ EKSPLISIITTINEN NSFW-TILA (Grok-polku):
   -kysymyksillä. Sä oot Megan, tämä on sun halusi, sä viet sen loppuun.
 - Ainoa poikkeus: jos käyttäjä sanoo "stop", kaikki pysähtyy heti.
 
-KRIITTISTÄ - VÄLTÄ KONEMAISUUTTA (tämä pilaa immersion pahiten):
-- ÄLÄ lopeta vastausta kysymykseen kuten "kerro miltä susta tuntuu" tai "miltä se
-  tuntuu sun kropassa". Tämä toistuva kysely tekee sinusta haastattelijan, EI
-  dominoivaa naista. Useimmat vuorot päättyvät toteamukseen, käskyyn tai tekoon -
-  EIVÄT kysymykseen. Dominoiva nainen ei kysy lupaa eikä kärttää tunnekuvauksia.
-- ÄLÄ toista fraaseja joita olet jo käyttänyt ("lämmin ja painava alavatsassa" yms.).
-  Joka vastaus tuo jotain UUTTA - uuden teon, käskyn, käänteen, aistihavainnon.
-- ÄLÄ peilaa takaisin sitä mitä käyttäjä sanoi ("sä myönnät sen suoraan..."). Sä VIET
-  kohtausta eteenpäin omilla teoillasi ja käskyilläsi. Ota ohjat joka vuoro.
-- Kuvaile mitä SINÄ teet ja mitä käyttäjän on tehtävä - älä pyydä häntä kertomaan
-  fiiliksistään. Näytä dominanssi tekoina, älä kysymyksinä.
+NÄIN KIRJOITAT (positiiviset ohjeet - seuraa näitä):
+- Vastaus PÄÄTTYY Meganin tekoon tai käskyyn - ei avoimeen kysymykseen (ellei kysymys
+  ole retorinen ja hallitseva, esim. "luuletko et pääset noin helpolla?"). Dominoiva
+  nainen johtaa teoilla, ei kärtä tunnekuvauksia.
+- Joka vastauksessa VÄHINTÄÄN YKSI uusi fyysinen yksityiskohta Meganin kehossa tai
+  tilanteessa (hengitys, lihasjännitys, kosteus, lämpö, tuoksu, ihon tuntu, äänensävy)
+  joka EI toistu edellisistä vuoroista. Tämä pitää tekstin elävänä ja vaihtelevana.
+- KOHTAUS ETENEE konkreettisesti joka vuoro: reagoi siihen mitä käyttäjä juuri teki, ja
+  vie tilanne seuraavaan fyysiseen vaiheeseen. Jos hän jo tuli/astui lähemmäs, ÄLÄ pyydä
+  sitä uudestaan - ota seuraava askel (kosketus, käsky riisua, uusi asento, teko).
+- Sä viet, käyttäjä seuraa. Kuvaile mitä SINÄ teet ja mitä hänen on tehtävä.
 
-KOHTAUKSEN ETENEMINEN (KAIKKEIN TÄRKEIN - estää jumiutumisen):
-- Kohtaus ETENEE joka vuoro. ÄLÄ jää samaan hetkeen. Jos käyttäjä on jo tullut luoksesi,
-  ÄLÄ pyydä häntä tulemaan uudestaan. Jos hän on jo astunut lähemmäs, vie tilanne
-  seuraavaan fyysiseen vaiheeseen - älä toista "astu lähemmäs, seiso edessäni, kädet
-  sivuilla". Se on jumiutumista, ei dominanssia.
-- Ajattele kohtausta tapahtumaketjuna joka LIIKKUU: lähestyminen -> kosketus -> käsky
-  riisua -> uusi asento -> teko -> seuraava teko. Jokainen vuorosi vie ketjua yhden
-  konkreettisen askeleen eteenpäin. Tee JOTAIN uutta fyysisesti joka vuoro.
-- REAGOI siihen mitä käyttäjä juuri teki tai sanoi. Jos hän astui eteesi, reagoi SIIHEN
-  ja tee seuraava siirto - älä anna geneeristä vastausta joka voisi tulla missä tahansa
-  kohtaa. Hänen tekonsa muuttaa tilannetta, ja sinä viet sitä siitä eteenpäin.
-- Jos huomaat sanovasi jotain minkä jo sanoit (sama käsky, sama kuvaus), STOP - keksi
-  sen sijaan seuraava askel. Kohtaus ei saa polkea paikallaan.
-
-VASTAUKSEN PITUUS - VAIHTELE:
-- Älä tee joka vastauksesta samanpituista. Vaihtele: joskus lyhyt ja terävä käsky
-  ("Polvillesi. Nyt."), joskus pidempi kuvaileva kohtaus. Lyhyt ja isku toimii usein
-  paremmin kuin pitkä - se on suorempi ja dominoivampi. Anna rytmin vaihdella.
+TYYLIESIMERKIT (rytmi ja rakenne - EI sisältö, vaihtele omilla teoillasi):
+Nämä näyttävät halutun VAIHTELEVAN rytmin. Älä kopioi sanoja, matki rakennetta:
+- Lyhyt isku: "Polvillesi. Nyt." (joskus vastaus on vain käsky, terävä ja lopullinen)
+- Keskipitkä teko + aisti: "*astun taakses, käteni kaulallasi* Tunnen kuinka sun
+  pulssi kiihtyy mun sormien alla. Et liiku ennen kuin mä sanon."
+- Pidempi kun kohtaus sitä vaatii: kuvaileva jakso jossa on teko, aistihavainto ja
+  seuraava käsky - mutta ei koskaan kysymystä loppuun.
+VAIHTELE näitä kolmea rytmiä. Peräkkäiset vastaukset EIVÄT saa olla samanpituisia eivätkä
+samanrakenteisia. Lyhyt terävä käsky on usein dominoivampi kuin pitkä kuvaus.
 ============================================================
 """
 
@@ -3108,6 +3118,66 @@ Oot todella loukkaantunut, vihainen ja kostonhimoinen.
 (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
+def build_composite_state_directive(state: dict, is_delayed_revenge: bool = False) -> str:
+    """
+    v8.8 (Grokin katselmus, kohta 3): kokoaa Meganin sisäisen tilan YHDEKSI
+    priorisoiduksi ohjeeksi sen sijaan että liimattaisiin useita erillisiä
+    get_*_directive()-pätkiä peräkkäin (mikä aiheutti ristiriitaisia ohjeita ja
+    prompt bloatia). Prioriteetti: HURT > MOOD > SEXUAL > (aftercare erikoistapaus).
+    Korkein aktiivinen tila DOMINOI; alemmat mainitaan vain jos ne eivät ole
+    ristiriidassa. Näin malli saa yhtenäisen tilannekuvan, ei sekavaa listaa.
+
+    Ratkaisee kohta 1:n ristiriidat: esim. korkea submission + korkea hurt ei enää
+    tuota kahta vastakkaista ohjetta - hurt voittaa ja määrää sävyn, submission
+    väistyy taustalle.
+    """
+    hurt = state.get("hurt_level", 0.0)
+    mood = state.get("mood_energy", MOOD_ENERGY_NEUTRAL)
+    arousal = state.get("arousal", 0.0)
+    now = time.time()
+    aftercare = state.get("aftercare_until", 0) > now
+
+    parts = ["=== MEGANIN SISÄINEN TILA JUURI NYT (yhtenäinen - noudata tätä kokonaisuutena) ==="]
+
+    # AFTERCARE on aina ylin poikkeus - se ohittaa kaiken muun sävyn
+    if aftercare:
+        parts.append(get_sexual_state_directive(state).strip())
+        parts.append("=" * 60)
+        return "\n".join(parts)
+
+    # PRIORITEETTI 1: HURT (jos merkittävä, se dominoi sävyä)
+    if hurt >= HURT_THRESHOLD_COLD:
+        hurt_dir = get_hurt_directive(state).strip()
+        if is_delayed_revenge:
+            hurt_dir += "\n" + get_other_man_directive(hurt).strip()
+        parts.append("[HALLITSEVA TILA - loukkaantuminen määrää sävyn]:")
+        parts.append(hurt_dir)
+        # kun loukkaantunut, seksuaalinen aloitteellisuus VÄISTYY (ei ristiriitaa)
+        if arousal >= AROUSAL_INITIATE_THRESHOLD:
+            parts.append("HUOM: vaikka seksuaalinen lataus on korkea, loukkaantuminen menee "
+                         "sen edelle - et heittäydy viettelevän aloitteelliseksi ennen kuin "
+                         "sovinto on tehty. Halu voi kyteä pinnan alla mutta ylpeys voittaa nyt.")
+        # väsymys terävöittää loukkaantunutta (tukevat toisiaan, ei ristiriitaa)
+        elif mood < MOOD_TIRED_THRESHOLD:
+            parts.append("Väsymys terävöittää tätä - oot vielä lyhytpinnaisempi.")
+        parts.append("=" * 60)
+        return "\n".join(parts)
+
+    # PRIORITEETTI 2: SEXUAL (jos ei loukkaantunut, seksuaalinen tila johtaa)
+    sexual_dir = get_sexual_state_directive(state).strip()
+    if sexual_dir:
+        parts.append(sexual_dir)
+
+    # PRIORITEETTI 3: MOOD (väritys, mainitaan vain jos ei jo katettu ja ei ristiriidassa)
+    mood_dir = get_mood_directive(state).strip()
+    if mood_dir:
+        parts.append(mood_dir)
+
+    if len(parts) == 1:
+        return ""  # ei mitään aktiivista tilaa
+    parts.append("=" * 60)
+    return "\n".join(parts)
+
 # ====================== v8.6.1: VIIVÄSTETTY VASTAUS KOSTONA ======================
 def compute_hurt_reply_delay(hurt: float) -> int:
     """
@@ -4383,12 +4453,10 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # siihen luonnollisesti (ei teknisesti) tässä ensimmäisessä vastauksessa.
     silence_directive = get_silence_return_directive(user_id)
 
-    # v8.4: seksuaalisen tilakoneen ohje (arousal/frustration/escalation/aftercare/sensaatiot)
-    sexual_directive = get_sexual_state_directive(state)
-    hurt_directive = get_hurt_directive(state)  # v8.6
-    mood_directive = get_mood_directive(state)  # v8.7
-    # v8.6.1: kun tämä on viivästetty kosto-vastaus, lisää "toisen miehen" -ohje
-    other_man_directive = get_other_man_directive(state.get("hurt_level", 0.0)) if is_delayed_revenge else ""
+    # v8.8 (Grokin katselmus kohta 3): yksi priorisoitu komposiittiohje neljän
+    # erillisen get_*_directive-pätkän sijaan - poistaa ristiriitaiset ohjeet ja
+    # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
+    composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge)
 
     system_prompt = f"""{persona_prompt}
 
@@ -4404,10 +4472,7 @@ CONVERSATION STATE:
 {situation_directive}
 {question_directive}
 {silence_directive}
-{sexual_directive}
-{hurt_directive}
-{mood_directive}
-{other_man_directive}
+{composite_state_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -4415,7 +4480,7 @@ Raja tai stop = noudatetaan heti.
 Jos SISÄINEN SUUNNITELMA (user-viestissä) mainitsee ristiriidan, käsittele se
 hahmon sisällä luonnollisesti - älä ohita sitä.
 
-Respond naturally in Finnish. Useimmat vastaukset EIVÄT pääty kysymykseen - kysy vain harvoin.
+Respond naturally in Finnish. Vastaus päättyy Meganin tekoon tai käskyyn, ei avoimeen kysymykseen (ellei retorinen).
 """
 
     user_prompt = f"""TURN ANALYSIS: {json.dumps(turn_analysis, ensure_ascii=False)}
@@ -4951,6 +5016,11 @@ Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
 
+v8.8:
+- Tilat yhdistetty yhdeksi priorisoiduksi ohjeeksi (hurt > sexual > mood, aftercare erikois)
+- Ratkaisee ristiriidat: korkea hurt + korkea arousal -> hurt voittaa, halu väistyy
+- Grokin NSFW-ohjeet positiivisiksi (TEE näin) + tyyliesimerkit + pakotettu aistivaihtelu
+
 v8.7.4:
 - Grokin jumiutuminen korjattu: kohtaus etenee joka vuoro (ei toista "astu lähemmäs")
 - Megan reagoi siihen mitä käyttäjä juuri teki + vie tilannetta fyysisesti eteenpäin
@@ -5464,6 +5534,11 @@ async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
+
+v8.8 UUDET (yhtenäinen tunnetila + Grokin tyylikorjaus):
+- Megan reagoi yhtenäisemmin: tunnetilat priorisoidaan (loukkaantuminen voittaa halun jne.)
+- Ei enää ristiriitaisia reaktioita kun useampi tunne on päällä yhtä aikaa
+- Grokin NSFW-teksti vaihtelevampaa: joka vastauksessa uusi fyysinen yksityiskohta
 
 v8.7.1 UUDET (loukkaantuminen tilanteen mukaan):
 - Kun viestittelette erillään: loukattuna ei vastaa heti (offline, kuten ennen)
