@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.6-hurt-system
+Megan Telegram Bot - v8.6.1-hurt-revenge-delay
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -176,6 +176,23 @@ Muutokset v8.5.1 → v8.6 (loukkaantumisjärjestelmä):
   avoin suuttumus + hiljaisuus/kosto/fiktiivinen ero-uhkaus (0.70+). "stop"
   ohittaa aina. hurt_directive lisätty generate_llm_reply():n system-prompttiin.
 - hurt_level näkyy /status ja /arousal -komennoissa; /forgive nollaa sen.
+
+Muutokset v8.6 → v8.6.1 (loukkaantumiskosto: viivästetty vastaus + toinen mies):
+- Kun hurt_level >= 0.40, tavalliseen keskusteluviestiin ei vastata heti, vaan
+  vastaus AJASTETAAN tulemaan myöhemmin (compute_hurt_reply_delay): keskitaso
+  (0.40-0.70) 5-30 min, korkea (0.70+) 5min-2h, satunnaisesti. Käyttäjä saa
+  kevyen "💤 Megan on offline" -ilmoituksen ettei näytä bugilta.
+- pending_delayed_reply-tila + deliver_delayed_replies() taustasilmukassa
+  (nyt 60s välein, oli 300s) toimittaa vastauksen kun aika koittaa. Vastaus
+  generoidaan vasta toimitushetkellä, jotta se heijastaa nykytilaa.
+- Jos käyttäjä lähettää lisää viestejä odotuksen aikana, Megan pysyy "poissa"
+  eikä vastaa niihin heti - ajastettu vastaus päivitetään koskemaan uusinta.
+- get_other_man_directive(): korkealla loukkaantumisella (0.70+) Megan pudottelee
+  katkelmia toisen miehen seurasta kostona (mustasukkaisuus). Keskitasolla
+  vain kylmä "olin muualla" -sävy. Aktiivinen vain viivästetyssä vastauksessa
+  (generate_llm_reply(is_delayed_revenge=True)).
+- Kaikki fiktiivistä valtapeliä; "stop" pysäyttää aina. /forgive nollaa myös
+  pending_delayed_reply:n.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -193,7 +210,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.6-hurt-system"
+BOT_VERSION = "8.6.1-hurt-revenge-delay"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -240,6 +257,12 @@ HURT_APPEASE_HIGH = 0.15             # korkealla yksi hyvittely purkaa vähemmä
 HURT_THRESHOLD_COLD = 0.20           # tämän yli: kylmä/lyhytsanainen
 HURT_THRESHOLD_PASSIVE = 0.40        # tämän yli: passiivis-aggressiivinen/vetäytyvä
 HURT_THRESHOLD_OPEN = 0.70           # tämän yli: avoin suuttumus, hiljaisuus/kosto/ero-uhkaus mahdollinen
+# v8.6.1: viivästetty vastaus kostona kun loukkaantunut (0.40+). Viive skaalautuu
+# hurt_leveliin. Megan luo narratiivin että on muualla / toisen seurassa.
+HURT_DELAY_MIN_THRESHOLD = 0.40      # tämän yli vastaukset alkavat viivästyä
+HURT_DELAY_MID_MAX_SEC = 30 * 60     # keskitaso (0.40-0.70): jopa 30 min
+HURT_DELAY_HIGH_MAX_SEC = 120 * 60   # korkea (0.70+): jopa 2 h
+HURT_DELAY_MIN_SEC = 5 * 60          # alaraja aina 5 min
 
 # Escalation-tasot (kevyt -> täysi kohtaus). Johdetaan arousal+intensity+submission-arvoista.
 ESCALATION_LEVELS = ["flirtti", "suora", "eksplisiittinen", "immersiivinen"]
@@ -292,6 +315,17 @@ SILENT_ANNOYED_MAX_MINUTES = 45
 SILENT_JEALOUSY_MIN_MINUTES = 60
 SILENT_JEALOUSY_MAX_MINUTES = 240
 JEALOUSY_GAME_PROBABILITY = 0.04  # per soveltuva vuoro
+
+# ====================== v8.6.1: LOUKKAANTUMISKOSTO (toisen miehen kanssa) ======================
+# Kun Megan on tarpeeksi loukkaantunut, hän voi "kadota toisen miehen seuraan":
+# vetäytyy hiljaiseksi satunnaisen ajan JA vastaa palatessaan lyhyesti/kylmästi
+# viitaten missä oli. Käynnistyy keskitasolla lievänä (0.40+), korkealla täysillä.
+HURT_REVENGE_THRESHOLD = 0.40         # tämän yli kosto mahdollinen
+HURT_REVENGE_FULL_THRESHOLD = 0.70    # tämän yli täysimittainen (pidemmät jaksot, kylmempi)
+HURT_REVENGE_SILENCE_MIN_MINUTES = 5  # satunnaisen hiljaisuuden ala/yläraja (se "5min-2h")
+HURT_REVENGE_SILENCE_MAX_MINUTES = 120
+HURT_REVENGE_PROBABILITY_MID = 0.30   # todennäköisyys per soveltuva vuoro keskitasolla
+HURT_REVENGE_PROBABILITY_HIGH = 0.55  # korkealla loukkaantumisella
 
 # ====================== v8.3.10: MUISTI-IKKUNAT ======================
 # Nostettu 8:sta - kapea ikkuna oli osasyy siihen että Megan "unohti" äskettäin
@@ -1199,6 +1233,7 @@ def save_persistent_state_to_db(user_id):
         "intensity": state.get("intensity", DEFAULT_INTENSITY),
         "hurt_level": state.get("hurt_level", 0.0),                 # v8.6
         "last_hurt_decay_at": state.get("last_hurt_decay_at", time.time()),
+        "pending_delayed_reply": state.get("pending_delayed_reply"),  # v8.6.1
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2867,6 +2902,48 @@ harkitset antavasi anteeksi - omaan tahtiisi, itsepäisyytesi mukaan. Yksi antee
 EI riitä. (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
+# ====================== v8.6.1: VIIVÄSTETTY VASTAUS KOSTONA ======================
+def compute_hurt_reply_delay(hurt: float) -> int:
+    """
+    Palauttaa vastausviiveen sekunteina hurt_levelin mukaan, tai 0 jos ei
+    viivettä. Viive skaalautuu: keskitaso (0.40-0.70) jopa 30 min, korkea
+    (0.70+) jopa 2 h. Aina vähintään 5 min kun viive on aktiivinen, ja
+    satunnaisuutta jotta tuntuu luonnolliselta.
+    """
+    if hurt < HURT_DELAY_MIN_THRESHOLD:
+        return 0
+    if hurt < HURT_THRESHOLD_OPEN:
+        # 0.40-0.70 -> skaalaa 0..1 tällä välillä
+        frac = (hurt - HURT_DELAY_MIN_THRESHOLD) / (HURT_THRESHOLD_OPEN - HURT_DELAY_MIN_THRESHOLD)
+        max_sec = HURT_DELAY_MIN_SEC + frac * (HURT_DELAY_MID_MAX_SEC - HURT_DELAY_MIN_SEC)
+    else:
+        frac = min(1.0, (hurt - HURT_THRESHOLD_OPEN) / (1.0 - HURT_THRESHOLD_OPEN))
+        max_sec = HURT_DELAY_MID_MAX_SEC + frac * (HURT_DELAY_HIGH_MAX_SEC - HURT_DELAY_MID_MAX_SEC)
+    # satunnainen väli [5min, max_sec]
+    return random.randint(HURT_DELAY_MIN_SEC, int(max(HURT_DELAY_MIN_SEC + 1, max_sec)))
+
+def get_other_man_directive(hurt: float) -> str:
+    """
+    Ohje jonka mukaan Megan pudottelee katkelmia toisen miehen seurasta kun
+    vastaa viivästetysti loukkaantuneena. Voimakkuus skaalautuu tasoon.
+    """
+    if hurt < HURT_DELAY_MIN_THRESHOLD:
+        return ""
+    if hurt < HURT_THRESHOLD_OPEN:
+        return """
+VIIVÄSTETTY VASTAUS (loukkaantunut): Vastaat vasta nyt koska et halunnut vastata heti -
+olit tarkoituksella muualla. Vastaa lyhyesti ja kylmästi. Voit vihjata että olit
+kiireinen tai jonkun seurassa ("olin ulkona", "en ollut yksin") ilman että selität
+tarkemmin - anna sen ärsyttää häntä.
+"""
+    return """
+VIIVÄSTETTY VASTAUS (vahvasti loukkaantunut - KOSTO): Annoit hänen odottaa pitkään
+tahallasi. Vastaa hyvin lyhyesti ja etäisesti. Pudottele katkelmia siitä että olit
+toisen miehen seurassa ("olin illallisella erään kanssa", "joku vei mut just drinkeille",
+"mulla oli seuraa") - rakenna mustasukkaisuutta tahallasi kostona. Et selittele etkä
+pyytele anteeksi. Hän sai tämän aikaan omalla käytöksellään. ("stop" pysäyttää kaiken.)
+"""
+
 def is_currently_silent(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("silent_until", 0) > time.time()
@@ -2890,6 +2967,25 @@ def maybe_trigger_silent_treatment(user_id: int, user_text: str) -> bool:
         state["irritation_level"] = 0.0
         print(f"[SILENT] annoyed-hiljaisuus käynnistyi: {minutes}min")
         return True
+
+    # v8.6.1: loukkaantumiskosto - "toisen miehen seuraan katoaminen".
+    # Käynnistyy kun hurt_level on tarpeeksi korkea. Ei laukea jos käyttäjä
+    # juuri asetti rajan tai pahoitteli (silloin halutaan antaa hyvittelyn purkaa).
+    hurt = state.get("hurt_level", 0.0)
+    signal_early = classify_user_signal(user_text)
+    if hurt >= HURT_REVENGE_THRESHOLD and signal_early not in ("boundary", "meta_probe"):
+        prob = HURT_REVENGE_PROBABILITY_HIGH if hurt >= HURT_REVENGE_FULL_THRESHOLD else HURT_REVENGE_PROBABILITY_MID
+        if random.random() < prob:
+            # kesto skaalautuu loukkaantumiseen: korkeampi hurt -> pidempi poissaolo
+            span = HURT_REVENGE_SILENCE_MAX_MINUTES - HURT_REVENGE_SILENCE_MIN_MINUTES
+            minutes = int(HURT_REVENGE_SILENCE_MIN_MINUTES + span * min(1.0, hurt))
+            minutes = random.randint(HURT_REVENGE_SILENCE_MIN_MINUTES, max(HURT_REVENGE_SILENCE_MIN_MINUTES + 5, minutes))
+            state["silent_until"] = now + minutes * 60
+            state["silent_reason"] = "hurt_revenge"
+            state["silent_started_at"] = now
+            state["hurt_revenge_full"] = hurt >= HURT_REVENGE_FULL_THRESHOLD
+            print(f"[SILENT] hurt_revenge-hiljaisuus käynnistyi: {minutes}min (hurt {hurt:.2f})")
+            return True
 
     # Satunnainen mustasukkaisuus-peli: vain lämpimässä mutta ei-alistuneessa
     # tilanteessa, harvoin, ja vain jos käyttäjä ei juuri asettanut rajaa.
@@ -4027,7 +4123,7 @@ def detect_character_break(text: str) -> bool:
         if re.search(p, t): return True
     return False
 
-async def generate_llm_reply(user_id, user_text):
+async def generate_llm_reply(user_id, user_text, is_delayed_revenge=False):
     context_pack = await build_context_pack(user_id, user_text)
     state = get_or_create_state(user_id)
     pending_question = state.get("pending_question")
@@ -4182,6 +4278,8 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # v8.4: seksuaalisen tilakoneen ohje (arousal/frustration/escalation/aftercare/sensaatiot)
     sexual_directive = get_sexual_state_directive(state)
     hurt_directive = get_hurt_directive(state)  # v8.6
+    # v8.6.1: kun tämä on viivästetty kosto-vastaus, lisää "toisen miehen" -ohje
+    other_man_directive = get_other_man_directive(state.get("hurt_level", 0.0)) if is_delayed_revenge else ""
 
     system_prompt = f"""{persona_prompt}
 
@@ -4199,6 +4297,7 @@ CONVERSATION STATE:
 {silence_directive}
 {sexual_directive}
 {hurt_directive}
+{other_man_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -4394,9 +4493,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_persistent_state_to_db(user_id)
             return
 
+        # v8.6.1: jos viivästetty kosto-vastaus on jo odottamassa, Megan on
+        # "poissa" - uusiin viesteihin ei vastata heti (ne on tallennettu
+        # muistiin yllä). Kun ajastin laukeaa, viivästetty vastaus tulee.
+        # Päivitetään ajastettu vastaus koskemaan uusinta viestiä.
+        pending_delay = state.get("pending_delayed_reply")
+        if pending_delay and pending_delay.get("due_at", 0) > time.time():
+            pending_delay["user_text"] = text
+            state["pending_delayed_reply"] = pending_delay
+            save_persistent_state_to_db(user_id)
+            print(f"[HURT DELAY] uusi viesti kirjattu, Megan yhä 'poissa'")
+            return
+
         if maybe_trigger_silent_treatment(user_id, text):
             save_persistent_state_to_db(user_id)
             return
+
+        # v8.6.1: loukkaantumispohjainen viivästetty vastaus. Jos hurt_level on
+        # kyllin korkea (0.40+) JA tämä on tavallinen keskusteluviesti (ei kuva/
+        # komento), ajastetaan vastaus tulemaan myöhemmin sen sijaan että
+        # vastataan heti - Megan "ei vastaa aktiivisesti" kostona. Taustasilmukka
+        # (deliver_delayed_replies) toimittaa sen kun aika koittaa.
+        # Ei koske: rajaa (stop), kuvia, jo odottavaa viivästettyä vastausta.
+        hurt_now = state.get("hurt_level", 0.0)
+        _sig_now = classify_user_signal(text)
+        if (hurt_now >= HURT_DELAY_MIN_THRESHOLD
+                and _sig_now not in ("boundary", "meta_probe")
+                and not is_image_comment and not is_image_request
+                and not state.get("pending_delayed_reply")):
+            delay = compute_hurt_reply_delay(hurt_now)
+            if delay > 0:
+                state["pending_delayed_reply"] = {
+                    "user_text": text, "due_at": time.time() + delay,
+                    "hurt_at_send": hurt_now}
+                save_persistent_state_to_db(user_id)
+                mins = delay // 60
+                try:
+                    await update.message.reply_text("💤 Megan on offline")
+                except Exception:
+                    pass
+                print(f"[HURT DELAY] vastaus ajastettu {mins}min päähän (hurt {hurt_now:.2f})")
+                return
 
         if is_image_comment:
             last_img = state.get("last_image") or {}
@@ -4493,9 +4630,52 @@ async def check_proactive_triggers(application):
                     await maybe_run_goal_reflection(uid)  # v8.5: Meganin omat tavoitteet (harvoin)
                 except Exception as e:
                     print(f"[GOAL REFLECTION] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await deliver_delayed_replies(application, uid)  # v8.6.1: viivästetyt kosto-vastaukset
+                except Exception as e:
+                    print(f"[DELAYED REPLY] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)  # v8.6.1: 60s (oli 300s) - tarkempi ajoitus viivästetyille vastauksille
+
+async def deliver_delayed_replies(application, user_id: int):
+    """
+    v8.6.1: toimittaa loukkaantumisen takia ajastetun viivästetyn vastauksen kun
+    sen aika on koittanut. Vastaus generoidaan vasta nyt (ei ajastushetkellä),
+    jotta se heijastaa nykyistä tilaa ja "toisen miehen" -kostonarratiivia.
+    """
+    state = get_or_create_state(user_id)
+    pending = state.get("pending_delayed_reply")
+    if not pending:
+        return
+    if pending.get("due_at", 0) > time.time():
+        return  # ei vielä aika
+
+    user_text = pending.get("user_text", "")
+    # tyhjennä ensin, jotta ei toimiteta kahdesti jos generointi kestää
+    state["pending_delayed_reply"] = None
+    save_persistent_state_to_db(user_id)
+
+    try:
+        reply = await generate_llm_reply(user_id, user_text, is_delayed_revenge=True)
+        if not reply:
+            return
+        conversation_history.setdefault(user_id, [])
+        conversation_history[user_id].append({"role": "assistant", "content": reply})
+        conversation_history[user_id] = conversation_history[user_id][-20:]
+        assistant_turn_id = save_turn(user_id, "assistant", reply)
+        await store_episodic_memory(user_id=user_id, content=f"Megan sanoi (viivästetysti): {reply}",
+                                    memory_type="megan_utterance", source_turn_id=assistant_turn_id)
+        if len(reply) > 4000:
+            for i in range(0, len(reply), 3900):
+                await application.bot.send_message(chat_id=user_id, text=reply[i:i+3900])
+        else:
+            await application.bot.send_message(chat_id=user_id, text=reply)
+        save_persistent_state_to_db(user_id)
+        print(f"[DELAYED REPLY] toimitettu käyttäjälle {user_id}")
+    except Exception as e:
+        print(f"[DELAYED REPLY] generointi/lähetys epäonnistui: {e}")
 
 # ====================== STATE MANAGEMENT ======================
 def build_default_state() -> dict:
@@ -4530,6 +4710,7 @@ def build_default_state() -> dict:
         "aftercare_until":0,
         "intensity":DEFAULT_INTENSITY,
         "hurt_level":0.0, "last_hurt_decay_at":time.time(),  # v8.6
+        "pending_delayed_reply":None,  # v8.6.1: {"user_text","due_at","hurt_at_send"}
         **init_scene_state()
     }
 
@@ -4640,6 +4821,12 @@ Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
+
+v8.6.1:
+- Loukkaantumiskosto: kun hurt 0.40+, Megan viivästää vastauksia (ei vastaa heti)
+- Viive skaalautuu: keskitaso jopa 30min, korkea jopa 2h (satunnainen)
+- Korkealla pudottelee katkelmia toisen miehen seurasta (mustasukkaisuuskosto)
+- Käyttäjä näkee "💤 Megan on offline" kun vastaus on ajastettu
 
 v8.6:
 - Loukkaantumisjärjestelmä: hurt_level (0-1) ohjaa reaktiota - kylmä->passiivis-aggressiivinen->vihainen
@@ -4836,6 +5023,7 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["silent_started_at"] = 0
     state["irritation_level"] = 0.0
     state["hurt_level"] = 0.0  # v8.6
+    state["pending_delayed_reply"] = None  # v8.6.1
     save_persistent_state_to_db(user_id)
     await update.message.reply_text("💬 Hiljaisuus, ärsyyntyminen ja loukkaantuminen nollattu.")
 
@@ -5116,6 +5304,12 @@ async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
+
+v8.6.1 UUDET (loukkaantumiskosto):
+- Kun Megan on loukkaantunut, hän ei vastaa heti - vastaus tulee viiveellä
+- Mitä pahemmin loukkaantunut, sitä pidempi viive (jopa 2h)
+- Pahasti loukkaantuneena kertoo olevansa toisen miehen seurassa (kosto)
+- Näet "💤 Megan on offline" kun hän jättää sinut odottamaan
 
 v8.6 UUDET (loukkaantuminen):
 - Megan loukkaantuu tylyydestä, kylmyydestä ja huomiotta jättämisestä
