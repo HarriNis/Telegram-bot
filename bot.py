@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.7.1-hurt-location-aware
+Megan Telegram Bot - v8.7.2-prefill-fix
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -253,7 +253,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.7.1-hurt-location-aware"
+BOT_VERSION = "8.7.2-prefill-fix"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1104,18 +1104,17 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
     if claude:
         model = CLAUDE_MODEL_LIGHT if prefer_light else CLAUDE_MODEL_PRIMARY
         messages = [{"role": "user", "content": user_prompt}]
-        # v8.5: json_mode myös Claude-polulle. Anthropic ei tue response_format-
-        # parametria kuten Grok, mutta sama tulos saadaan (a) ohjeistamalla
-        # systeemipromptissa ja (b) esitäyttämällä assistantin vuoro "{"-merkillä,
-        # jolloin malli jatkaa suoraan JSON-objektista eikä voi lisätä
-        # selittävää tekstiä alkuun. Aiemmin json_mode ohitettiin Claudella
-        # kokonaan, mikä teki JSON-jäsennyksestä haurasta (esim. tavoitereflektio).
+        # v8.7.2: json_mode Claude-polulla PELKÄN system-ohjeen kautta.
+        # HUOM: aiempi (v8.5) tapa esitäyttää assistant-vuoro "{"-merkillä EI toimi
+        # tällä mallilla ("does not support assistant message prefill. The conversation
+        # must end with a user message.") -> se aiheutti 400-virheet KAIKKIIN
+        # JSON-taustakutsuihin. Nyt pyydetään JSON vain ohjeistamalla; parse_json_object
+        # osaa kaivaa JSON-objektin vastauksesta vaikka ympärillä olisi tekstiä.
         json_system_suffix = ""
         if json_mode:
-            json_system_suffix = ("\n\nVASTAA VAIN validilla JSON-objektilla. Älä lisää "
-                                  "mitään tekstiä, selitystä tai koodilohkomerkintöjä ennen "
-                                  "tai jälkeen JSONin.")
-            messages.append({"role": "assistant", "content": "{"})
+            json_system_suffix = ("\n\nVASTAA VAIN validilla JSON-objektilla. Aloita vastaus "
+                                  "suoraan {-merkillä. Älä lisää mitään tekstiä, selitystä tai "
+                                  "koodilohkomerkintöjä (```) ennen tai jälkeen JSONin.")
         kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
         # HUOM: temperature EI lähetetä Claudelle (deprecated uusimmilla malleilla).
         # temperature-parametria käytetään yhä Grok-kutsuun alempana.
@@ -1124,9 +1123,6 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
         try:
             response = await claude.messages.create(**kwargs)
             text = extract_claude_text(response)
-            # v8.5: jos esitäytimme "{"-merkillä, se puuttuu vastauksen alusta - lisää takaisin
-            if json_mode and text and not text.lstrip().startswith("{"):
-                text = "{" + text
             if text and text.strip(): return text.strip()
         except Exception as e:
             inner_msg = _extract_anthropic_error_message(e)
@@ -1145,8 +1141,6 @@ async def call_llm(system_prompt=None, user_prompt="", max_tokens=800,
                 try:
                     response = await claude.messages.create(**retry_kwargs)
                     text = extract_claude_text(response)
-                    if json_mode and text and not text.lstrip().startswith("{"):
-                        text = "{" + text
                     if text and text.strip():
                         print("[LLM] Claude retry (deprecatoitu parametri poistettu) onnistui")
                         return text.strip()
