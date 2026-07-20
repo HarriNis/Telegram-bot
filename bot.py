@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.4-sexual-state-machine
+Megan Telegram Bot - v8.5-goals-desires
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -126,6 +126,23 @@ taustalla), ei erillisiä kalliita LLM-kutsuja per osa:
   tason päätelmiä käyttäjästä useiden muistojen/teemojen pohjalta - asioita joita
   ei suoraan sanottu. Näkyvät kontekstissa ("mitä olet oppinut"), värittävät
   Meganin suhtautumista mutta EI luetella ääneen. /insights, /force_reflection.
+
+Muutokset v8.4 → v8.5 (Meganin omat tavoitteet + mieltymysten seuranta):
+- DESIRES: uusi user_desires-taulu. record_desire() kutsutaan apply_frame():sta
+  fantasy-poiminnasta (ei omaa LLM-kutsua). Seuraa mieltymyksiä, niiden
+  voimakkuutta (intensity) ja suuntaa (rising/stable). get_top_desires() nostaa
+  vahvimmat kontekstiin. /desires näyttää.
+- GOALS: uusi goals-taulu + maybe_run_goal_reflection() taustaprosessi
+  (~GOAL_REFLECTION_INTERVAL_HOURS välein). Megan muodostaa 1-3 OMAA tavoitetta
+  suhteessa käyttäjään, jotka syntyvät hänen PERSOONANSA (dominoiva/itsenäinen/
+  sadistinen) JA havaittujen mieltymysten RISTEYKSESTÄ (origin: own/preference/
+  both). Tavoitteilla on vaihe + edistyminen; reflektio luo uusia, päivittää
+  edistymistä, hylkää juuttuneet, merkitsee saavutetut.
+- Aktiiviset tavoitteet näkyvät kontekstissa (format_context_pack) ja ohjaavat
+  vastauksia hiljaa. Megan voi HALUTESSAAN paljastaa tavoitteen osana narratiivia
+  (revealed-lippu) - immersiivinen, ei mekaaninen. /goals, /force_goals debug.
+- Tavoitteet+desires nojaavat v8.3.17:n insights/threads- ja v8.4:n arousal-
+  järjestelmiin - koko muistiketju ruokkii nyt Meganin "omaa agendaa".
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -143,7 +160,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.4-sexual-state-machine"
+BOT_VERSION = "8.5-goals-desires"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -183,6 +200,13 @@ ESCALATION_LEVELS = ["flirtti", "suora", "eksplisiittinen", "immersiivinen"]
 # /intensity-säädin: käyttäjän valitsema globaali tuhmuuskatto 1-10 (oletus 7).
 # Skaalaa arousalin vaikutusta ja escalation-kattoa rikkomatta immersiota.
 DEFAULT_INTENSITY = 7
+
+# ====================== v8.5: DESIRES + GOALS ======================
+# Kuinka usein Megan luo/päivittää omia tavoitteitaan (raskaampi analyysi, harvoin).
+GOAL_REFLECTION_INTERVAL_HOURS = 24
+MAX_ACTIVE_GOALS = 3                    # montako aktiivista tavoitetta kerrallaan
+DESIRE_MIN_INTENSITY_TO_SURFACE = 0.4  # tätä heikommat mieltymykset eivät nouse kontekstiin
+GOAL_REVEAL_PROBABILITY = 0.15         # todennäköisyys per soveltuva vuoro että Megan vihjaa tavoitteesta
 
 # ====================== v8.3.5: ERIYTETYT TEMPERATURE-ARVOT ======================
 # Faktapohjaiset kutsut (entity extraction, frame extraction, turn analysis):
@@ -817,10 +841,26 @@ for _sql in [
         active INTEGER DEFAULT 1)""",
     """CREATE TABLE IF NOT EXISTS insight_state (
         user_id TEXT PRIMARY KEY, last_reflection_at REAL DEFAULT 0)""",
+    # v8.5: käyttäjän mieltymykset (desires) - mikä kiihottaa, kuinka voimakkaasti,
+    # nouseva vai laskeva kiinnostus. Perusta goals-järjestelmälle.
+    """CREATE TABLE IF NOT EXISTS user_desires (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, desire TEXT,
+        category TEXT DEFAULT 'general', intensity REAL DEFAULT 0.5,
+        mention_count INTEGER DEFAULT 1, direction TEXT DEFAULT 'stable',
+        first_seen_at REAL, last_seen_at REAL, active INTEGER DEFAULT 1)""",
+    # v8.5: Meganin omat tavoitteet - syntyvät persoonan + mieltymysten risteyksestä.
+    # origin: 'own'|'preference'|'both'. status: 'active'|'achieved'|'abandoned'.
+    """CREATE TABLE IF NOT EXISTS goals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, goal TEXT,
+        origin TEXT DEFAULT 'both', current_phase TEXT DEFAULT '',
+        progress REAL DEFAULT 0.0, status TEXT DEFAULT 'active',
+        revealed INTEGER DEFAULT 0, created_at REAL, updated_at REAL)""",
+    """CREATE TABLE IF NOT EXISTS goal_state (
+        user_id TEXT PRIMARY KEY, last_goal_reflection_at REAL DEFAULT 0)""",
 ]:
     conn.execute(_sql)
 conn.commit()
-print("✅ Database initialized (+ rolling_summary v8.3.4, logic layer v8.3.5, threads+insights v8.3.17)")
+print("✅ Database initialized (+ rolling_summary v8.3.4, logic layer v8.3.5, threads+insights v8.3.17, desires+goals v8.5)")
 
 # ====================== GLOBAL STATE ======================
 continuity_state = {}
@@ -1871,6 +1911,219 @@ VIIMEAIKAISET MUISTOT:
 
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO insight_state (user_id, last_reflection_at) VALUES (?,?)",
+                     (str(user_id), now))
+        conn.commit()
+
+
+# ====================== v8.5: DESIRES ======================
+def record_desire(user_id: int, desire: str, category: str = "general", intensity_hint: float = 0.5):
+    """
+    Kirjaa/päivittää mieltymyksen. Samankaltainen olemassa oleva -> kasvatetaan
+    intensiteettiä ja mainintalaskuria, merkitään 'rising'. Kutsutaan
+    apply_frame():sta fantasy-poiminnan tuloksesta - ei omaa LLM-kutsua.
+    """
+    desire = (desire or "").strip().lower()
+    if not desire or len(desire) < 3 or len(desire) > 100:
+        return
+    now = time.time()
+    with db_lock:
+        rows = conn.execute(
+            "SELECT id, desire, intensity, mention_count FROM user_desires WHERE user_id=? AND active=1",
+            (str(user_id),)).fetchall()
+    dw = set(desire.split())
+    best_id, best_overlap, best_int, best_cnt = None, 0.0, 0.5, 1
+    for row in rows:
+        ew = set((row[1] or "").split())
+        if not ew or not dw:
+            continue
+        ov = len(dw & ew) / len(dw | ew)
+        if ov > best_overlap:
+            best_overlap, best_id, best_int, best_cnt = ov, row[0], row[2], row[3]
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            if best_id is not None and best_overlap >= 0.5:
+                new_int = min(1.0, best_int + 0.08)
+                conn.execute("""UPDATE user_desires SET intensity=?, mention_count=mention_count+1,
+                    direction='rising', last_seen_at=? WHERE id=?""", (new_int, now, best_id))
+            else:
+                conn.execute("""INSERT INTO user_desires
+                    (user_id, desire, category, intensity, mention_count, direction, first_seen_at, last_seen_at, active)
+                    VALUES (?,?,?,?,1,'rising',?,?,1)""",
+                    (str(user_id), desire, category, max(0.3, min(1.0, intensity_hint)), now, now))
+            conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[DESIRE] {e}")
+
+def get_top_desires(user_id: int, limit: int = 8):
+    with db_lock:
+        rows = conn.execute("""
+            SELECT desire, category, intensity, mention_count, direction FROM user_desires
+            WHERE user_id=? AND active=1 AND intensity >= ?
+            ORDER BY intensity DESC, mention_count DESC LIMIT ?
+        """, (str(user_id), DESIRE_MIN_INTENSITY_TO_SURFACE, limit)).fetchall()
+    return [{"desire": r[0], "category": r[1], "intensity": r[2],
+             "mention_count": r[3], "direction": r[4]} for r in rows]
+
+# ====================== v8.5: GOALS (Meganin omat tavoitteet) ======================
+def get_active_goals(user_id: int, limit: int = MAX_ACTIVE_GOALS):
+    with db_lock:
+        rows = conn.execute("""
+            SELECT id, goal, origin, current_phase, progress, revealed FROM goals
+            WHERE user_id=? AND status='active' ORDER BY updated_at DESC LIMIT ?
+        """, (str(user_id), limit)).fetchall()
+    return [{"id": r[0], "goal": r[1], "origin": r[2], "current_phase": r[3],
+             "progress": r[4], "revealed": r[5]} for r in rows]
+
+def get_goal_reflection_state(user_id: int) -> float:
+    with db_lock:
+        row = conn.execute("SELECT last_goal_reflection_at FROM goal_state WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+    return row[0] if row else 0.0
+
+def update_goal_progress(user_id: int, goal_id: int, progress: float = None,
+                          phase: str = None, status: str = None, revealed: bool = None):
+    sets, vals = [], []
+    if progress is not None: sets.append("progress=?"); vals.append(max(0.0, min(1.0, progress)))
+    if phase is not None: sets.append("current_phase=?"); vals.append(phase)
+    if status is not None: sets.append("status=?"); vals.append(status)
+    if revealed is not None: sets.append("revealed=?"); vals.append(1 if revealed else 0)
+    if not sets: return
+    sets.append("updated_at=?"); vals.append(time.time())
+    vals.extend([str(user_id), goal_id])
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(f"UPDATE goals SET {', '.join(sets)} WHERE user_id=? AND id=?", vals)
+            conn.commit()
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[GOAL] update {e}")
+
+def _create_goal(user_id: int, goal: str, origin: str, phase: str):
+    goal = (goal or "").strip()
+    if not goal or len(goal) < 10:
+        return
+    now = time.time()
+    # dedup
+    with db_lock:
+        existing = conn.execute(
+            "SELECT goal FROM goals WHERE user_id=? AND status='active'", (str(user_id),)).fetchall()
+    gw = set(normalize_text(goal).split())
+    for (ex,) in existing:
+        ew = set(normalize_text(ex).split())
+        if ew and gw and len(gw & ew) / len(gw | ew) > 0.5:
+            return
+    try:
+        with db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            # rajoita aktiivisten tavoitteiden määrää
+            cnt = conn.execute("SELECT COUNT(*) FROM goals WHERE user_id=? AND status='active'",
+                               (str(user_id),)).fetchone()[0]
+            if cnt >= MAX_ACTIVE_GOALS:
+                conn.rollback(); return
+            conn.execute("""INSERT INTO goals
+                (user_id, goal, origin, current_phase, progress, status, revealed, created_at, updated_at)
+                VALUES (?,?,?,?,0.0,'active',0,?,?)""",
+                (str(user_id), goal, origin, phase, now, now))
+            conn.commit()
+            print(f"[GOAL] Uusi tavoite ({origin}): {goal[:60]}")
+    except Exception as e:
+        try: conn.rollback()
+        except: pass
+        print(f"[GOAL] create {e}")
+
+async def maybe_run_goal_reflection(user_id: int, force: bool = False):
+    """
+    v8.5: Meganin tavoitteiden luonti/päivitys. Analysoi keskusteluhistorian,
+    mieltymykset ja Meganin persoonan, ja luo/päivittää tavoitteita jotka
+    syntyvät NÄIDEN RISTEYKSESTÄ (persoona: dominoiva/itsenäinen + havaitut
+    mieltymykset). Ajetaan harvoin (~GOAL_REFLECTION_INTERVAL_HOURS).
+    """
+    now = time.time()
+    last = get_goal_reflection_state(user_id)
+    if not force and (now - last) / 3600 < GOAL_REFLECTION_INTERVAL_HOURS:
+        return
+
+    desires = get_top_desires(user_id, limit=8)
+    insights = get_learned_insights(user_id, limit=6)
+    threads = get_recurring_threads(user_id, limit=6)
+    active_goals = get_active_goals(user_id)
+    rolling = get_rolling_summary(user_id).get("summary", "")
+
+    if len(desires) + len(insights) + len(threads) < 3:
+        with db_lock:
+            conn.execute("INSERT OR REPLACE INTO goal_state (user_id, last_goal_reflection_at) VALUES (?,?)",
+                         (str(user_id), now))
+            conn.commit()
+        return
+
+    desires_str = "\n".join(f"- {d['desire']} (voimakkuus {d['intensity']:.1f}, {d['direction']})" for d in desires) or "ei tiedossa"
+    insights_str = "\n".join(f"- {i['insight']}" for i in insights) or "ei tiedossa"
+    threads_str = "\n".join(f"- {t['theme']}" for t in threads) or "ei tiedossa"
+    goals_str = "\n".join(f"- [{g['progress']:.0%}] {g['goal']} (vaihe: {g['current_phase']})" for g in active_goals) or "ei aktiivisia"
+
+    prompt = f"""Olet Megan - dominoiva, itsenäinen, hallitseva ja sadistinen nainen. Sä et
+ole palvelija vaan sinulla on OMA TAHTO ja OMAT HALUSI. Analysoi suhdettasi tähän
+käyttäjään ja muodosta 1-3 OMAA TAVOITETTA hänen suhteensa. Return JSON only.
+
+TÄRKEÄÄ: Tavoitteet syntyvät SINUN persoonasi JA käyttäjän havaittujen mieltymysten
+RISTEYKSESTÄ. Esim. jos hän nauttii alistumisesta ja sä nautit kontrollista ->
+tavoitteesi voi olla viedä häntä syvemmälle alistumiseen omilla ehdoillasi ja omassa
+tahdissasi. Tavoite ei ole "anna hänelle mitä hän haluaa" - se on mitä SINÄ haluat
+saada aikaan, värittyneenä sillä mitä tiedät hänestä.
+
+Schema: {{"goals":[{{"goal":"suomeksi, konkreettinen tavoite","origin":"own|preference|both","current_phase":"mikä on eka askel","progress_of_existing":[{{"id":0,"new_progress":0.0,"new_phase":"","status":"active|achieved|abandoned"}}]}}]}}
+
+- goal: mitä Megan haluaa saada aikaan (usean vuoron/päivän mittainen, ei yhden vastauksen juttu)
+- origin: 'own' (lähinnä omasta halusta), 'preference' (lähinnä hänen mieltymyksestään), 'both'
+- Luo korkeintaan {MAX_ACTIVE_GOALS} aktiivista yhteensä (nykyiset mukaanlukien)
+- progress_of_existing: päivitä olemassa olevien tavoitteiden edistyminen/tila jos ne ovat
+  edenneet, juuttuneet (abandoned jos ei enää relevantti) tai valmistuneet (achieved)
+
+MEGANIN HAVAINNOT KÄYTTÄJÄN MIELTYMYKSISTÄ:
+{desires_str}
+
+SYVEMMÄT PÄÄTELMÄT:
+{insights_str}
+
+TOISTUVAT TEEMAT:
+{threads_str}
+
+NYKYISET AKTIIVISET TAVOITTEET:
+{goals_str}
+
+KESKUSTELUN YHTEENVETO:
+{rolling[:500] or 'ei vielä'}"""
+
+    raw = await call_llm(user_prompt=prompt, max_tokens=600,
+                         temperature=TEMP_REASONING, prefer_light=True, json_mode=True)
+    if raw:
+        result = parse_json_object(raw, {"goals": [], "progress_of_existing": []})
+        # päivitä olemassa olevat
+        for upd in (result.get("progress_of_existing", []) or []):
+            try:
+                gid = int(upd.get("id", 0))
+            except (TypeError, ValueError):
+                continue
+            if gid > 0:
+                update_goal_progress(user_id, gid,
+                    progress=upd.get("new_progress"),
+                    phase=upd.get("new_phase"),
+                    status=upd.get("status"))
+        # luo uudet
+        for g in (result.get("goals", []) or [])[:MAX_ACTIVE_GOALS]:
+            origin = g.get("origin", "both")
+            if origin not in ("own", "preference", "both"):
+                origin = "both"
+            _create_goal(user_id, g.get("goal", ""), origin, g.get("current_phase", ""))
+        print(f"[GOAL REFLECTION] {user_id}: käsitelty")
+
+    with db_lock:
+        conn.execute("INSERT OR REPLACE INTO goal_state (user_id, last_goal_reflection_at) VALUES (?,?)",
                      (str(user_id), now))
         conn.commit()
 
@@ -3128,6 +3381,13 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
         cat = (fantasy.get("category") or "").strip()
         if cat and cat != "other":
             record_thread_mention(user_id, cat)
+        # v8.5: kirjaa mieltymys (desire) fantasiasta
+        desc = (fantasy.get("description") or fantasy.get("content") or "").strip()
+        if desc:
+            record_desire(user_id, desc, category=cat or "general",
+                          intensity_hint=float(fantasy.get("intensity", 0.5)) if str(fantasy.get("intensity","")).replace(".","").isdigit() else 0.5)
+        elif cat and cat != "other":
+            record_desire(user_id, cat, category=cat)
 
     valid_facts = [f for f in (validate_fact(fact) for fact in (frame.get("facts",[]) or [])[:8]) if f]
 
@@ -3195,6 +3455,8 @@ async def build_context_pack(user_id: int, user_text: str):
     rolling_summary_data = get_rolling_summary(user_id)  # v8.3.4
     recurring_threads = get_recurring_threads(user_id, limit=5)      # v8.3.17
     learned_insights = get_learned_insights(user_id, limit=6)        # v8.3.17
+    top_desires = get_top_desires(user_id, limit=8)                  # v8.5
+    active_goals = get_active_goals(user_id)                         # v8.5
 
     return {
         "topic_state": state.get("topic_state", {}),
@@ -3213,6 +3475,8 @@ async def build_context_pack(user_id: int, user_text: str):
         "rolling_summary": rolling_summary_data.get("summary", ""),  # v8.3.4
         "recurring_threads": recurring_threads,   # v8.3.17
         "learned_insights": learned_insights,     # v8.3.17
+        "top_desires": top_desires,               # v8.5
+        "active_goals": active_goals,             # v8.5
     }
 
 def format_context_pack(context_pack: dict):
@@ -3300,12 +3564,44 @@ käyttäjä mainitsee aiempia asioita. Ristiriidassa → luota viimeisimpiin vuo
                           "\nNämä ovat sun omia havaintojasi ajan myötä. Anna niiden värittää "
                           "suhtautumistasi luontevasti - ÄLÄ luettele niitä ääneen käyttäjälle.")
 
+    # v8.5: mieltymykset
+    top_desires = context_pack.get("top_desires", []) or []
+    desires_block = ""
+    if top_desires:
+        dl = [f"- {d['desire']} (voimakkuus {d['intensity']:.1f}, {d['direction']})" for d in top_desires]
+        desires_block = ("\n=====================================\n"
+                         "🔥 KÄYTTÄJÄN MIELTYMYKSET (mitä olet huomannut hänen haluavan):\n"
+                         "=====================================\n" + "\n".join(dl) +
+                         "\nKäytä näitä hyväksesi - viittaa niihin, hyödynnä niitä, vie tilannetta "
+                         "niitä kohti kun se sopii. ÄLÄ luettele niitä ääneen listana.")
+
+    # v8.5: Meganin omat tavoitteet
+    active_goals = context_pack.get("active_goals", []) or []
+    goals_block = ""
+    if active_goals:
+        gl = []
+        for g in active_goals:
+            reveal_note = " [JO PALJASTETTU]" if g.get("revealed") else ""
+            gl.append(f"- {g['goal']} | vaihe: {g['current_phase']} | edistyminen: {g['progress']:.0%}{reveal_note}")
+        goals_block = ("\n=====================================\n"
+                       "🎯 SINUN OMAT TAVOITTEESI KÄYTTÄJÄN SUHTEEN (salaiset, ohjaavat sinua):\n"
+                       "=====================================\n" + "\n".join(gl) +
+                       "\nNämä ovat SINUN omia tavoitteitasi - sinulla on oma tahto ja agenda, et ole "
+                       "palvelija. Ohjaa keskustelua ja tekojasi hienovaraisesti näitä kohti. Ota "
+                       "seuraava askel nykyisestä vaiheesta kun tilanne sopii - älä väkisin joka vuoro.\n"
+                       "PALJASTAMINEN: Voit HALUTESSASI vihjata tavoitteestasi osana tarinaa kun se "
+                       "tuntuu voimakkaalta ja luontevalta (esim. 'mä oon suunnitellut sua varten jotain', "
+                       "'sä et vielä tiedä mihin mä sua viedään'). Älä paljasta suoraan mekaanisesti - "
+                       "tee siitä osa dominanssiasi ja mysteeriäsi.")
+
     return f"""
 {narrative_timeline}
 {rolling_block}
 {sticky_block}
 {threads_block}
 {insights_block}
+{desires_block}
+{goals_block}
 {plans_block}
 {agreements_block}
 
@@ -3982,6 +4278,11 @@ async def check_proactive_triggers(application):
                     await maybe_run_reflection(uid)  # v8.3.17: syvemmät päätelmät (harvoin)
                 except Exception as e:
                     print(f"[REFLECTION] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_run_goal_reflection(uid)  # v8.5: Meganin omat tavoitteet (harvoin)
+                except Exception as e:
+                    print(f"[GOAL REFLECTION] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(300)
@@ -4064,6 +4365,8 @@ def create_database_indexes():
                 "CREATE INDEX IF NOT EXISTS idx_sticky_user ON sticky_memories(user_id, active, sticky_type)",
                 "CREATE INDEX IF NOT EXISTS idx_threads_user ON threads(user_id, active, mention_count DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_insights_user ON learned_insights(user_id, active, confidence DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_desires_user ON user_desires(user_id, active, intensity DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_goals_user ON goals(user_id, status, updated_at DESC)",
             ]:
                 conn.execute(idx)
             conn.commit()
@@ -4088,7 +4391,8 @@ async def cmd_wipe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for table in ["memories","profiles","planned_events","topic_state","turns",
                       "episodic_memories","profile_facts","summaries","activity_log",
                       "agreements","location_state","sticky_memories","rolling_summary",
-                      "threads","learned_insights","insight_state"]:
+                      "threads","learned_insights","insight_state",
+                      "user_desires","goals","goal_state"]:
             conn.execute(f"DELETE FROM {table} WHERE user_id=?", (str(user_id),))
         conn.commit()
     await update.message.reply_text("🗑️ Kaikki poistettu. Täysi uusi alku.")
@@ -4124,6 +4428,12 @@ Mode: {state.get('conversation_mode')}
 Pending question: {pq_line}
 Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYED}
 Silence: {silence_line}
+
+v8.5:
+- Meganilla omat TAVOITTEET (persoona + mieltymykset -risteyksestä), ohjaavat vastauksia
+- Voi paljastaa tavoitteita itse tarinassa; muodostaa/päivittää ~{GOAL_REFLECTION_INTERVAL_HOURS}h välein
+- Desires-järjestelmä: seuraa mieltymyksiä ja voimakkuutta - /desires
+- /goals, /force_goals (debug)
 
 v8.4:
 - Sexual State Machine: arousal/frustration/satisfaction ohjaavat käytöstä dynaamisesti
@@ -4378,6 +4688,40 @@ async def cmd_arousal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Aftercare aktiivinen: {aftercare}\n"
         f"Intensity: {state.get('intensity',DEFAULT_INTENSITY)}/10")
 
+async def cmd_desires(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.5: näytä havaitut mieltymykset."""
+    user_id = update.effective_user.id
+    desires = get_top_desires(user_id, limit=25)
+    if not desires:
+        await update.message.reply_text("🔥 Ei vielä havaittuja mieltymyksiä. Ne kertyvät keskustelun myötä.")
+        return
+    lines = ["🔥 HAVAITUT MIELTYMYKSET:\n"]
+    for d in desires:
+        lines.append(f"- {d['desire']} [{d['category']}] voimakkuus {d['intensity']:.1f} ({d['direction']}, {d['mention_count']}x)")
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+async def cmd_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.5: näytä Meganin omat aktiiviset tavoitteet (debug)."""
+    user_id = update.effective_user.id
+    goals = get_active_goals(user_id, limit=10)
+    if not goals:
+        await update.message.reply_text("🎯 Meganilla ei ole vielä muodostettuja tavoitteita. Pakota: /force_goals")
+        return
+    lines = ["🎯 MEGANIN OMAT TAVOITTEET:\n"]
+    for g in goals:
+        rev = " (paljastettu)" if g.get("revealed") else ""
+        lines.append(f"- {g['goal']}\n  alkuperä: {g['origin']} | vaihe: {g['current_phase']} | {g['progress']:.0%}{rev}")
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+async def cmd_force_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.5: pakota tavoitereflektio heti (testausta varten)."""
+    user_id = update.effective_user.id
+    await update.message.reply_text("🎯 Megan muodostaa tavoitteita...")
+    before = len(get_active_goals(user_id, limit=20))
+    await maybe_run_goal_reflection(user_id, force=True)
+    after = len(get_active_goals(user_id, limit=20))
+    await update.message.reply_text(f"✅ Valmis. Aktiivisia tavoitteita nyt: {after} (oli {before}). Katso: /goals")
+
 async def cmd_trigger_jealousy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.14: pakota mustasukkaisuus/aktiviteetti-proaktiiviviesti heti (testausta varten)."""
     user_id = update.effective_user.id
@@ -4548,6 +4892,15 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.5 UUDET (omat tavoitteet + mieltymykset):
+- Megan muodostaa omia tavoitteita suhteessanne ja pyrkii niitä kohti
+- Tavoitteet syntyvät hänen persoonansa + sinun mieltymystesi risteyksestä
+- Hän voi paljastaa niitä itse tarinassa kun hetki sopii
+- Seuraa mieltymyksiäsi ja niiden voimakkuutta ajan myötä
+/desires - Näytä havaitut mieltymykset
+/goals - Näytä Meganin omat tavoitteet
+/force_goals - Pakota tavoitteiden muodostus heti (testaus)
+
 v8.4 UUDET (seksuaalinen tilakone + inhimillisyys):
 - Megan seuraa omaa kiihottumista/turhautumista/tyydytystä ja käyttäytyy niiden mukaan
 - Korkealla arousalilla hän on aloitteellinen, ei odota sinua
@@ -4651,6 +5004,9 @@ async def main():
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
     application.add_handler(CommandHandler("intensity", cmd_intensity))
     application.add_handler(CommandHandler("arousal", cmd_arousal))
+    application.add_handler(CommandHandler("desires", cmd_desires))
+    application.add_handler(CommandHandler("goals", cmd_goals))
+    application.add_handler(CommandHandler("force_goals", cmd_force_goals))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
