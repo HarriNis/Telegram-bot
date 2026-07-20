@@ -491,6 +491,15 @@ openrouter_client = (AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://o
 if openrouter_client is not None:
     print(f"✅ OpenRouter ({OPENROUTER_MODEL})")
 print(f"ℹ️ NSFW-tarjoaja: {NSFW_PROVIDER}")
+
+def _active_nsfw_provider_label() -> str:
+    """v8.8: kertoo mikä NSFW-tarjoaja on oikeasti aktiivinen (sama valinta kuin
+    itse kutsussa) - näkyy /status-komennossa jotta näet kumpi malli vastaa."""
+    if NSFW_PROVIDER == "openrouter" and openrouter_client is not None:
+        return f"OpenRouter ({OPENROUTER_MODEL})"
+    if grok_client is not None:
+        return f"Grok ({GROK_MODEL})"
+    return "Claude (ei erillistä NSFW-tarjoajaa)"
 claude_client = None
 
 def get_claude_client():
@@ -3256,6 +3265,14 @@ def maybe_trigger_silent_treatment(user_id: int, user_text: str) -> bool:
     if state.get("silent_until", 0) > now:
         return False  # jo hiljaa
 
+    # v8.8: hiljaisuus (mykkäkoulu / katoaminen) on VIESTITTELY-mekanismi. Se on
+    # absurdi kun ollaan fyysisesti samassa tilassa ("together") - ei voi "olla
+    # vastaamatta viestiin" kun istutaan vierekkäin. Loukkaantuminen/mustasukkaisuus
+    # yhdessä ollessa hoidetaan läsnäolevasti (get_hurt_directive haarautuu jo
+    # sijainnin mukaan v8.7.1). Estä siis kaikki hiljaisuustyypit kun together.
+    if state.get("location_status", "separate") == "together":
+        return False
+
     irritation = state.get("irritation_level", 0.0)
     if irritation >= IRRITATION_THRESHOLD_ANNOYED:
         minutes = random.randint(SILENT_ANNOYED_MIN_MINUTES, SILENT_ANNOYED_MAX_MINUTES)
@@ -4643,6 +4660,37 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
     return reply
 
 # ====================== HANDLE MESSAGE (v8.3.5) ======================
+async def send_long_message(bot, chat_id: int, text: str, reply_to=None):
+    """
+    v8.8: turvallinen viestin lähetys joka pilkkoo Telegramin 4096 merkin rajan
+    yli menevät viestit useaan osaan. Pilkkoo mielellään rivinvaihdon tai välilyönnin
+    kohdalta jotta katkos ei osu kesken sanan. Korjaa "Message is too long" -virheen
+    joka tuli kun NSFW-vastaus (max_tokens 1400) ylitti rajan.
+    """
+    LIMIT = 3900  # varmuusvara Telegramin 4096:een (emojit/muotoilu vievät tilaa)
+    if not text:
+        return
+    if len(text) <= LIMIT:
+        await bot.send_message(chat_id=chat_id, text=text)
+        return
+    # pilko pitkä teksti: yritä katkaista rivinvaihdon tai välilyönnin kohdalta
+    chunks = []
+    remaining = text
+    while len(remaining) > LIMIT:
+        cut = remaining.rfind("\n", 0, LIMIT)
+        if cut < LIMIT // 2:
+            cut = remaining.rfind(" ", 0, LIMIT)
+        if cut < LIMIT // 2:
+            cut = LIMIT
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    for i, chunk in enumerate(chunks, 1):
+        await bot.send_message(chat_id=chat_id, text=chunk)
+        if i < len(chunks):
+            await asyncio.sleep(0.3)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = None
     try:
@@ -4810,13 +4858,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await maybe_create_summary(user_id)
 
-        if len(reply) > 4000:
-            chunks = [reply[i:i+3900] for i in range(0, len(reply), 3900)]
-            for i, chunk in enumerate(chunks, 1):
-                await update.message.reply_text(chunk)
-                if i < len(chunks): await asyncio.sleep(0.3)
-        else:
-            await update.message.reply_text(reply)
+        await send_long_message(context.bot, update.effective_chat.id, reply)
 
         save_persistent_state_to_db(user_id)
 
@@ -4899,11 +4941,7 @@ async def deliver_delayed_replies(application, user_id: int):
         assistant_turn_id = save_turn(user_id, "assistant", reply)
         await store_episodic_memory(user_id=user_id, content=f"Megan sanoi (viivästetysti): {reply}",
                                     memory_type="megan_utterance", source_turn_id=assistant_turn_id)
-        if len(reply) > 4000:
-            for i in range(0, len(reply), 3900):
-                await application.bot.send_message(chat_id=user_id, text=reply[i:i+3900])
-        else:
-            await application.bot.send_message(chat_id=user_id, text=reply)
+        await send_long_message(application.bot, user_id, reply)
         save_persistent_state_to_db(user_id)
         print(f"[DELAYED REPLY] toimitettu käyttäjälle {user_id}")
     except Exception as e:
@@ -5054,6 +5092,7 @@ Irritation: {state.get('irritation_level',0.0):.1f}/{IRRITATION_THRESHOLD_ANNOYE
 Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
+NSFW-tarjoaja: {_active_nsfw_provider_label()}
 
 v8.8:
 - Tilat yhdistetty yhdeksi priorisoiduksi ohjeeksi (hurt > sexual > mood, aftercare erikois)
