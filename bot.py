@@ -469,6 +469,17 @@ REPLICATE_API_KEY = os.getenv("REPLICATE_API_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
 NSFW_PROVIDER = os.getenv("NSFW_PROVIDER", "grok").lower()
+# v8.8: NSFW-polun temperature ja top_p ympäristömuuttujina, jotta ne voi säätää
+# mallikohtaisesti Renderistä ilman koodimuutosta. Euryale suosittelee ~1.1,
+# DeepSeek/Grok toimivat ~0.95:llä.
+try:
+    NSFW_TEMPERATURE = float(os.getenv("NSFW_TEMPERATURE", "1.05"))
+except ValueError:
+    NSFW_TEMPERATURE = 1.05
+try:
+    NSFW_TOP_P = float(os.getenv("NSFW_TOP_P", "0.95"))
+except ValueError:
+    NSFW_TOP_P = 0.95
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN puuttuu!")
@@ -495,9 +506,9 @@ def _active_nsfw_provider_label() -> str:
     """v8.8: kertoo mikä NSFW-tarjoaja on oikeasti aktiivinen (sama valinta kuin
     itse kutsussa) - näkyy /status-komennossa jotta näet kumpi malli vastaa."""
     if NSFW_PROVIDER == "openrouter" and openrouter_client is not None:
-        return f"OpenRouter ({OPENROUTER_MODEL})"
+        return f"OpenRouter ({OPENROUTER_MODEL}) temp={NSFW_TEMPERATURE}"
     if grok_client is not None:
-        return f"Grok ({GROK_MODEL})"
+        return f"Grok ({GROK_MODEL}) temp={NSFW_TEMPERATURE}"
     return "Claude (ei erillistä NSFW-tarjoajaa)"
 claude_client = None
 
@@ -556,13 +567,18 @@ CORE_PERSONA = {
     ],
     "sexual_preferences": {
         "primary": [
-            "teasing and denial", "direct power dynamics and control",
+            "direct power dynamics and control",
             "strap-on/pegging (introduced directly when ready)",
-            "psychological and verbal dominance", "orgasm control (strict)",
+            "psychological and verbal dominance",
             "cuckold/hotwife themes (introduced when submission is high)",
-            "verbal humiliation and degradation", "chastity and denial play",
+            "verbal humiliation and degradation",
             "actively flirting with other men in front of user",
-            "comparing user unfavorably to other men",
+        ],
+        # v8.9: denial/chastity/orgasm-control siirretty erilliseksi TILANNEKOHTAISEKSI
+        # moodiksi (ei enää primary-listassa kolmesti, mikä teki siitä liian
+        # dominoivan joka vuorossa). Aktivoituu vain joskus, ks. get_denial_directive.
+        "situational_denial": [
+            "teasing and denial", "orgasm control", "chastity play",
         ],
     },
     "physical_description": {
@@ -2924,6 +2940,30 @@ def is_aftercare_active(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("aftercare_until", 0) > time.time()
 
+def get_denial_directive(state: dict, user_text: str = "") -> str:
+    """
+    v8.9: denial/chastity/orgasm-control on nyt TILANNEKOHTAINEN moodi, ei
+    jatkuva pohjavire. Aktivoituu vain osassa vuoroista kun tilanne sopii
+    (korkea arousal + dominoiva escalation), tai jos käyttäjä itse tuo sen esiin.
+    Näin denial on yksi väri muiden joukossa eikä kääntä kaikkea "et saa" -kaavaan.
+    """
+    arousal = state.get("arousal", 0.0)
+    escalation = get_escalation_level(state)
+    # käyttäjä mainitsee itse -> salli denial
+    dl = user_text.lower()
+    user_invokes = any(w in dl for w in ["denial", "chastity", "siveys", "häkki",
+                                         "en saa tulla", "kielsit", "orgasm"])
+    # muuten: vain joskus, kun ollaan jo kiihkeässä dominoivassa tilassa
+    situational = (arousal >= 0.6 and escalation in ("eksplisiittinen", "immersiivinen")
+                   and random.random() < 0.35)
+    if not (user_invokes or situational):
+        return ""
+    return """
+DENIAL-MOODI (tilannekohtainen, EI joka vuoro): Juuri nyt voit leikkiä pidättämisellä -
+estää, kieltää, hallita sitä milloin ja saako käyttäjä laueta. Tämä on yksi työkalu,
+ei koko kohtauksen teema - käytä sitä tässä hetkessä mutta älä jää siihen jumiin.
+"""
+
 def get_sexual_state_directive(state: dict) -> str:
     """Rakentaa system-prompttiin lisättävän ohjeen seksuaalisen tilan mukaan."""
     arousal = state.get("arousal", 0.0)
@@ -3148,7 +3188,7 @@ Oot todella loukkaantunut, vihainen ja kostonhimoinen.
 (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
-def build_composite_state_directive(state: dict, is_delayed_revenge: bool = False) -> str:
+def build_composite_state_directive(state: dict, is_delayed_revenge: bool = False, composite_user_text: str = "") -> str:
     """
     v8.8 (Grokin katselmus, kohta 3): kokoaa Meganin sisäisen tilan YHDEKSI
     priorisoiduksi ohjeeksi sen sijaan että liimattaisiin useita erillisiä
@@ -3197,6 +3237,10 @@ def build_composite_state_directive(state: dict, is_delayed_revenge: bool = Fals
     sexual_dir = get_sexual_state_directive(state).strip()
     if sexual_dir:
         parts.append(sexual_dir)
+        # v8.9: denial-moodi tilannekohtaisesti sexual-tilan päälle (ei aftercaren aikana)
+        denial_dir = get_denial_directive(state, composite_user_text).strip()
+        if denial_dir:
+            parts.append(denial_dir)
 
     # PRIORITEETTI 3: MOOD (väritys, mainitaan vain jos ei jo katettu ja ei ristiriidassa)
     mood_dir = get_mood_directive(state).strip()
@@ -4483,7 +4527,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # v8.8 (Grokin katselmus kohta 3): yksi priorisoitu komposiittiohje neljän
     # erillisen get_*_directive-pätkän sijaan - poistaa ristiriitaiset ohjeet ja
     # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
-    composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge)
+    composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge, composite_user_text=user_text)
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
@@ -4557,7 +4601,7 @@ Hyödynnä erityisesti 📝 KUMULATIIVINEN MUISTIYHTEENVETO jos käyttäjä viit
         try:
             response = await nsfw_client.chat.completions.create(
                 model=nsfw_model, messages=messages, max_tokens=1400,
-                temperature=0.95, top_p=0.95)
+                temperature=NSFW_TEMPERATURE, top_p=NSFW_TOP_P)
             reply = (response.choices[0].message.content or "").strip()
             if not reply: raise Exception("Empty (malli palautti tyhjän - mahdollinen moderointi)")
             print(f"[NSFW-HYBRID] {nsfw_label} OK ({nsfw_model}): {len(reply)} chars")
