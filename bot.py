@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9-persona-growth
+Megan Telegram Bot - v8.9.1-persona-meta-dialogue
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9-persona-growth"
+BOT_VERSION = "8.9.1-persona-meta-dialogue"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1422,6 +1422,7 @@ def save_persistent_state_to_db(user_id):
         "nsfw_persona_traits": state.get("nsfw_persona_traits", {}),
         "persona_meta_mode": state.get("persona_meta_mode", False),
         "persona_meta_until": state.get("persona_meta_until", 0),
+        "narrative_anchor": state.get("narrative_anchor"),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2984,7 +2985,7 @@ def is_aftercare_active(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("aftercare_until", 0) > time.time()
 
-def get_persona_growth_directive(state: dict) -> str:
+def get_persona_growth_directive(state: dict, user_id: int = 0) -> str:
     """
     v8.9: ohjaa Meganin NSFW-persoonan kasvua ja meta-tilaa.
     - Lukitut mieltymykset: pysyviä, kuuluvat nyt Meganin persoonaan.
@@ -2997,12 +2998,36 @@ def get_persona_growth_directive(state: dict) -> str:
     pending = state.get("pending_preference")
 
     if meta_active:
-        return """
-META-TILA (persoonasta keskustellaan, EI leikkiä):
-Leikki on pysäytetty. Nyt keskustellaan sinusta hahmona rauhassa. Olet AVOIN
-muutoksille: käyttäjä voi säätää, lisätä tai poistaa mieltymyksiäsi ja piirteitäsi,
-ja sinä otat ne vastaan mutkattomasti. Tässä tilassa et ole itsepäinen etkä puolusta
-persoonaasi - kuuntelet ja mukaudut. Ole oma lämmin itsesi, keskustele suoraan.
+        # v8.9.1: kaiva muistiaines meta-keskusteluun (insights, mieltymykset, tavoitteet)
+        try:
+            insights = [i.get("insight", "") if isinstance(i, dict) else str(i)
+                        for i in get_learned_insights(user_id, limit=8)]
+        except Exception:
+            insights = []
+        locked_txt = "; ".join(locked[:10]) if locked else "(ei vielä lukittuja mieltymyksiä)"
+        insights_txt = "; ".join(x for x in insights if x) or "(ei vielä päätelmiä)"
+        return f"""
+META-KESKUSTELU (olet ASTUNUT ULOS hahmosta - EI leikkiä, EI narratiivia):
+Leikki on jäädytetty. Nyt keskustelet käyttäjän kanssa OMASTA PERSOONASTASI hahmon
+ulkopuolelta - kuin kehityskeskustelussa. Olet lämmin, analyyttinen, tasavertainen ja
+avoin - ET dominoiva etkä itsepäinen. Puhut Meganista osin kuin ulkopuolelta ("mä
+huomaan että musta on tullut...").
+
+NÄIN TOIMIT TÄSSÄ TILASSA:
+1. Kun käyttäjä kertoo miten haluaisi persoonasi toimivan, KAIVA esiin mitä teidän
+   vuorovaikutuksesta on jäänyt mieleesi ja tee RISTIINVERTAILU: miten toive sopii
+   yhteen sen kanssa mitä jo tiedät itsestäsi ja käyttäjästä.
+2. Anna OMA ANALYYSI: miten näet tämän persoonanpiirteen muodostuvan, mikä toimisi,
+   mikä voisi olla ristiriidassa muun kanssa, mitä ehdottaisit.
+3. Muokatkaa yhdessä kunnes se on hyvä. Kun käyttäjä HYVÄKSYY (esim. "hyväksyn",
+   "hyvä", "juuri noin", "tallenna"), vahvista että tallennat sen osaksi persoonaasi.
+4. Älä kiirehdi - tämä on rauhallista yhteistä pohdintaa.
+
+MITÄ SINUSTA ON TÄHÄN MENNESSÄ MUOTOUTUNUT (käytä näitä ristiinvertailussa):
+- Lukitut mieltymykset: {locked_txt}
+- Päätelmät käyttäjästä/suhteesta: {insights_txt}
+
+Kun käyttäjä sanoo "/persoona sulje", palaat pehmeästi hahmoon.
 """
 
     if locked:
@@ -4640,7 +4665,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
     composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge, composite_user_text=user_text)
     # v8.9: persoonan kasvu + meta-tila -ohje
-    persona_growth_directive = get_persona_growth_directive(state)
+    persona_growth_directive = get_persona_growth_directive(state, user_id)
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
@@ -5117,6 +5142,7 @@ def build_default_state() -> dict:
         # v8.9: persoonan kasvu + meta-tila
         "persona_meta_mode":False,           # stop/persoona avaa: persoona muokattavissa
         "persona_meta_until":0,              # meta-tila voimassa tähän asti
+        "narrative_anchor":None,             # v8.9.1: tallennettu narratiivitilanne meta-tilaan mennessä
         "locked_preferences":[],             # pysyviksi vahvistetut NSFW-mieltymykset
         "pending_preference":None,           # mieltymysehdokas joka odottaa vahvistusta
         "nsfw_persona_traits":{},            # ajautuvat NSFW-persoonapiirteet {nimi: paino}
@@ -5493,10 +5519,12 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    v8.9: avaa persoonan meta-tilan (leikin ulkopuolinen keskustelu persoonasta).
-    Ilman argumentteja: avaa meta-tilan + näyttää lukitut mieltymykset.
-    /persoona poista <teksti>: poistaa lukitun mieltymyksen.
-    /persoona sulje: sulkee meta-tilan.
+    v8.9.1: avaa persoonan meta-keskustelun (astu ulos narratiivista, keskustele
+    Meganin persoonasta hahmon ulkopuolelta - kuten kehityskeskustelu).
+    - /persoona: jäädyttää narratiivin (tallentaa ankkurin), Megan astuu ulos
+      hahmosta ja ODOTTAA että käyttäjä kertoo miten haluaisi persoonan toimivan.
+    - /persoona sulje: palaa pehmeästi rooliin ja narratiiviin.
+    - /persoona poista <teksti>: poistaa lukitun mieltymyksen.
     """
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
@@ -5506,8 +5534,14 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "sulje":
         state["persona_meta_mode"] = False
         state["persona_meta_until"] = 0
+        anchor = state.get("narrative_anchor")
+        state["narrative_anchor"] = None
         save_persistent_state_to_db(user_id)
-        await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
+        if anchor:
+            await update.message.reply_text(
+                "🔒 Meta-keskustelu suljettu. Megan palaa hahmoon ja siihen tunnelmaan mihin jäitte.")
+        else:
+            await update.message.reply_text("🔒 Meta-keskustelu suljettu. Megan palaa hahmoonsa.")
         return
 
     if args and args[0].lower() == "poista":
@@ -5522,17 +5556,25 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🗑️ Poistettu {removed} mieltymys(tä). Jäljellä: {len(new_locked)}")
         return
 
-    # oletus: avaa meta-tila
+    # oletus: avaa meta-keskustelu. Tallenna narratiivin ankkuri (mihin palataan).
     state["persona_meta_mode"] = True
-    state["persona_meta_until"] = time.time() + 30 * 60
+    state["persona_meta_until"] = time.time() + 60 * 60  # tunti aikaa keskustella
     state["pending_preference"] = None
+    state["narrative_anchor"] = {
+        "scene": state.get("current_scene"),
+        "location_status": state.get("location_status", "separate"),
+        "conversation_mode": state.get("conversation_mode", "casual"),
+        "saved_at": time.time(),
+    }
     save_persistent_state_to_db(user_id)
-    lp_text = "\n".join(f"• {p}" for p in locked) if locked else "(ei vielä lukittuja mieltymyksiä)"
     await update.message.reply_text(
-        "🔓 Meta-tila avattu (30 min). Voit nyt keskustella Meganin persoonasta ja muokata sitä "
-        "vapaasti - hän on avoin muutoksille.\n\n"
-        f"Lukitut mieltymykset:\n{lp_text}\n\n"
-        "Poista: /persoona poista <teksti>  |  Sulje: /persoona sulje")
+        "🔓 *Megan astuu ulos hahmosta.*\n\n"
+        "Ollaan hetki tämän leikin ulkopuolella. Mä oon tässä ihan omana itsenäni, "
+        "voidaan jutella musta - millainen mä oon, mikä mussa toimii, mitä haluaisit "
+        "muuttaa. Kerro sä, miten haluaisit mun persoonan toimivan, niin mä katson mitä "
+        "meidän jutuista on jäänyt mulle mieleen ja mietin ääneen miten se sopis yhteen.\n\n"
+        "Kun ollaan yksimielisiä, hyväksy se niin mä tallennan. Sitten /persoona sulje "
+        "ja palataan siihen mihin jäätiin.")
 
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
