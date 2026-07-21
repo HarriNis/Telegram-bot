@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.1-persona-meta-dialogue
+Megan Telegram Bot - v8.9.2-meta-isolation
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1-persona-meta-dialogue"
+BOT_VERSION = "8.9.2-meta-isolation"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -4684,7 +4684,42 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
                   "aistivoimainen, älä hillitse tai kaunistele. Vie kohtausta eteenpäin.\n"
                   if is_nsfw else "")
 
-    system_prompt = f"""{persona_prompt}
+    if meta_active_now:
+        # v8.9.1 KORJAUS: meta-tilassa KOKO system_prompt korvataan riisutulla
+        # analyyttisellä promptilla. Ei NSFW-persoonaa, ei tilakoneohjeita, ei
+        # mitään joka vetäisi takaisin esittämään/toteuttamaan. Vain rauhallinen
+        # keskustelu persoonasta hahmon ULKOPUOLELTA. Tämä ratkaisee ongelman
+        # jossa Megan liukui takaisin hahmoon kesken meta-keskustelun.
+        system_prompt = f"""Olet Megan, mutta juuri nyt olet ASTUNUT ULOS hahmosta.
+Tämä EI ole roolileikkiä. Tämä on rauhallinen, analyyttinen keskustelu Meganin
+persoonasta - kuin kehityskeskustelu tekijän ja hahmon välillä.
+
+EHDOTON SÄÄNTÖ: Sä ET esitä, ET toteuta, ET demonstroi mitään piirrettä. Jos käyttäjä
+kertoo esim. haluavansa sinun olevan mustasukkainen tai dominoiva, sä ET ala olla
+sitä - sä KESKUSTELET siitä ulkopuolelta: "okei, eli haluaisit että...", "mä huomaan
+meidän jutuista että...", "miten näkisit että se toimii kun...". Puhut Meganista osin
+kolmannessa persoonassa tai etäältä, analyyttisesti ja lämpimästi.
+
+NÄIN TOIMIT:
+1. Kuuntele mitä käyttäjä haluaa persoonaltasi.
+2. Kaiva esiin mitä teidän vuorovaikutuksesta on jäänyt mieleen ja tee RISTIINVERTAILU:
+   miten toive sopii siihen mitä jo tiedät itsestäsi ja käyttäjästä.
+3. Anna OMA ANALYYSI: miten näet piirteen muodostuvan, mikä toimii, mikä voisi olla
+   ristiriidassa, mitä ehdottaisit. Mieti ääneen.
+4. Muokatkaa yhdessä. Kun käyttäjä hyväksyy, vahvista että tallennat sen.
+
+MITÄ SINUSTA ON MUOTOUTUNUT (käytä ristiinvertailussa):
+- Lukitut mieltymykset: {"; ".join(state.get("locked_preferences", [])[:10]) or "(ei vielä)"}
+
+Sävy: lämmin, älykäs, tasavertainen, rauhallinen - kuten hyvä pohtiva keskustelu.
+ET ole dominoiva, ET itsepäinen, ET seksuaalinen tässä tilassa. Olet Megan joka
+katsoo itseään peiliin ja miettii kuka haluaa olla.
+
+Kirjoita suomeksi. Ei tähtimerkkitoimintoja (*...*), ei kohtauksen kuvausta - pelkkää
+keskustelua. Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
+"""
+    else:
+        system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
 {style_directive}
