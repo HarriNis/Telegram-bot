@@ -419,9 +419,8 @@ IRRITATION_THRESHOLD_ANNOYED = 3.0
 
 SILENT_ANNOYED_MIN_MINUTES = 10
 SILENT_ANNOYED_MAX_MINUTES = 45
-SILENT_JEALOUSY_MIN_MINUTES = 60
-SILENT_JEALOUSY_MAX_MINUTES = 240
-JEALOUSY_GAME_PROBABILITY = 0.04  # per soveltuva vuoro
+# v8.8: SILENT_JEALOUSY_* ja JEALOUSY_GAME_PROBABILITY poistettu satunnaisen
+# jealousy_game-hiljaisuuden poiston yhteydessä.
 
 # ====================== v8.6.1: LOUKKAANTUMISKOSTO (toisen miehen kanssa) ======================
 # Kun Megan on tarpeeksi loukkaantunut, hän voi "kadota toisen miehen seuraan":
@@ -3302,22 +3301,11 @@ def maybe_trigger_silent_treatment(user_id: int, user_text: str) -> bool:
             print(f"[SILENT] hurt_revenge-hiljaisuus käynnistyi: {minutes}min (hurt {hurt:.2f})")
             return True
 
-    # Satunnainen mustasukkaisuus-peli: vain lämpimässä mutta ei-alistuneessa
-    # tilanteessa, harvoin, ja vain jos käyttäjä ei juuri asettanut rajaa.
-    submission = state.get("submission_level", 0.0)
-    mode = state.get("conversation_mode", "casual")
-    signal = classify_user_signal(user_text)
-    eligible = (mode in ("romantic", "suggestive", "nsfw")
-                and submission < 0.5
-                and signal not in ("boundary", "meta_probe", "correction"))
-    if eligible and random.random() < JEALOUSY_GAME_PROBABILITY:
-        minutes = random.randint(SILENT_JEALOUSY_MIN_MINUTES, SILENT_JEALOUSY_MAX_MINUTES)
-        state["silent_until"] = now + minutes * 60
-        state["silent_reason"] = "jealousy_game"
-        state["silent_started_at"] = now
-        print(f"[SILENT] jealousy-game-hiljaisuus käynnistyi: {minutes}min")
-        return True
-
+    # v8.8: satunnainen jealousy_game-hiljaisuus POISTETTU. Se laukesi täysin
+    # satunnaisesti irrallaan narratiivista (esim. kesken NSFW-hetken samassa
+    # tilassa) ja jopa 240 min pituisena -> jumitti botin ja näytti bugilta.
+    # Loukkaantumis- ja ärsyyntymispohjaiset hiljaisuudet (yllä) säilyvät koska
+    # ne seuraavat loogisesti jostain syystä.
     return False
 
 def get_silence_return_directive(user_id: int) -> str:
@@ -5186,7 +5174,7 @@ v8.3.9:
 
 v8.3.8:
 - Aikatietoisuus: NYKYHETKI + EDELLISESTÄ VIESTISTÄ KULUNUT joka context packissa
-- Hiljaisuus-mekaniikka: ON (annoyed-kynnys {IRRITATION_THRESHOLD_ANNOYED}, jealousy-game p={JEALOUSY_GAME_PROBABILITY})
+- Hiljaisuus-mekaniikka: ON (annoyed-kynnys {IRRITATION_THRESHOLD_ANNOYED}; satunnainen jealousy-game POISTETTU v8.8)
 
 v8.3.7 loogisuus:
 - Pending question -seuranta: ON (estää monotonisen kyselyn)
@@ -5203,7 +5191,7 @@ v8.3.4 muisti:
 - Sticky memories: ON
 - Speaker separation: ON
 """
-    await update.message.reply_text(txt)
+    await send_long_message(context.bot, update.effective_chat.id, txt)
 
 async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -5694,7 +5682,7 @@ Sticky: /add_sticky <tyyppi> <sisältö> | /forget_sticky <id>
 Control: /scene <tyyppi> | /together /separate | /mood <tyyppi> | /tension <0.0-1.0>
 Media: /image [kuvaus] | /activity <tyyppi> [tunnit]
 """
-    await update.message.reply_text(txt)
+    await send_long_message(context.bot, update.effective_chat.id, txt)
 
 # ====================== MAIN ======================
 async def main():
