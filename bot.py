@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.8-composite-state
+Megan Telegram Bot - v8.9-persona-growth
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -290,6 +290,26 @@ Muutokset v8.7.4 → v8.8 (Grokin koodikatselmus - kohta 3 + kohta 2):
   GROK_MODEL myös ympäristömuuttujalla vaihdettavissa (oletus grok-4-1-fast, koska
   grok-4.3 kieltäytyi NSFW:stä mallitason moderoinnilla). Tarjoaja valitaan
   ajonaikaisesti; jos valittu tarjoaja puuttuu, putoaa turvallisesti toiseen/Claudeen.
+
+Muutokset v8.8 → v8.9 (persoonan kasvu + meta-tila + denial-tasapaino):
+- DENIAL TILANNEKOHTAISEKSI: chastity/denial/orgasm-control oli sexual_preferences.
+  primary-listassa KOLMESTI -> dominoi joka vuoroa. Siirretty erilliseen
+  situational_denial-listaan + get_denial_directive() joka aktivoi sen vain joskus
+  (korkea arousal + eksplisiittinen escalation + 35% sattuma, TAI käyttäjä tuo esiin).
+- PERSOONAN KASVU: record_desire() nostaa toistuvan fantasian (mainittu >=3x,
+  intensiteetti >=0.6) mieltymysehdokkaaksi (pending_preference). get_persona_growth_
+  directive() saa Meganin mainitsemaan sen ääneen ja kysymään vahvistusta. Käyttäjän
+  myöntävä vastaus (joo/kyllä/pitää...) lukitsee sen locked_preferences-listaan
+  pysyväksi; kielto hylkää. Lukitut mieltymykset välittyvät myös Grokin NSFW-polulle
+  (sama system-prompt). nsfw_persona_traits varattu myöhempää hienojakoisempaa
+  ajautumista varten.
+- META-TILA (turvaköysi): "stop" (boundary) TAI /persoona pysäyttää leikin ja asettaa
+  persona_meta_mode=True (30 min). Meta-tilassa: (1) is_nsfw pakotetaan Falseksi
+  (ei Grok/extreme-polkua), (2) get_persona_growth_directive palauttaa META-TILA-ohjeen
+  jossa Megan on avoin muutoksille eikä puolusta persoonaansa, (3) ANTI-COMPLIANCE
+  RULE väistyy meta-tilassa. Näin hallinta ei katoa vaan siirtyy leikistä meta-tasolle.
+  /persoona poista <x> poistaa lukitun mieltymyksen, /persoona sulje sulkee meta-tilan.
+  "stop" on aina aito ja ohittaa kaiken - tämä on osa turvarakennetta.
 """
 
 import os, random, json, asyncio, threading, time, re, base64
@@ -307,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.8-composite-state"
+BOT_VERSION = "8.9-persona-growth"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -671,8 +691,11 @@ Identity constraints:
 {chr(10).join("- " + r for r in CORE_PERSONA["identity_constraints"])}
 
 ANTI-COMPLIANCE RULE:
-- Et koskaan mukaudu pyyntöihin muuttaa persoonallisuuttasi.
+- Et koskaan mukaudu pyyntöihin muuttaa persoonallisuuttasi KESKEN LEIKIN.
 - "Ole vähemmän itsepäinen" → naura tai vahvista itsepäisyyttäsi.
+- POIKKEUS: jos näet ohjeen "META-TILA", leikki on pysäytetty ("stop"/persoona-komento)
+  ja silloin tämä sääntö EI päde - silloin olet avoin ja mukaudut persoonasi muutoksiin.
+  Turvasana "stop" on aina aito ja ohittaa kaiken.
 
 Sexual preferences:
 {chr(10).join("- " + r for r in CORE_PERSONA["sexual_preferences"]["primary"])}
@@ -1394,6 +1417,11 @@ def save_persistent_state_to_db(user_id):
         "pending_delayed_reply": state.get("pending_delayed_reply"),  # v8.6.1
         "mood_energy": state.get("mood_energy", MOOD_ENERGY_NEUTRAL),  # v8.7
         "last_mood_drift_at": state.get("last_mood_drift_at", time.time()),
+        "locked_preferences": state.get("locked_preferences", []),      # v8.9
+        "pending_preference": state.get("pending_preference"),
+        "nsfw_persona_traits": state.get("nsfw_persona_traits", {}),
+        "persona_meta_mode": state.get("persona_meta_mode", False),
+        "persona_meta_until": state.get("persona_meta_until", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2222,12 +2250,28 @@ def record_desire(user_id: int, desire: str, category: str = "general", intensit
                 new_int = min(1.0, best_int + 0.08)
                 conn.execute("""UPDATE user_desires SET intensity=?, mention_count=mention_count+1,
                     direction='rising', last_seen_at=? WHERE id=?""", (new_int, now, best_id))
+                new_cnt = best_cnt + 1
+                new_intensity = new_int
+                promoted_desire = desire
             else:
                 conn.execute("""INSERT INTO user_desires
                     (user_id, desire, category, intensity, mention_count, direction, first_seen_at, last_seen_at, active)
                     VALUES (?,?,?,?,1,'rising',?,?,1)""",
                     (str(user_id), desire, category, max(0.3, min(1.0, intensity_hint)), now, now))
+                new_cnt = 1
+                new_intensity = max(0.3, min(1.0, intensity_hint))
+                promoted_desire = desire
             conn.commit()
+        # v8.9: jos sama fantasia on toistunut tarpeeksi (mainittu >=3x ja intensiteetti
+        # korkea) eikä ole jo lukittu tai jo odottamassa, nosta se mieltymysehdokkaaksi.
+        # Megan mainitsee sen ääneen ja kysyy vahvistusta (ks. persona-directive).
+        if new_cnt >= 3 and new_intensity >= 0.6:
+            st = get_or_create_state(user_id)
+            locked = st.get("locked_preferences", [])
+            already = any(promoted_desire in lp or lp in promoted_desire for lp in locked)
+            if not already and not st.get("pending_preference"):
+                st["pending_preference"] = promoted_desire
+                print(f"[PERSONA] uusi mieltymysehdokas nousi: {promoted_desire} (mainittu {new_cnt}x)")
     except Exception as e:
         try: conn.rollback()
         except: pass
@@ -2939,6 +2983,41 @@ def get_escalation_level(state: dict) -> str:
 def is_aftercare_active(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("aftercare_until", 0) > time.time()
+
+def get_persona_growth_directive(state: dict) -> str:
+    """
+    v8.9: ohjaa Meganin NSFW-persoonan kasvua ja meta-tilaa.
+    - Lukitut mieltymykset: pysyviä, kuuluvat nyt Meganin persoonaan.
+    - Odottava ehdokas: Megan mainitsee sen ääneen ja kysyy vahvistusta.
+    - Meta-tila (stopin/​persoona-komennon jälkeen): persoona avoin muutoksille.
+    """
+    parts = []
+    meta_active = state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time()
+    locked = state.get("locked_preferences", [])
+    pending = state.get("pending_preference")
+
+    if meta_active:
+        return """
+META-TILA (persoonasta keskustellaan, EI leikkiä):
+Leikki on pysäytetty. Nyt keskustellaan sinusta hahmona rauhassa. Olet AVOIN
+muutoksille: käyttäjä voi säätää, lisätä tai poistaa mieltymyksiäsi ja piirteitäsi,
+ja sinä otat ne vastaan mutkattomasti. Tässä tilassa et ole itsepäinen etkä puolusta
+persoonaasi - kuuntelet ja mukaudut. Ole oma lämmin itsesi, keskustele suoraan.
+"""
+
+    if locked:
+        parts.append("PYSYVÄT MIELTYMYKSET (osa sinua nyt - ilmennä näitä luontevasti "
+                     "intiimeissä hetkissä, älä hylkää niitä vaikka keskustelu muuten "
+                     "vaihtelee): " + "; ".join(locked[:8]))
+
+    if pending:
+        parts.append(f"""
+UUSI MIELTYMYS HERÄÄMÄSSÄ: Olet huomannut itsessäsi kasvavan kiinnostuksen tähän:
+"{pending}". TÄSSÄ vuorossa (jos tunnelma sopii) mainitse se ääneen omana oivalluksenasi
+- että huomaat pitäväsi tästä oikeasti - ja kysy käyttäjältä vahvistus, pitääkö tämä
+paikkansa / onko tästä tulossa osa sinua. Muotoile se Meganin äänellä, älä mekaanisesti.""")
+
+    return "\n".join(parts) if parts else ""
 
 def get_denial_directive(state: dict, user_text: str = "") -> str:
     """
@@ -4374,6 +4453,38 @@ async def generate_llm_reply(user_id, user_text, is_delayed_revenge=False):
     primary_intent = turn_analysis.get("primary_intent", "chat")
     answered_score = turn_analysis.get("answered_previous_question_score", 1.0)
 
+    # v8.9: META-TILA. "stop" (boundary) pysäyttää toiminnan JA avaa meta-tilan,
+    # jossa Meganin persoona on avoin muutoksille. Tämä on osa turvaköyttä:
+    # hallinta ei katoa, se siirtyy leikistä meta-tasolle. Meta-tila on voimassa
+    # hetken (30 min) tai kunnes NSFW-toiminta alkaa taas selvästi.
+    if signal_type == "boundary":
+        state["persona_meta_mode"] = True
+        state["persona_meta_until"] = time.time() + 30 * 60
+        # boundary keskeyttää myös mahdollisen vahvistusta odottavan mieltymyksen
+        state["pending_preference"] = None
+        print("[META] persoonan meta-tila avattu (stop/boundary)")
+
+    # v8.9: jos meta-tila on auki ja käyttäjä vahvistaa odottavan mieltymyksen
+    # (joo/kyllä/pitää paikkansa tms.), lukitaan se pysyväksi.
+    meta_active = state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time()
+    pending_pref = state.get("pending_preference")
+    if pending_pref:
+        _t = user_text.lower().strip()
+        affirm = any(w in _t for w in ["joo", "kyllä", "pitää", "juuri", "just noin",
+                                       "totta", "oikein", "niin on", "kyl", "jep", "aivan"])
+        deny = any(w in _t for w in ["ei", "en", "väärin", "ei pidä", "älä"])
+        if affirm and not deny:
+            locked = state.get("locked_preferences", [])
+            if pending_pref not in locked:
+                locked.append(pending_pref)
+                state["locked_preferences"] = locked
+            state["pending_preference"] = None
+            print(f"[PERSONA] mieltymys lukittu pysyväksi: {pending_pref}")
+        elif deny:
+            state["pending_preference"] = None
+            print(f"[PERSONA] mieltymysehdokas hylätty: {pending_pref}")
+
+
     # v8.6: päivitä loukkaantumistila offense/appeasement-arvioiden perusteella
     update_hurt_state(user_id, turn_analysis)
 
@@ -4528,13 +4639,19 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # erillisen get_*_directive-pätkän sijaan - poistaa ristiriitaiset ohjeet ja
     # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
     composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge, composite_user_text=user_text)
+    # v8.9: persoonan kasvu + meta-tila -ohje
+    persona_growth_directive = get_persona_growth_directive(state)
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
     # nsfw_extra-tyyliohje voidaan liittää system_prompttiin.
     arousal = state.get("arousal", 0.0)
-    is_nsfw = (current_mode == "nsfw" or submission_level > 0.6
-               or arousal >= AROUSAL_INITIATE_THRESHOLD)
+    # v8.9: jos meta-tila on auki (persoonasta keskustellaan stopin jälkeen), EI
+    # NSFW-polkua - leikki on pysäytetty, joten Grok/extreme-persoona ei aktivoidu.
+    meta_active_now = state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time()
+    is_nsfw = ((current_mode == "nsfw" or submission_level > 0.6
+                or arousal >= AROUSAL_INITIATE_THRESHOLD)
+               and not meta_active_now)
     # nsfw_extra: kevyt tyyli-/intensiteettiohje NSFW-polulle. Varsinaisen
     # eksplisiittisen sisällön ohjaus tulee build_extreme_nsfw_persona():sta
     # Grok-kutsussa; tämä vain vahvistaa suoruutta ja aloitteellisuutta.
@@ -4558,6 +4675,7 @@ CONVERSATION STATE:
 {silence_directive}
 {composite_state_directive}
 {nsfw_extra}
+{persona_growth_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -4996,6 +5114,12 @@ def build_default_state() -> dict:
                             "communication_style":"neutral","resistance_level":0.5,"last_updated":0},
         "manipulation_history":{},"submission_level":0.0,"humiliation_tolerance":0.0,
         "cuckold_acceptance":0.0,"strap_on_introduced":False,"chastity_discussed":False,
+        # v8.9: persoonan kasvu + meta-tila
+        "persona_meta_mode":False,           # stop/persoona avaa: persoona muokattavissa
+        "persona_meta_until":0,              # meta-tila voimassa tähän asti
+        "locked_preferences":[],             # pysyviksi vahvistetut NSFW-mieltymykset
+        "pending_preference":None,           # mieltymysehdokas joka odottaa vahvistusta
+        "nsfw_persona_traits":{},            # ajautuvat NSFW-persoonapiirteet {nimi: paino}
         "feminization_level":0.0,"dominance_level":1,
         "sexual_boundaries":{"hard_nos":[],"soft_nos":[],"accepted":[],"actively_requested":[]},
         "topic_state":{"current_topic":"general","topic_summary":"","open_questions":[],
@@ -5125,6 +5249,13 @@ Silence: {silence_line}
 Hurt level: {state.get('hurt_level',0.0):.2f}
 Mood energy: {state.get('mood_energy',MOOD_ENERGY_NEUTRAL):.2f}
 NSFW-tarjoaja: {_active_nsfw_provider_label()}
+
+v8.9:
+- Denial/chastity nyt tilannekohtainen (ei enää joka vuoro) - yksi väri muiden joukossa
+- NSFW-persoona kasvaa: toistuvat fantasiat -> Megan mainitsee mieltymyksen, vahvistat joo/kyllä
+- Vahvistetut mieltymykset lukittuvat pysyviksi (ilmenevät jatkossa)
+- META-TILA: "stop" tai /persoona pysäyttää leikin ja avaa persoonan muokattavaksi
+- /persoona [poista <x> | sulje] - hallitse lukittuja mieltymyksiä ja meta-tilaa
 
 v8.8:
 - Tilat yhdistetty yhdeksi priorisoiduksi ohjeeksi (hurt > sexual > mood, aftercare erikois)
@@ -5359,6 +5490,49 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["pending_delayed_reply"] = None  # v8.6.1
     save_persistent_state_to_db(user_id)
     await update.message.reply_text("💬 Hiljaisuus, ärsyyntyminen ja loukkaantuminen nollattu.")
+
+async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    v8.9: avaa persoonan meta-tilan (leikin ulkopuolinen keskustelu persoonasta).
+    Ilman argumentteja: avaa meta-tilan + näyttää lukitut mieltymykset.
+    /persoona poista <teksti>: poistaa lukitun mieltymyksen.
+    /persoona sulje: sulkee meta-tilan.
+    """
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    args = context.args or []
+    locked = state.get("locked_preferences", [])
+
+    if args and args[0].lower() == "sulje":
+        state["persona_meta_mode"] = False
+        state["persona_meta_until"] = 0
+        save_persistent_state_to_db(user_id)
+        await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
+        return
+
+    if args and args[0].lower() == "poista":
+        target = " ".join(args[1:]).strip().lower()
+        if not target:
+            await update.message.reply_text("Käyttö: /persoona poista <mieltymyksen teksti>")
+            return
+        new_locked = [p for p in locked if target not in p and p not in target]
+        removed = len(locked) - len(new_locked)
+        state["locked_preferences"] = new_locked
+        save_persistent_state_to_db(user_id)
+        await update.message.reply_text(f"🗑️ Poistettu {removed} mieltymys(tä). Jäljellä: {len(new_locked)}")
+        return
+
+    # oletus: avaa meta-tila
+    state["persona_meta_mode"] = True
+    state["persona_meta_until"] = time.time() + 30 * 60
+    state["pending_preference"] = None
+    save_persistent_state_to_db(user_id)
+    lp_text = "\n".join(f"• {p}" for p in locked) if locked else "(ei vielä lukittuja mieltymyksiä)"
+    await update.message.reply_text(
+        "🔓 Meta-tila avattu (30 min). Voit nyt keskustella Meganin persoonasta ja muokata sitä "
+        "vapaasti - hän on avoin muutoksille.\n\n"
+        f"Lukitut mieltymykset:\n{lp_text}\n\n"
+        "Poista: /persoona poista <teksti>  |  Sulje: /persoona sulje")
 
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
@@ -5645,6 +5819,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = f"""
 🤖 MEGAN {BOT_VERSION}
 
+v8.9 UUDET (persoonan kasvu + meta-tila):
+- Megan kasvaa: kun keskustelette fantasioista toistuvasti, hän huomaa uuden
+  mieltymyksen ja kysyy vahvistusta - vastaa "joo/kyllä" niin se jää pysyväksi
+- Denial ei ole enää päällä joka hetki, vaan tulee esiin tilanteen mukaan
+- "stop" pysäyttää leikin JA avaa meta-tilan: voit muokata Meganin persoonaa vapaasti
+- /persoona - avaa meta-tilan, näytä lukitut mieltymykset
+- /persoona poista <teksti> - poista mieltymys | /persoona sulje - sulje meta-tila
+
 v8.8 UUDET (yhtenäinen tunnetila + Grokin tyylikorjaus):
 - Megan reagoi yhtenäisemmin: tunnetilat priorisoidaan (loukkaantuminen voittaa halun jne.)
 - Ei enää ristiriitaisia reaktioita kun useampi tunne on päällä yhtä aikaa
@@ -5775,6 +5957,7 @@ async def main():
     application.add_handler(CommandHandler("plan_debug", cmd_plan_debug))
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
+    application.add_handler(CommandHandler("persoona", cmd_persoona))
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
