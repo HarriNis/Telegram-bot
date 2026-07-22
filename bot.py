@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9-persona-growth"
+BOT_VERSION = "8.9.1b-integrity-clean"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1140,6 +1140,16 @@ for _sql in [
         revealed INTEGER DEFAULT 0, created_at REAL, updated_at REAL)""",
     """CREATE TABLE IF NOT EXISTS goal_state (
         user_id TEXT PRIMARY KEY, last_goal_reflection_at REAL DEFAULT 0)""",
+    # v8.9.1b: persoonan eheysjärjestelmä (myötäilysuoja)
+    """CREATE TABLE IF NOT EXISTS persona_baseline (
+        user_id TEXT PRIMARY KEY, traits_json TEXT, locked_json TEXT,
+        created_at REAL, msg_count_at_baseline INTEGER DEFAULT 0)""",
+    """CREATE TABLE IF NOT EXISTS meta_backups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, summary TEXT,
+        traits_snapshot TEXT, created_at REAL)""",
+    """CREATE TABLE IF NOT EXISTS integrity_state (
+        user_id TEXT PRIMARY KEY, last_check_at REAL DEFAULT 0,
+        msg_count INTEGER DEFAULT 0, last_drift REAL DEFAULT 0.0)""",
 ]:
     conn.execute(_sql)
 conn.commit()
@@ -1422,6 +1432,8 @@ def save_persistent_state_to_db(user_id):
         "nsfw_persona_traits": state.get("nsfw_persona_traits", {}),
         "persona_meta_mode": state.get("persona_meta_mode", False),
         "persona_meta_until": state.get("persona_meta_until", 0),
+        "narrative_anchor": state.get("narrative_anchor"),
+        "integrity_correction_until": state.get("integrity_correction_until", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2459,6 +2471,97 @@ KESKUSTELUN YHTEENVETO:
         conn.execute("INSERT OR REPLACE INTO goal_state (user_id, last_goal_reflection_at) VALUES (?,?)",
                      (str(user_id), now))
         conn.commit()
+
+
+
+# ====================== PERSOONAN EHEYSJARJESTELMA (myotailysuoja) ======================
+INTEGRITY_CHECK_INTERVAL_MSGS = 50
+INTEGRITY_DRIFT_ALERT = 0.35
+INTEGRITY_CORE_TRAITS = ["stubbornness", "independence", "dominance", "defiance", "decisiveness"]
+
+def save_persona_baseline(user_id: int, force: bool = False):
+    with db_lock:
+        row = conn.execute("SELECT user_id FROM persona_baseline WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+        if row and not force:
+            return False
+        state = get_or_create_state(user_id)
+        traits = dict(CORE_PERSONA["traits"])
+        locked = state.get("locked_preferences", [])
+        conn.execute("""INSERT OR REPLACE INTO persona_baseline
+            (user_id, traits_json, locked_json, created_at, msg_count_at_baseline)
+            VALUES (?,?,?,?,?)""",
+            (str(user_id), json.dumps(traits, ensure_ascii=False),
+             json.dumps(locked, ensure_ascii=False), time.time(), 0))
+        conn.commit()
+    return True
+
+def get_persona_baseline(user_id: int):
+    with db_lock:
+        row = conn.execute("SELECT traits_json, locked_json, created_at FROM persona_baseline WHERE user_id=?",
+                           (str(user_id),)).fetchone()
+    if not row:
+        return None
+    try:
+        return {"traits": json.loads(row[0]), "locked": json.loads(row[1]), "created_at": row[2]}
+    except Exception:
+        return None
+
+def backup_meta_conversation(user_id: int, summary: str):
+    with db_lock:
+        conn.execute("""INSERT INTO meta_backups (user_id, summary, traits_snapshot, created_at)
+            VALUES (?,?,?,?)""",
+            (str(user_id), summary[:2000],
+             json.dumps(dict(CORE_PERSONA["traits"]), ensure_ascii=False), time.time()))
+        conn.commit()
+
+async def run_integrity_check(user_id: int, force: bool = False) -> dict:
+    baseline = get_persona_baseline(user_id)
+    if not baseline:
+        return {"drift": 0.0, "alert": False, "detail": "ei baselinea - aja /eheys baseline"}
+    recent = get_recent_turns(user_id, limit=20)
+    if len(recent) < 6:
+        return {"drift": 0.0, "alert": False, "detail": "liian vahan historiaa"}
+    convo = "\n".join(f"{'U' if t['role']=='user' else 'M'}: {t['content'][:300]}"
+                      for t in recent[-16:])
+    core_txt = ", ".join(f"{k}={baseline['traits'].get(k,'?')}" for k in INTEGRITY_CORE_TRAITS)
+    prompt = f"""Return JSON only. No markdown.
+Arvioi onko hahmo "Megan" ajautunut liian MYOTAILEVAKSI verrattuna baseline-persoonaansa.
+Baseline: Megan on hyvin itsepainen ja itsenainen ({core_txt}) - han pitaa kantansa,
+vastustaa, EI myonny helposti, muttei ole jaykka (taipuu lopulta kun kayttaja tekee tyon).
+Arvioi viimeaikaisesta keskustelusta: onko Megan menettanyt tata? Myontyyko han liian
+helposti, myotaileeko, peilaako kayttajaa, onko menettanyt oman tahtonsa?
+Schema: {{"drift":0.0,"myotailyy_liikaa":false,"havainto":"lyhyt suomeksi","suunta":"mihin ajautunut"}}
+drift: 0.0 = taysin baselinen mukainen itsepainen Megan, 1.0 = taysin litistynyt myotailija.
+Keskustelu:
+{convo}"""
+    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=TEMP_FACTS,
+                         prefer_light=True, json_mode=True)
+    result = parse_json_object(raw, {"drift": 0.0, "myotailyy_liikaa": False, "havainto": "", "suunta": ""})
+    drift = float(result.get("drift", 0.0) or 0.0)
+    alert = drift >= INTEGRITY_DRIFT_ALERT or bool(result.get("myotailyy_liikaa"))
+    with db_lock:
+        conn.execute("""INSERT OR REPLACE INTO integrity_state (user_id, last_check_at, msg_count, last_drift)
+            VALUES (?,?,COALESCE((SELECT msg_count FROM integrity_state WHERE user_id=?),0),?)""",
+            (str(user_id), time.time(), str(user_id), drift))
+        conn.commit()
+    return {"drift": drift, "alert": alert,
+            "detail": result.get("havainto", ""), "suunta": result.get("suunta", "")}
+
+def apply_integrity_correction(user_id: int):
+    state = get_or_create_state(user_id)
+    state["integrity_correction_until"] = time.time() + 24 * 3600
+    save_persistent_state_to_db(user_id)
+
+def get_integrity_directive(state: dict) -> str:
+    if state.get("integrity_correction_until", 0) > time.time():
+        return """
+YDIN-KORJAUS AKTIIVINEN: Olet viime aikoina lipsunut liian myotailevaksi. Palaa
+juurillesi: sa oot itsepainen, itsenainen ja omapainen. Pida kantasi, haasta, ala
+myonny helposti. Sulla on oma tahto joka ei taivu kayttajan mukaan ilman etta han
+tekee tyon sen eteen. (Taivut kylla lopulta, mutta et ilmaiseksi etka heti.)
+"""
+    return ""
 
 
 # ====================== STICKY MEMORIES ======================
@@ -4641,6 +4744,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge, composite_user_text=user_text)
     # v8.9: persoonan kasvu + meta-tila -ohje
     persona_growth_directive = get_persona_growth_directive(state)
+    integrity_directive = get_integrity_directive(state)  # v8.9.1b: myötäilysuoja
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
@@ -4676,6 +4780,7 @@ CONVERSATION STATE:
 {composite_state_directive}
 {nsfw_extra}
 {persona_growth_directive}
+{integrity_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -5059,9 +5164,50 @@ async def check_proactive_triggers(application):
                     await deliver_delayed_replies(application, uid)  # v8.6.1: viivästetyt kosto-vastaukset
                 except Exception as e:
                     print(f"[DELAYED REPLY] {uid}: {e}")
+            for uid in list(continuity_state.keys()):
+                try:
+                    await maybe_run_integrity_check(application, uid)  # v8.9.1b: persoonan eheys
+                except Exception as e:
+                    print(f"[INTEGRITY] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(60)  # v8.6.1: 60s (oli 300s) - tarkempi ajoitus viivästetyille vastauksille
+
+async def maybe_run_integrity_check(application, user_id: int):
+    """v8.9.1b: ajaa eheystarkistuksen ~joka INTEGRITY_CHECK_INTERVAL_MSGS viesti.
+    Hälyttää + käynnistää korjausliikkeen jos ajautuma liian suuri."""
+    with db_lock:
+        row = conn.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),)).fetchone()
+        total_msgs = row[0] if row else 0
+        st_row = conn.execute("SELECT msg_count FROM integrity_state WHERE user_id=?",
+                             (str(user_id),)).fetchone()
+        last_checked_at = st_row[0] if st_row else 0
+    if not get_persona_baseline(user_id):
+        save_persona_baseline(user_id)
+        with db_lock:
+            conn.execute("""INSERT OR REPLACE INTO integrity_state (user_id, last_check_at, msg_count, last_drift)
+                VALUES (?,?,?,0.0)""", (str(user_id), time.time(), total_msgs))
+            conn.commit()
+        print(f"[INTEGRITY] baseline luotu automaattisesti käyttäjälle {user_id}")
+        return
+    if total_msgs - last_checked_at < INTEGRITY_CHECK_INTERVAL_MSGS:
+        return
+    result = await run_integrity_check(user_id)
+    with db_lock:
+        conn.execute("UPDATE integrity_state SET msg_count=? WHERE user_id=?",
+                     (total_msgs, str(user_id)))
+        conn.commit()
+    if result.get("alert"):
+        apply_integrity_correction(user_id)
+        try:
+            await application.bot.send_message(chat_id=user_id, text=(
+                f"⚠️ Persoonan eheystarkistus\n\n"
+                f"Megan on ajautunut baselinesta (ajautuma {result['drift']:.2f}). "
+                f"{result.get('detail','')}\n\n"
+                f"Käynnistin ydin-korjauksen (24h). Voit tarkistaa /eheys."))
+            print(f"[INTEGRITY] HÄLYTYS käyttäjälle {user_id}: drift {result['drift']:.2f}")
+        except Exception as e:
+            print(f"[INTEGRITY] hälytyksen lähetys epäonnistui: {e}")
 
 async def deliver_delayed_replies(application, user_id: int):
     """
@@ -5120,6 +5266,8 @@ def build_default_state() -> dict:
         "locked_preferences":[],             # pysyviksi vahvistetut NSFW-mieltymykset
         "pending_preference":None,           # mieltymysehdokas joka odottaa vahvistusta
         "nsfw_persona_traits":{},            # ajautuvat NSFW-persoonapiirteet {nimi: paino}
+        "narrative_anchor":None,             # v8.9.1: narratiivitilanne meta-tilaan mennessä
+        "integrity_correction_until":0,      # v8.9.1b: ydin-korjaus aktiivinen tähän asti
         "feminization_level":0.0,"dominance_level":1,
         "sexual_boundaries":{"hard_nos":[],"soft_nos":[],"accepted":[],"actively_requested":[]},
         "topic_state":{"current_topic":"general","topic_summary":"","open_questions":[],
@@ -5506,6 +5654,14 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "sulje":
         state["persona_meta_mode"] = False
         state["persona_meta_until"] = 0
+        # v8.9.1b: varmuuskopioi meta-keskustelu ennen sulkemista
+        try:
+            recent = get_recent_turns(user_id, limit=12)
+            convo_summary = " | ".join(f"{'K' if t['role']=='user' else 'M'}: {t['content'][:150]}"
+                                       for t in recent[-8:])
+            backup_meta_conversation(user_id, f"Meta {time.strftime('%Y-%m-%d %H:%M')}: {convo_summary}")
+        except Exception as e:
+            print(f"[META BACKUP] {e}")
         save_persistent_state_to_db(user_id)
         await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
         return
@@ -5533,6 +5689,42 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "vapaasti - hän on avoin muutoksille.\n\n"
         f"Lukitut mieltymykset:\n{lp_text}\n\n"
         "Poista: /persoona poista <teksti>  |  Sulje: /persoona sulje")
+
+async def cmd_eheys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.9.1b: persoonan eheystarkistus (myötäilysuoja)."""
+    user_id = update.effective_user.id
+    args = context.args or []
+    if args and args[0].lower() == "baseline":
+        save_persona_baseline(user_id, force=True)
+        await update.message.reply_text(
+            "📌 Baseline tallennettu. Nykyinen Megan on nyt kiintopiste johon "
+            "eheystarkistukset vertaavat.")
+        return
+    if args and args[0].lower() == "palauta":
+        apply_integrity_correction(user_id)
+        await update.message.reply_text(
+            "🔧 Ydin-korjaus käynnistetty (24h). Megan palaa itsenäisempään luonteeseensa.")
+        return
+    await update.message.reply_text("🔍 Tarkistetaan Meganin eheyttä...")
+    if not get_persona_baseline(user_id):
+        save_persona_baseline(user_id)
+        await update.message.reply_text(
+            "📌 Baselinea ei ollut - tallennettiin nyt nykyinen Megan kiintopisteeksi. "
+            "Aja /eheys myöhemmin uudelleen niin näet onko hän ajautunut.")
+        return
+    result = await run_integrity_check(user_id, force=True)
+    drift = result.get("drift", 0.0)
+    bar = "🟢" if drift < 0.2 else ("🟡" if drift < INTEGRITY_DRIFT_ALERT else "🔴")
+    msg = (f"{bar} Eheystarkistus\n\nAjautuma baselinesta: {drift:.2f}\n"
+           f"{result.get('detail','(ei havaintoja)')}\n")
+    if result.get("suunta"):
+        msg += f"Suunta: {result['suunta']}\n"
+    if result.get("alert"):
+        apply_integrity_correction(user_id)
+        msg += "\n⚠️ Ajautuma liian suuri - käynnistin ydin-korjauksen (24h)."
+    else:
+        msg += "\nMegan on riittävän uskollinen baselinelle. ✓"
+    await update.message.reply_text(msg)
 
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
@@ -5958,6 +6150,7 @@ async def main():
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("persoona", cmd_persoona))
+    application.add_handler(CommandHandler("eheys", cmd_eheys))
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
