@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.4-persona-integrity
+Megan Telegram Bot - v8.9.5-fast-startup
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.4-persona-integrity"
+BOT_VERSION = "8.9.5-fast-startup"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1344,19 +1344,38 @@ def text_similarity_score(query: str, content: str) -> float:
 # tämä oli yksi pääsyistä miksi Megan ei löytänyt vanhoja muistoja hausta.
 _embedding_model = None
 _embedding_model_failed = False
+# v8.9.4: tallenna embedding-malli Renderin pysyvälle levylle (sama kuin DB).
+# Ladataan verkosta VAIN kerran; sen jälkeen aina levyltä -> käynnistys ei enää
+# jää roikkumaan HuggingFace-latauksen varaan (aiheutti jumin käynnistyksessä).
+EMBED_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+EMBED_MODEL_DIR = "/var/data/embedding_model"
 
 def get_embedding_model():
-    """Lataa embedding-mallin laiskasti. Palauttaa None jos kirjastoa ei ole
-    asennettu tai lataus epäonnistuu - tällöin retrieve_relevant_memories()
-    putoaa automaattisesti Jaccard-fallbackiin per muisti."""
+    """Lataa embedding-mallin laiskasti levyltä (tai kerran verkosta). Palauttaa
+    None jos kirjastoa ei ole tai lataus epäonnistuu - tällöin retrieve_relevant_
+    memories() putoaa Jaccard-fallbackiin."""
     global _embedding_model, _embedding_model_failed
     if _embedding_model_failed:
         return None
     if _embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer
-            _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-            print("✅ Embedding-malli ladattu (paraphrase-multilingual-MiniLM-L12-v2, paikallinen)")
+            import os as _os
+            # 1) jos malli on jo levyllä, lataa sieltä (nopea, ei verkkoa)
+            if _os.path.isdir(EMBED_MODEL_DIR) and _os.listdir(EMBED_MODEL_DIR):
+                _embedding_model = SentenceTransformer(EMBED_MODEL_DIR)
+                print(f"✅ Embedding-malli ladattu levyltä ({EMBED_MODEL_DIR})")
+            else:
+                # 2) ensimmäinen kerta: lataa verkosta ja TALLENNA levylle
+                print("⏳ Embedding-mallia ei levyllä - ladataan kerran verkosta...")
+                _embedding_model = SentenceTransformer(EMBED_MODEL_NAME)
+                try:
+                    _os.makedirs(EMBED_MODEL_DIR, exist_ok=True)
+                    _embedding_model.save(EMBED_MODEL_DIR)
+                    print(f"✅ Embedding-malli tallennettu levylle ({EMBED_MODEL_DIR}) - "
+                          f"jatkossa nopea käynnistys")
+                except Exception as save_err:
+                    print(f"⚠️ Mallin tallennus levylle epäonnistui (toimii silti): {save_err}")
         except Exception as e:
             print(f"⚠️ Embedding-mallin lataus epäonnistui, käytetään Jaccard-fallbackia: {e}")
             _embedding_model_failed = True
@@ -6278,10 +6297,15 @@ async def main():
     except Exception as e: print(f"[INDEX] {e}")
 
     get_claude_client()
-    try:
-        get_embedding_model()  # v8.3.10: esilataus - ensimmäinen viesti ei odota mallin latausta
-    except Exception as e:
-        print(f"[EMBED] Esilataus epäonnistui: {e}")
+    # v8.9.4: esilataa embedding-malli TAUSTASÄIKEESSÄ, jotta se ei estä pollingin
+    # käynnistymistä vaikka lataus olisi hidas/juuttuisi. Botti alkaa vastata heti;
+    # jos malli ei ole vielä valmis, retrieve putoaa hetkeksi Jaccard-fallbackiin.
+    def _preload_embedding():
+        try:
+            get_embedding_model()
+        except Exception as e:
+            print(f"[EMBED] Esilataus epäonnistui: {e}")
+    threading.Thread(target=_preload_embedding, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("newgame", cmd_new_game))
