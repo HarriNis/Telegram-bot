@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.5-fast-startup
+Megan Telegram Bot - v8.9.6-startup-order
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.5-fast-startup"
+BOT_VERSION = "8.9.6-startup-order"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -5273,6 +5273,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====================== BACKGROUND TASKS ======================
 async def check_proactive_triggers(application):
+    # v8.9.5: pieni alkuviive, jotta polling ehtii vakiintua ennen kuin taustatehtävä
+    # alkaa tehdä työtä (estää käynnistyksen tukkeutumisen).
+    await asyncio.sleep(15)
     while True:
         try:
             # v8.3.18: "Muistutus: ..." -viestit POISTETTU käyttäjän toiveesta.
@@ -6345,18 +6348,18 @@ async def main():
 
     await application.initialize()
     await application.start()
-    # v8.9.3: poista mahdollinen webhook ENNEN pollingin aloitusta. Estää
-    # "Conflict: can't use getUpdates while webhook is active" -virheen joka
-    # tulee jos botille on jäänyt webhook päälle. drop_pending_updates tyhjentää
-    # myös jonoon jääneet vanhat viestit.
+    # v8.9.5: poista webhook aikarajalla, ettei se voi jäädä roikkumaan ja estää
+    # pollingia. Jos ei vastaa 10s, ohitetaan (drop_pending_updates hoitaa loput).
     try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
+        await asyncio.wait_for(application.bot.delete_webhook(drop_pending_updates=True), timeout=10)
         print("[MAIN] Webhook poistettu (jos oli) - polling vapaa käyttöön")
     except Exception as e:
-        print(f"[MAIN] delete_webhook varoitus (ei kriittinen): {e}")
-    background_task = asyncio.create_task(check_proactive_triggers(application))
+        print(f"[MAIN] delete_webhook ohitettu (ei kriittinen): {e}")
+    # v8.9.5: KÄYNNISTÄ POLLING ENSIN - botti vastaa heti. Taustatehtävä vasta sen
+    # jälkeen, jottei mikään taustalogiikka (esim. eheystarkistus) voi estää pollingia.
     await application.updater.start_polling(drop_pending_updates=True)
     print(f"[MAIN] ✅ Megan {BOT_VERSION} running!")
+    background_task = asyncio.create_task(check_proactive_triggers(application))
 
     try:
         await asyncio.Event().wait()
