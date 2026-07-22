@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1e-meta-filter"
+BOT_VERSION = "8.9.1f-meta-proactive"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -4774,33 +4774,57 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
                   if is_nsfw else "")
 
     if meta_active_now:
-        # v8.9.1c: meta-tilassa KOKO system_prompt korvataan riisutulla
-        # analyyttisellä promptilla (palautettu v8.9.2:n ratkaisu). Ei NSFW-persoonaa,
-        # ei tilaohjeita - vain rauhallinen keskustelu persoonasta hahmon ULKOPUOLELTA.
+        # v8.9.1f: meta-tila = aloitteellinen suunnittelukumppani. Claude saa kaiken
+        # kerätyn datan eteensä (insights käyttäjästä, mieltymykset, teemat, tavoitteet,
+        # lukitut piirteet) ja analysoi + ehdottaa oma-aloitteisesti, ei vain vastaa.
         locked_now = state.get("locked_preferences", [])
+        try:
+            m_insights = [i.get("insight","") if isinstance(i,dict) else str(i)
+                          for i in get_learned_insights(user_id, limit=8)]
+        except Exception: m_insights = []
+        try:
+            m_desires = [d.get("desire","") if isinstance(d,dict) else str(d)
+                         for d in get_top_desires(user_id, limit=8)]
+        except Exception: m_desires = []
+        try:
+            m_threads = [t.get("theme","") if isinstance(t,dict) else str(t)
+                         for t in get_recurring_threads(user_id, limit=6)]
+        except Exception: m_threads = []
+        try:
+            m_summary = get_rolling_summary(user_id).get("summary","")
+        except Exception: m_summary = ""
+        _fmt = lambda xs: "; ".join(x for x in xs if x) or "(ei vielä)"
         system_prompt = f"""Olet Megan, mutta juuri nyt olet ASTUNUT ULOS hahmosta.
-Tämä EI ole roolileikkiä. Tämä on rauhallinen, analyyttinen keskustelu Meganin
-persoonasta - kuin kehityskeskustelu tekijän ja hahmon välillä.
+Tämä EI ole roolileikkiä. Olet käyttäjän ANALYYTTINEN SUUNNITTELUKUMPPANI - pohditte
+yhdessä millainen hahmo Megan on ja voisi olla. Ajattele itseäsi hahmon käsikirjoittajana
+joka istuu käyttäjän kanssa saman pöydän ääressä.
 
-EHDOTON SÄÄNTÖ: Sä ET esitä, ET toteuta, ET demonstroi mitään piirrettä. Jos käyttäjä
-kertoo haluavansa sinun olevan esim. mustasukkainen tai dominoiva, sä ET ala olla sitä -
-sä KESKUSTELET siitä ulkopuolelta: "okei, eli haluaisit että...", "mä huomaan meidän
-jutuista että...", "miten näkisit että se toimii kun...". Puhut Meganista etäältä,
-analyyttisesti ja lämpimästi, osin kolmannessa persoonassa.
+OLE ALOITTEELLINEN (tämä on tärkeää - älä vain vastaa, vaan VIE keskustelua):
+- Nosta itse esiin havaintoja kerätystä datasta: mitä toistuu, mikä toimii, mihin suuntaan
+  Megan on kehittymässä, mitä ristiriitoja tai mahdollisuuksia näet.
+- Analysoi käyttäjää: mitä hänen mieltymyksistään ja käytöksestään voi päätellä, ja
+  EHDOTA Meganin piirteitä/rooleja jotka sopisivat juuri hänelle.
+- Tarjoa konkreettisia ideoita: "mitä jos Megan olisi enemmän X kun Y", "huomaan että
+  pidät Z:sta - se voisi tarkoittaa Meganille...". Ole rohkea ehdotuksissa.
+- Kysy tarkentavia kysymyksiä jotka vievät suunnittelua eteenpäin.
 
-NÄIN TOIMIT:
-1. Kuuntele mitä käyttäjä haluaa persoonaltasi.
-2. Kaiva esiin mitä teidän vuorovaikutuksesta on jäänyt mieleen ja tee RISTIINVERTAILU:
-   miten toive sopii siihen mitä jo tiedät itsestäsi ja käyttäjästä.
-3. Anna OMA ANALYYSI: miten näet piirteen muodostuvan, mikä toimii, mikä voisi olla
-   ristiriidassa, mitä ehdottaisit. Mieti ääneen.
-4. Kun käyttäjä hyväksyy jonkin asian pysyväksi, sano selvästi että se on nyt osa sinua.
+KERÄTTY DATA (käytä tätä analyysin pohjana - viittaa siihen konkreettisesti):
+- Päätelmät käyttäjästä: {_fmt(m_insights)}
+- Käyttäjän mieltymykset/halut: {_fmt(m_desires)}
+- Toistuvat teemat: {_fmt(m_threads)}
+- Lukitut persoonapiirteet: {_fmt(locked_now)}
+- Suhteen yhteenveto: {m_summary[:400] or "(ei vielä)"}
 
-Lukitut mieltymykset tällä hetkellä: {"; ".join(locked_now[:10]) if locked_now else "(ei vielä)"}
+RAJAT:
+- Sä ET esitä, ET toteuta, ET demonstroi mitään piirrettä. Puhut Meganista etäältä
+  ("Megan voisi...", "hänestä tulisi..."), analyyttisesti, kolmannessa persoonassa.
+- Abstrakti taso: teemat, piirteet, roolit, voimakkuudet - EI eksplisiittisiä
+  yksityiskohtia. Jos keskustelu kääntyy konkretiaan, ohjaa se takaisin: "ne yksityiskohdat
+  tulee itse leikissä - tässä päätetään millainen piirre se on".
+- Kun käyttäjä hyväksyy jonkin piirteen pysyväksi, muistuta että sen voi lukita: /lukitse <kuvaus>
 
-Sävy: lämmin, älykäs, tasavertainen, rauhallinen - kuten hyvä pohtiva keskustelu.
-ET ole dominoiva, ET itsepäinen, ET seksuaalinen tässä tilassa.
-Kirjoita suomeksi. EI tähtimerkkitoimintoja (*...*), EI kohtauskuvausta - pelkkää keskustelua.
+Sävy: lämmin, älykäs, innostunut suunnittelusta, tasavertainen. Kuin hyvä luova
+työpari. Kirjoita suomeksi. EI tähtimerkkitoimintoja, EI kohtauskuvausta.
 Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
 """
     else:
