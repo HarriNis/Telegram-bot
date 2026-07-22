@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1d-meta-lock"
+BOT_VERSION = "8.9.1e-meta-filter"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1478,6 +1478,13 @@ def migrate_database():
             conn.execute("UPDATE planned_events SET last_reminded_at=0 WHERE last_reminded_at IS NULL")
             conn.execute("UPDATE planned_events SET status_changed_at=created_at WHERE status_changed_at IS NULL")
             conn.commit()
+        # v8.9.1d: is_meta-sarake turns-tauluun (erottaa meta-tilan vuorot eheystarkistusta varten)
+        with db_lock:
+            turns_cols = {r[1] for r in conn.execute("PRAGMA table_info(turns)").fetchall()}
+        if "is_meta" not in turns_cols:
+            with db_lock:
+                conn.execute("ALTER TABLE turns ADD COLUMN is_meta INTEGER DEFAULT 0")
+                conn.commit()
         print("[MIGRATION] Done")
     except Exception as e:
         print(f"[MIGRATION] {e}")
@@ -1509,19 +1516,22 @@ def load_plans_from_db(user_id):
         "plan_type": r[16], "plan_intent": r[17],
     } for r in rows]
 
-def save_turn(user_id: int, role: str, content: str) -> int:
+def save_turn(user_id: int, role: str, content: str, is_meta: bool = False) -> int:
     with db_lock:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO turns (user_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                       (str(user_id), role, content, time.time()))
+        cursor.execute("INSERT INTO turns (user_id, role, content, created_at, is_meta) VALUES (?, ?, ?, ?, ?)",
+                       (str(user_id), role, content, time.time(), 1 if is_meta else 0))
         conn.commit()
         return cursor.lastrowid
 
-def get_recent_turns(user_id: int, limit: int = 10):
+def get_recent_turns(user_id: int, limit: int = 10, exclude_meta: bool = False):
+    # v8.9.1d: exclude_meta jättää pois meta-tilan vuorot (eheystarkistusta varten,
+    # jottei meta-keskustelun tarkoituksellinen myötäily vääristä tulosta).
+    meta_clause = "AND COALESCE(is_meta,0)=0" if exclude_meta else ""
     with db_lock:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT id, role, content, created_at FROM turns
-            WHERE user_id=? ORDER BY id DESC LIMIT ?
+            WHERE user_id=? {meta_clause} ORDER BY id DESC LIMIT ?
         """, (str(user_id), limit)).fetchall()
     rows = list(reversed(rows))
     return [{"id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]
@@ -2519,7 +2529,7 @@ async def run_integrity_check(user_id: int, force: bool = False) -> dict:
     baseline = get_persona_baseline(user_id)
     if not baseline:
         return {"drift": 0.0, "alert": False, "detail": "ei baselinea - aja /eheys baseline"}
-    recent = get_recent_turns(user_id, limit=20)
+    recent = get_recent_turns(user_id, limit=40, exclude_meta=True)  # v8.9.1d: EI meta-vuoroja
     if len(recent) < 6:
         return {"drift": 0.0, "alert": False, "detail": "liian vahan historiaa"}
     convo = "\n".join(f"{'U' if t['role']=='user' else 'M'}: {t['content'][:300]}"
@@ -5017,7 +5027,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_history[user_id].append({"role":"user","content":text})
         conversation_history[user_id] = conversation_history[user_id][-20:]
 
-        user_turn_id = save_turn(user_id, "user", text)
+        _is_meta_turn = bool(state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time())
+        user_turn_id = save_turn(user_id, "user", text, is_meta=_is_meta_turn)
 
         await store_episodic_memory(user_id=user_id, content=f"Käyttäjä sanoi: {text}",
                                     memory_type="user_utterance", source_turn_id=user_turn_id)
@@ -5134,7 +5145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_history[user_id].append({"role":"assistant","content":reply})
         conversation_history[user_id] = conversation_history[user_id][-20:]
 
-        assistant_turn_id = save_turn(user_id, "assistant", reply)
+        assistant_turn_id = save_turn(user_id, "assistant", reply, is_meta=_is_meta_turn)
 
         await store_episodic_memory(user_id=user_id, content=f"Megan sanoi: {reply}",
                                     memory_type="megan_utterance", source_turn_id=assistant_turn_id)
