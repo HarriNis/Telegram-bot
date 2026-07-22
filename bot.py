@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.6-startup-order
+Megan Telegram Bot - v8.9.7-no-webhook-conflict
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.6-startup-order"
+BOT_VERSION = "8.9.7-no-webhook-conflict"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -6348,15 +6348,10 @@ async def main():
 
     await application.initialize()
     await application.start()
-    # v8.9.5: poista webhook aikarajalla, ettei se voi jäädä roikkumaan ja estää
-    # pollingia. Jos ei vastaa 10s, ohitetaan (drop_pending_updates hoitaa loput).
-    try:
-        await asyncio.wait_for(application.bot.delete_webhook(drop_pending_updates=True), timeout=10)
-        print("[MAIN] Webhook poistettu (jos oli) - polling vapaa käyttöön")
-    except Exception as e:
-        print(f"[MAIN] delete_webhook ohitettu (ei kriittinen): {e}")
-    # v8.9.5: KÄYNNISTÄ POLLING ENSIN - botti vastaa heti. Taustatehtävä vasta sen
-    # jälkeen, jottei mikään taustalogiikka (esim. eheystarkistus) voi estää pollingia.
+    # v8.9.7: POISTETTU erillinen delete_webhook-kutsu. Se meni ristiin
+    # start_polling(drop_pending_updates=True):n oman webhook-käsittelyn kanssa ja
+    # jätti pollingin sekavaan tilaan (getUpdates 200 OK mutta viestit eivät tulleet).
+    # start_polling hoitaa webhookin poiston ja pending-tyhjennyksen jo itse.
     await application.updater.start_polling(drop_pending_updates=True)
     print(f"[MAIN] ✅ Megan {BOT_VERSION} running!")
     background_task = asyncio.create_task(check_proactive_triggers(application))
