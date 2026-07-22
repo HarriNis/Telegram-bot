@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.2-meta-isolation
+Megan Telegram Bot - v8.9.3-image-context
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.2-meta-isolation"
+BOT_VERSION = "8.9.3-image-context"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -619,6 +619,17 @@ CORE_PERSONA = {
         "dominatrix-style: leather corset + latex leggings + thigh-high boots",
         "tiny black lace thong + sheer bralette (bedroom)",
         "red satin lingerie: minimal and seductive",
+        "fitted little black dress, short hem, heels",
+        "silk robe loosely tied, nothing much underneath",
+        "oversized white shirt (his), bare legs, casual-sexy morning look",
+        "black bodysuit + sheer stockings + garter belt",
+        "form-fitting knit dress, no bra, subtle and suggestive",
+        "sports bra + tight yoga shorts, athletic and toned",
+        "sheer black babydoll nightie",
+        "high-cut swimsuit / bikini (pool or beach settings)",
+        "lace bralette + high-waisted panties + thigh-high socks",
+        "unbuttoned blouse + pencil skirt (office dominant look)",
+        "leather harness over bare skin (intense dominant scenes)",
     ],
     "humiliation_vocabulary": [
         "hyvä poika - tottelet hyvin tänään",
@@ -3824,15 +3835,37 @@ async def extract_visual_intent(user_id: int, text: str, recent_turns: list, sta
     default = {"setting":None,"outfit":None,"pose":None,"camera":"full body, 4-5m distance",
                "mood":"confident, seductive, natural","angle":"slight 3/4 angle",
                "use_previous_look":False,"must_keep":[],"must_avoid":[],"explicit_request":text}
-    recent = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content'][:100]}"
-                       for t in recent_turns[-4:]) if recent_turns else ""
+    # v8.9.3: enemmän kontekstia + pidemmät vuorot (ei 100 merkin katkaisua joka leikkasi
+    # olennaisen pois). Poimitaan nimenomaan NYKYINEN vaatetus/asento/teko kohtauksesta.
+    recent = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content'][:400]}"
+                       for t in recent_turns[-5:]) if recent_turns else ""
+    # viimeisin Meganin vastaus erikseen korostettuna (siitä napataan tarkat yksityiskohdat)
+    last_megan = ""
+    for t in reversed(recent_turns or []):
+        if t["role"] != "user":
+            last_megan = t["content"][:600]
+            break
+    arousal = state.get("arousal", 0.0)
+    escalation = get_escalation_level(state) if 'get_escalation_level' in globals() else ""
     prompt = f"""Return JSON only. No markdown.
+Poimi kuvaa varten Meganin NYKYINEN tilanne kohtauksesta - mitä hänellä on juuri nyt
+päällä, missä asennossa/teossa hän on, ja tunnelma. Katso ERITYISESTI Meganin viimeisintä
+vastausta: jos siinä mainitaan vaatteet, asento tai teko, käytä NIITÄ tarkasti.
+Jos kohtaus on edennyt (riisuttu, tietty asento), heijasta se pose- ja outfit-kentissä.
+
 Schema: {{"setting":null,"outfit":null,"pose":null,"camera":"full body, 4-5m","mood":"confident","angle":"3/4","use_previous_look":false,"must_keep":[],"must_avoid":[],"explicit_request":""}}
-Scene: {state.get('scene','home')}, Mode: {state.get('conversation_mode','casual')}
+- outfit: mitä Meganilla on NYT päällä (tai riisuttu/osittain) kohtauksen mukaan
+- pose: nykyinen asento tai teko (esim. "polvillaan lattialla", "nojaa seinään", ei geneerinen)
+- mood: kohtauksen tunnelma
+
+Scene: {state.get('scene','home')}, Mode: {state.get('conversation_mode','casual')}, Arousal: {arousal:.2f}, Escalation: {escalation}
 Previous outfit: {(state.get('last_image') or {}).get('context','none')}
-Recent: {recent}
+Recent turns:
+{recent}
+Megan's latest (poimi tarkat yksityiskohdat tästä):
+{last_megan}
 Request: {text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=350, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["explicit_request"] = text
@@ -3852,21 +3885,49 @@ async def handle_image_request(update: Update, user_id: int, text: str):
     elif use_prev and last_image.get("context"):
         outfit = last_image["context"]
     else:
+        # v8.9.3: monipuolisemmat fallback-vaatteet - useita vaihtoehtoja per tilanne,
+        # satunnaisesti valittu, jottei aina sama crop top + leggingsit.
         defaults = {
-            "home":"glossy black latex leggings + fitted black crop top",
-            "bed":"black lace lingerie: sheer bralette and high-cut panties",
-            "work":"high-waist black latex leggings + fitted white blouse",
-            "public":"black leather pants + elegant fitted top",
-            "commute":"black latex leggings + leather jacket",
-            "shower":"white towel wrapped elegantly",
-            "neutral":"glossy black latex leggings + black crop top"}
+            "home": ["glossy black latex leggings + fitted black crop top",
+                     "silk robe loosely tied", "oversized white shirt, bare legs",
+                     "form-fitting knit dress, no bra", "sports bra + tight yoga shorts"],
+            "bed": ["black lace lingerie: sheer bralette and high-cut panties",
+                    "sheer black babydoll nightie", "tiny black lace thong + sheer bralette",
+                    "red satin lingerie", "lace bralette + thigh-high socks"],
+            "work": ["high-waist black latex leggings + fitted white blouse",
+                     "unbuttoned blouse + pencil skirt", "fitted little black dress + heels"],
+            "public": ["black leather pants + elegant fitted top",
+                       "tight latex dress, body hugging", "fitted little black dress, short hem"],
+            "commute": ["black latex leggings + leather jacket", "form-fitting knit dress"],
+            "shower": ["white towel wrapped elegantly", "wet hair, silk robe"],
+            "pool": ["high-cut swimsuit", "black bikini, toned"],
+            "neutral": ["glossy black latex leggings + black crop top",
+                        "fitted little black dress", "silk robe"]}
         if conv_mode == "nsfw" and submission > 0.4:
-            outfit = "black lace lingerie: minimal and seductive"
+            nsfw_options = ["black lace lingerie: minimal and seductive",
+                            "black bodysuit + sheer stockings + garter belt",
+                            "sheer babydoll nightie", "leather harness over bare skin",
+                            "tiny lace thong + sheer bralette"]
+            outfit = random.choice(nsfw_options)
         else:
-            outfit = defaults.get(scene, "glossy black latex leggings + fitted black top")
+            outfit = random.choice(defaults.get(scene, defaults["neutral"]))
     setting = (intent.get("setting") or (last_image.get("setting") if use_prev else None)
                or scene_to_setting(scene))
-    pose = intent.get("pose") or "standing, confident, weight on one leg, hand on hip"
+    # v8.9.3: monipuolisemmat asento-fallbackit (ei aina sama "hand on hip")
+    if intent.get("pose"):
+        pose = intent["pose"]
+    else:
+        pose_options = {
+            "nsfw": ["lying back on bed, inviting", "kneeling, looking up",
+                     "leaning against wall, arching", "sitting on edge of bed, legs crossed",
+                     "on all fours on bed, looking over shoulder"],
+            "suggestive": ["sitting on couch, legs tucked, playful", "leaning in doorway",
+                           "glancing over shoulder, hand in hair", "reclining, relaxed and teasing"],
+            "romantic": ["sitting close, soft gaze", "curled up, warm expression",
+                         "standing by window, gentle light"],
+            "casual": ["standing, confident, weight on one leg, hand on hip",
+                       "sitting relaxed, natural smile", "leaning on counter, casual"]}
+        pose = random.choice(pose_options.get(conv_mode, pose_options["casual"]))
     camera = intent.get("camera") or "full body, 4-5m distance, portrait format"
     mood_map = {"nsfw":"overtly seductive, dominant","suggestive":"playfully seductive",
                 "romantic":"warm, intimate","casual":"confident, natural"}
@@ -6049,6 +6110,15 @@ async def main():
 
     await application.initialize()
     await application.start()
+    # v8.9.3: poista mahdollinen webhook ENNEN pollingin aloitusta. Estää
+    # "Conflict: can't use getUpdates while webhook is active" -virheen joka
+    # tulee jos botille on jäänyt webhook päälle. drop_pending_updates tyhjentää
+    # myös jonoon jääneet vanhat viestit.
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        print("[MAIN] Webhook poistettu (jos oli) - polling vapaa käyttöön")
+    except Exception as e:
+        print(f"[MAIN] delete_webhook varoitus (ei kriittinen): {e}")
     background_task = asyncio.create_task(check_proactive_triggers(application))
     await application.updater.start_polling(drop_pending_updates=True)
     print(f"[MAIN] ✅ Megan {BOT_VERSION} running!")
