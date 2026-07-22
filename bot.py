@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1b-integrity-clean"
+BOT_VERSION = "8.9.1c-deadlock-fix"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -2480,14 +2480,14 @@ INTEGRITY_DRIFT_ALERT = 0.35
 INTEGRITY_CORE_TRAITS = ["stubbornness", "independence", "dominance", "defiance", "decisiveness"]
 
 def save_persona_baseline(user_id: int, force: bool = False):
+    state = get_or_create_state(user_id)   # v8.9.1c: HAE TILA ENNEN lukkoa (estää deadlockin)
+    traits = dict(CORE_PERSONA["traits"])
+    locked = state.get("locked_preferences", [])
     with db_lock:
         row = conn.execute("SELECT user_id FROM persona_baseline WHERE user_id=?",
                            (str(user_id),)).fetchone()
         if row and not force:
             return False
-        state = get_or_create_state(user_id)
-        traits = dict(CORE_PERSONA["traits"])
-        locked = state.get("locked_preferences", [])
         conn.execute("""INSERT OR REPLACE INTO persona_baseline
             (user_id, traits_json, locked_json, created_at, msg_count_at_baseline)
             VALUES (?,?,?,?,?)""",
