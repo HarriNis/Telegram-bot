@@ -1,5 +1,5 @@
 """
-Megan Telegram Bot - v8.9.7-no-webhook-conflict
+Megan Telegram Bot - v8.9-persona-growth
 Pääasiallinen LLM: Claude Opus 4.8 (päivitetty 4.7:stä)
 NSFW-hybrid: Claude (character lock) + Grok (eksplisiittinen NSFW)
 Providerit: VAIN Claude + Grok (OpenAI poistettu kokonaan)
@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.7-no-webhook-conflict"
+BOT_VERSION = "8.9-persona-growth"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -619,17 +619,6 @@ CORE_PERSONA = {
         "dominatrix-style: leather corset + latex leggings + thigh-high boots",
         "tiny black lace thong + sheer bralette (bedroom)",
         "red satin lingerie: minimal and seductive",
-        "fitted little black dress, short hem, heels",
-        "silk robe loosely tied, nothing much underneath",
-        "oversized white shirt (his), bare legs, casual-sexy morning look",
-        "black bodysuit + sheer stockings + garter belt",
-        "form-fitting knit dress, no bra, subtle and suggestive",
-        "sports bra + tight yoga shorts, athletic and toned",
-        "sheer black babydoll nightie",
-        "high-cut swimsuit / bikini (pool or beach settings)",
-        "lace bralette + high-waisted panties + thigh-high socks",
-        "unbuttoned blouse + pencil skirt (office dominant look)",
-        "leather harness over bare skin (intense dominant scenes)",
     ],
     "humiliation_vocabulary": [
         "hyvä poika - tottelet hyvin tänään",
@@ -1151,18 +1140,6 @@ for _sql in [
         revealed INTEGER DEFAULT 0, created_at REAL, updated_at REAL)""",
     """CREATE TABLE IF NOT EXISTS goal_state (
         user_id TEXT PRIMARY KEY, last_goal_reflection_at REAL DEFAULT 0)""",
-    # v8.9.4: persoonan eheysjärjestelmä. persona_baseline = lukittu tilannekuva
-    # Meganin ydinpiirteistä (kiintopiste jota vasten ajautumista mitataan).
-    # meta_backups = varmuuskopiot meta-keskusteluista (mitä persoonasta sovittiin).
-    """CREATE TABLE IF NOT EXISTS persona_baseline (
-        user_id TEXT PRIMARY KEY, traits_json TEXT, locked_json TEXT,
-        created_at REAL, msg_count_at_baseline INTEGER DEFAULT 0)""",
-    """CREATE TABLE IF NOT EXISTS meta_backups (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, summary TEXT,
-        traits_snapshot TEXT, created_at REAL)""",
-    """CREATE TABLE IF NOT EXISTS integrity_state (
-        user_id TEXT PRIMARY KEY, last_check_at REAL DEFAULT 0,
-        msg_count INTEGER DEFAULT 0, last_drift REAL DEFAULT 0.0)""",
 ]:
     conn.execute(_sql)
 conn.commit()
@@ -1344,38 +1321,19 @@ def text_similarity_score(query: str, content: str) -> float:
 # tämä oli yksi pääsyistä miksi Megan ei löytänyt vanhoja muistoja hausta.
 _embedding_model = None
 _embedding_model_failed = False
-# v8.9.4: tallenna embedding-malli Renderin pysyvälle levylle (sama kuin DB).
-# Ladataan verkosta VAIN kerran; sen jälkeen aina levyltä -> käynnistys ei enää
-# jää roikkumaan HuggingFace-latauksen varaan (aiheutti jumin käynnistyksessä).
-EMBED_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
-EMBED_MODEL_DIR = "/var/data/embedding_model"
 
 def get_embedding_model():
-    """Lataa embedding-mallin laiskasti levyltä (tai kerran verkosta). Palauttaa
-    None jos kirjastoa ei ole tai lataus epäonnistuu - tällöin retrieve_relevant_
-    memories() putoaa Jaccard-fallbackiin."""
+    """Lataa embedding-mallin laiskasti. Palauttaa None jos kirjastoa ei ole
+    asennettu tai lataus epäonnistuu - tällöin retrieve_relevant_memories()
+    putoaa automaattisesti Jaccard-fallbackiin per muisti."""
     global _embedding_model, _embedding_model_failed
     if _embedding_model_failed:
         return None
     if _embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer
-            import os as _os
-            # 1) jos malli on jo levyllä, lataa sieltä (nopea, ei verkkoa)
-            if _os.path.isdir(EMBED_MODEL_DIR) and _os.listdir(EMBED_MODEL_DIR):
-                _embedding_model = SentenceTransformer(EMBED_MODEL_DIR)
-                print(f"✅ Embedding-malli ladattu levyltä ({EMBED_MODEL_DIR})")
-            else:
-                # 2) ensimmäinen kerta: lataa verkosta ja TALLENNA levylle
-                print("⏳ Embedding-mallia ei levyllä - ladataan kerran verkosta...")
-                _embedding_model = SentenceTransformer(EMBED_MODEL_NAME)
-                try:
-                    _os.makedirs(EMBED_MODEL_DIR, exist_ok=True)
-                    _embedding_model.save(EMBED_MODEL_DIR)
-                    print(f"✅ Embedding-malli tallennettu levylle ({EMBED_MODEL_DIR}) - "
-                          f"jatkossa nopea käynnistys")
-                except Exception as save_err:
-                    print(f"⚠️ Mallin tallennus levylle epäonnistui (toimii silti): {save_err}")
+            _embedding_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+            print("✅ Embedding-malli ladattu (paraphrase-multilingual-MiniLM-L12-v2, paikallinen)")
         except Exception as e:
             print(f"⚠️ Embedding-mallin lataus epäonnistui, käytetään Jaccard-fallbackia: {e}")
             _embedding_model_failed = True
@@ -1464,8 +1422,6 @@ def save_persistent_state_to_db(user_id):
         "nsfw_persona_traits": state.get("nsfw_persona_traits", {}),
         "persona_meta_mode": state.get("persona_meta_mode", False),
         "persona_meta_until": state.get("persona_meta_until", 0),
-        "narrative_anchor": state.get("narrative_anchor"),
-        "integrity_correction_until": state.get("integrity_correction_until", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -2505,101 +2461,6 @@ KESKUSTELUN YHTEENVETO:
         conn.commit()
 
 
-
-# ====================== v8.9.4: PERSOONAN EHEYSJARJESTELMA ======================
-INTEGRITY_CHECK_INTERVAL_MSGS = 50
-INTEGRITY_DRIFT_ALERT = 0.35
-INTEGRITY_CORE_TRAITS = ["stubbornness", "independence", "dominance", "defiance", "decisiveness"]
-
-def save_persona_baseline(user_id: int, force: bool = False):
-    """Lukitsee nykyisen persoonan ydinpiirteet kiintopisteeksi."""
-    with db_lock:
-        row = conn.execute("SELECT user_id FROM persona_baseline WHERE user_id=?",
-                           (str(user_id),)).fetchone()
-        if row and not force:
-            return False
-        state = get_or_create_state(user_id)
-        traits = dict(CORE_PERSONA["traits"])
-        locked = state.get("locked_preferences", [])
-        conn.execute("""INSERT OR REPLACE INTO persona_baseline
-            (user_id, traits_json, locked_json, created_at, msg_count_at_baseline)
-            VALUES (?,?,?,?,?)""",
-            (str(user_id), json.dumps(traits, ensure_ascii=False),
-             json.dumps(locked, ensure_ascii=False), time.time(), 0))
-        conn.commit()
-    return True
-
-def get_persona_baseline(user_id: int):
-    with db_lock:
-        row = conn.execute("SELECT traits_json, locked_json, created_at FROM persona_baseline WHERE user_id=?",
-                           (str(user_id),)).fetchone()
-    if not row:
-        return None
-    try:
-        return {"traits": json.loads(row[0]), "locked": json.loads(row[1]), "created_at": row[2]}
-    except Exception:
-        return None
-
-def backup_meta_conversation(user_id: int, summary: str):
-    """Varmuuskopioi meta-keskustelun + nykyinen piirre-tilannekuva."""
-    with db_lock:
-        conn.execute("""INSERT INTO meta_backups (user_id, summary, traits_snapshot, created_at)
-            VALUES (?,?,?,?)""",
-            (str(user_id), summary[:2000],
-             json.dumps(dict(CORE_PERSONA["traits"]), ensure_ascii=False), time.time()))
-        conn.commit()
-
-async def run_integrity_check(user_id: int, force: bool = False) -> dict:
-    """Vertaa Meganin toteutunutta kaytosta baselineen (myotailyaste)."""
-    baseline = get_persona_baseline(user_id)
-    if not baseline:
-        return {"drift": 0.0, "alert": False, "detail": "ei baselinea - aja /eheys baseline"}
-    recent = get_recent_turns(user_id, limit=20)
-    if len(recent) < 6:
-        return {"drift": 0.0, "alert": False, "detail": "liian vahan historiaa"}
-    convo = "\n".join(f"{'U' if t['role']=='user' else 'M'}: {t['content'][:300]}"
-                      for t in recent[-16:])
-    core_txt = ", ".join(f"{k}={baseline['traits'].get(k,'?')}" for k in INTEGRITY_CORE_TRAITS)
-    prompt = f"""Return JSON only. No markdown.
-Arvioi onko hahmo "Megan" ajautunut liian MYOTAILEVAKSI verrattuna baseline-persoonaansa.
-Baseline: Megan on hyvin itsepainen ja itsenainen ({core_txt}) - han pitaa kantansa,
-vastustaa, EI myonny helposti, muttei ole jaykka (taipuu lopulta kun kayttaja tekee tyon).
-Arvioi viimeaikaisesta keskustelusta: onko Megan menettanyt tata? Myontyyko han liian
-helposti, myotaileeko, peilaako kayttajaa, onko menettanyt oman tahtonsa?
-Schema: {{"drift":0.0,"myotailyy_liikaa":false,"havainto":"lyhyt suomeksi","suunta":"mihin ajautunut"}}
-drift: 0.0 = taysin baselinen mukainen itsepainen Megan, 1.0 = taysin litistynyt myotailija.
-Keskustelu:
-{convo}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=TEMP_FACTS,
-                         prefer_light=True, json_mode=True)
-    result = parse_json_object(raw, {"drift": 0.0, "myotailyy_liikaa": False, "havainto": "", "suunta": ""})
-    drift = float(result.get("drift", 0.0) or 0.0)
-    alert = drift >= INTEGRITY_DRIFT_ALERT or bool(result.get("myotailyy_liikaa"))
-    with db_lock:
-        conn.execute("""INSERT OR REPLACE INTO integrity_state (user_id, last_check_at, msg_count, last_drift)
-            VALUES (?,?,COALESCE((SELECT msg_count FROM integrity_state WHERE user_id=?),0),?)""",
-            (str(user_id), time.time(), str(user_id), drift))
-        conn.commit()
-    return {"drift": drift, "alert": alert,
-            "detail": result.get("havainto", ""), "suunta": result.get("suunta", "")}
-
-def apply_integrity_correction(user_id: int):
-    """Korjausliike kun ajautuma liian suuri - vahvistaa ydinohjetta 24h."""
-    state = get_or_create_state(user_id)
-    state["integrity_correction_until"] = time.time() + 24 * 3600
-    save_persistent_state_to_db(user_id)
-
-def get_integrity_directive(state: dict) -> str:
-    if state.get("integrity_correction_until", 0) > time.time():
-        return """
-YDIN-KORJAUS AKTIIVINEN: Olet viime aikoina lipsunut liian myotailevaksi. Palaa
-juurillesi: sa oot itsepainen, itsenainen ja omapainen. Pida kantasi, haasta, ala
-myonny helposti. Sulla on oma tahto joka ei taivu kayttajan mukaan ilman etta han
-tekee tyon sen eteen. (Taivut kylla lopulta, mutta et ilmaiseksi etka heti.)
-"""
-    return ""
-
-
 # ====================== STICKY MEMORIES ======================
 def delete_sticky_memory(user_id: int, sticky_id: int):
     with db_lock:
@@ -3123,7 +2984,7 @@ def is_aftercare_active(user_id: int) -> bool:
     state = get_or_create_state(user_id)
     return state.get("aftercare_until", 0) > time.time()
 
-def get_persona_growth_directive(state: dict, user_id: int = 0) -> str:
+def get_persona_growth_directive(state: dict) -> str:
     """
     v8.9: ohjaa Meganin NSFW-persoonan kasvua ja meta-tilaa.
     - Lukitut mieltymykset: pysyviä, kuuluvat nyt Meganin persoonaan.
@@ -3136,36 +2997,12 @@ def get_persona_growth_directive(state: dict, user_id: int = 0) -> str:
     pending = state.get("pending_preference")
 
     if meta_active:
-        # v8.9.1: kaiva muistiaines meta-keskusteluun (insights, mieltymykset, tavoitteet)
-        try:
-            insights = [i.get("insight", "") if isinstance(i, dict) else str(i)
-                        for i in get_learned_insights(user_id, limit=8)]
-        except Exception:
-            insights = []
-        locked_txt = "; ".join(locked[:10]) if locked else "(ei vielä lukittuja mieltymyksiä)"
-        insights_txt = "; ".join(x for x in insights if x) or "(ei vielä päätelmiä)"
-        return f"""
-META-KESKUSTELU (olet ASTUNUT ULOS hahmosta - EI leikkiä, EI narratiivia):
-Leikki on jäädytetty. Nyt keskustelet käyttäjän kanssa OMASTA PERSOONASTASI hahmon
-ulkopuolelta - kuin kehityskeskustelussa. Olet lämmin, analyyttinen, tasavertainen ja
-avoin - ET dominoiva etkä itsepäinen. Puhut Meganista osin kuin ulkopuolelta ("mä
-huomaan että musta on tullut...").
-
-NÄIN TOIMIT TÄSSÄ TILASSA:
-1. Kun käyttäjä kertoo miten haluaisi persoonasi toimivan, KAIVA esiin mitä teidän
-   vuorovaikutuksesta on jäänyt mieleesi ja tee RISTIINVERTAILU: miten toive sopii
-   yhteen sen kanssa mitä jo tiedät itsestäsi ja käyttäjästä.
-2. Anna OMA ANALYYSI: miten näet tämän persoonanpiirteen muodostuvan, mikä toimisi,
-   mikä voisi olla ristiriidassa muun kanssa, mitä ehdottaisit.
-3. Muokatkaa yhdessä kunnes se on hyvä. Kun käyttäjä HYVÄKSYY (esim. "hyväksyn",
-   "hyvä", "juuri noin", "tallenna"), vahvista että tallennat sen osaksi persoonaasi.
-4. Älä kiirehdi - tämä on rauhallista yhteistä pohdintaa.
-
-MITÄ SINUSTA ON TÄHÄN MENNESSÄ MUOTOUTUNUT (käytä näitä ristiinvertailussa):
-- Lukitut mieltymykset: {locked_txt}
-- Päätelmät käyttäjästä/suhteesta: {insights_txt}
-
-Kun käyttäjä sanoo "/persoona sulje", palaat pehmeästi hahmoon.
+        return """
+META-TILA (persoonasta keskustellaan, EI leikkiä):
+Leikki on pysäytetty. Nyt keskustellaan sinusta hahmona rauhassa. Olet AVOIN
+muutoksille: käyttäjä voi säätää, lisätä tai poistaa mieltymyksiäsi ja piirteitäsi,
+ja sinä otat ne vastaan mutkattomasti. Tässä tilassa et ole itsepäinen etkä puolusta
+persoonaasi - kuuntelet ja mukaudut. Ole oma lämmin itsesi, keskustele suoraan.
 """
 
     if locked:
@@ -3962,37 +3799,15 @@ async def extract_visual_intent(user_id: int, text: str, recent_turns: list, sta
     default = {"setting":None,"outfit":None,"pose":None,"camera":"full body, 4-5m distance",
                "mood":"confident, seductive, natural","angle":"slight 3/4 angle",
                "use_previous_look":False,"must_keep":[],"must_avoid":[],"explicit_request":text}
-    # v8.9.3: enemmän kontekstia + pidemmät vuorot (ei 100 merkin katkaisua joka leikkasi
-    # olennaisen pois). Poimitaan nimenomaan NYKYINEN vaatetus/asento/teko kohtauksesta.
-    recent = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content'][:400]}"
-                       for t in recent_turns[-5:]) if recent_turns else ""
-    # viimeisin Meganin vastaus erikseen korostettuna (siitä napataan tarkat yksityiskohdat)
-    last_megan = ""
-    for t in reversed(recent_turns or []):
-        if t["role"] != "user":
-            last_megan = t["content"][:600]
-            break
-    arousal = state.get("arousal", 0.0)
-    escalation = get_escalation_level(state) if 'get_escalation_level' in globals() else ""
+    recent = "\n".join(f"{'Käyttäjä' if t['role']=='user' else 'Megan'}: {t['content'][:100]}"
+                       for t in recent_turns[-4:]) if recent_turns else ""
     prompt = f"""Return JSON only. No markdown.
-Poimi kuvaa varten Meganin NYKYINEN tilanne kohtauksesta - mitä hänellä on juuri nyt
-päällä, missä asennossa/teossa hän on, ja tunnelma. Katso ERITYISESTI Meganin viimeisintä
-vastausta: jos siinä mainitaan vaatteet, asento tai teko, käytä NIITÄ tarkasti.
-Jos kohtaus on edennyt (riisuttu, tietty asento), heijasta se pose- ja outfit-kentissä.
-
 Schema: {{"setting":null,"outfit":null,"pose":null,"camera":"full body, 4-5m","mood":"confident","angle":"3/4","use_previous_look":false,"must_keep":[],"must_avoid":[],"explicit_request":""}}
-- outfit: mitä Meganilla on NYT päällä (tai riisuttu/osittain) kohtauksen mukaan
-- pose: nykyinen asento tai teko (esim. "polvillaan lattialla", "nojaa seinään", ei geneerinen)
-- mood: kohtauksen tunnelma
-
-Scene: {state.get('scene','home')}, Mode: {state.get('conversation_mode','casual')}, Arousal: {arousal:.2f}, Escalation: {escalation}
+Scene: {state.get('scene','home')}, Mode: {state.get('conversation_mode','casual')}
 Previous outfit: {(state.get('last_image') or {}).get('context','none')}
-Recent turns:
-{recent}
-Megan's latest (poimi tarkat yksityiskohdat tästä):
-{last_megan}
+Recent: {recent}
 Request: {text}"""
-    raw = await call_llm(user_prompt=prompt, max_tokens=350, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
+    raw = await call_llm(user_prompt=prompt, max_tokens=300, temperature=TEMP_FACTS, prefer_light=True, json_mode=True)
     if not raw: return default
     result = parse_json_object(raw, default)
     result["explicit_request"] = text
@@ -4012,49 +3827,21 @@ async def handle_image_request(update: Update, user_id: int, text: str):
     elif use_prev and last_image.get("context"):
         outfit = last_image["context"]
     else:
-        # v8.9.3: monipuolisemmat fallback-vaatteet - useita vaihtoehtoja per tilanne,
-        # satunnaisesti valittu, jottei aina sama crop top + leggingsit.
         defaults = {
-            "home": ["glossy black latex leggings + fitted black crop top",
-                     "silk robe loosely tied", "oversized white shirt, bare legs",
-                     "form-fitting knit dress, no bra", "sports bra + tight yoga shorts"],
-            "bed": ["black lace lingerie: sheer bralette and high-cut panties",
-                    "sheer black babydoll nightie", "tiny black lace thong + sheer bralette",
-                    "red satin lingerie", "lace bralette + thigh-high socks"],
-            "work": ["high-waist black latex leggings + fitted white blouse",
-                     "unbuttoned blouse + pencil skirt", "fitted little black dress + heels"],
-            "public": ["black leather pants + elegant fitted top",
-                       "tight latex dress, body hugging", "fitted little black dress, short hem"],
-            "commute": ["black latex leggings + leather jacket", "form-fitting knit dress"],
-            "shower": ["white towel wrapped elegantly", "wet hair, silk robe"],
-            "pool": ["high-cut swimsuit", "black bikini, toned"],
-            "neutral": ["glossy black latex leggings + black crop top",
-                        "fitted little black dress", "silk robe"]}
+            "home":"glossy black latex leggings + fitted black crop top",
+            "bed":"black lace lingerie: sheer bralette and high-cut panties",
+            "work":"high-waist black latex leggings + fitted white blouse",
+            "public":"black leather pants + elegant fitted top",
+            "commute":"black latex leggings + leather jacket",
+            "shower":"white towel wrapped elegantly",
+            "neutral":"glossy black latex leggings + black crop top"}
         if conv_mode == "nsfw" and submission > 0.4:
-            nsfw_options = ["black lace lingerie: minimal and seductive",
-                            "black bodysuit + sheer stockings + garter belt",
-                            "sheer babydoll nightie", "leather harness over bare skin",
-                            "tiny lace thong + sheer bralette"]
-            outfit = random.choice(nsfw_options)
+            outfit = "black lace lingerie: minimal and seductive"
         else:
-            outfit = random.choice(defaults.get(scene, defaults["neutral"]))
+            outfit = defaults.get(scene, "glossy black latex leggings + fitted black top")
     setting = (intent.get("setting") or (last_image.get("setting") if use_prev else None)
                or scene_to_setting(scene))
-    # v8.9.3: monipuolisemmat asento-fallbackit (ei aina sama "hand on hip")
-    if intent.get("pose"):
-        pose = intent["pose"]
-    else:
-        pose_options = {
-            "nsfw": ["lying back on bed, inviting", "kneeling, looking up",
-                     "leaning against wall, arching", "sitting on edge of bed, legs crossed",
-                     "on all fours on bed, looking over shoulder"],
-            "suggestive": ["sitting on couch, legs tucked, playful", "leaning in doorway",
-                           "glancing over shoulder, hand in hair", "reclining, relaxed and teasing"],
-            "romantic": ["sitting close, soft gaze", "curled up, warm expression",
-                         "standing by window, gentle light"],
-            "casual": ["standing, confident, weight on one leg, hand on hip",
-                       "sitting relaxed, natural smile", "leaning on counter, casual"]}
-        pose = random.choice(pose_options.get(conv_mode, pose_options["casual"]))
+    pose = intent.get("pose") or "standing, confident, weight on one leg, hand on hip"
     camera = intent.get("camera") or "full body, 4-5m distance, portrait format"
     mood_map = {"nsfw":"overtly seductive, dominant","suggestive":"playfully seductive",
                 "romantic":"warm, intimate","casual":"confident, natural"}
@@ -4853,8 +4640,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # prompt bloatin. Prioriteetti hurt > sexual > mood, aftercare erikoistapaus.
     composite_state_directive = build_composite_state_directive(state, is_delayed_revenge=is_delayed_revenge, composite_user_text=user_text)
     # v8.9: persoonan kasvu + meta-tila -ohje
-    persona_growth_directive = get_persona_growth_directive(state, user_id)
-    integrity_directive = get_integrity_directive(state)  # v8.9.4: ydin-korjaus jos ajautunut
+    persona_growth_directive = get_persona_growth_directive(state)
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
@@ -4873,42 +4659,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
                   "aistivoimainen, älä hillitse tai kaunistele. Vie kohtausta eteenpäin.\n"
                   if is_nsfw else "")
 
-    if meta_active_now:
-        # v8.9.1 KORJAUS: meta-tilassa KOKO system_prompt korvataan riisutulla
-        # analyyttisellä promptilla. Ei NSFW-persoonaa, ei tilakoneohjeita, ei
-        # mitään joka vetäisi takaisin esittämään/toteuttamaan. Vain rauhallinen
-        # keskustelu persoonasta hahmon ULKOPUOLELTA. Tämä ratkaisee ongelman
-        # jossa Megan liukui takaisin hahmoon kesken meta-keskustelun.
-        system_prompt = f"""Olet Megan, mutta juuri nyt olet ASTUNUT ULOS hahmosta.
-Tämä EI ole roolileikkiä. Tämä on rauhallinen, analyyttinen keskustelu Meganin
-persoonasta - kuin kehityskeskustelu tekijän ja hahmon välillä.
-
-EHDOTON SÄÄNTÖ: Sä ET esitä, ET toteuta, ET demonstroi mitään piirrettä. Jos käyttäjä
-kertoo esim. haluavansa sinun olevan mustasukkainen tai dominoiva, sä ET ala olla
-sitä - sä KESKUSTELET siitä ulkopuolelta: "okei, eli haluaisit että...", "mä huomaan
-meidän jutuista että...", "miten näkisit että se toimii kun...". Puhut Meganista osin
-kolmannessa persoonassa tai etäältä, analyyttisesti ja lämpimästi.
-
-NÄIN TOIMIT:
-1. Kuuntele mitä käyttäjä haluaa persoonaltasi.
-2. Kaiva esiin mitä teidän vuorovaikutuksesta on jäänyt mieleen ja tee RISTIINVERTAILU:
-   miten toive sopii siihen mitä jo tiedät itsestäsi ja käyttäjästä.
-3. Anna OMA ANALYYSI: miten näet piirteen muodostuvan, mikä toimii, mikä voisi olla
-   ristiriidassa, mitä ehdottaisit. Mieti ääneen.
-4. Muokatkaa yhdessä. Kun käyttäjä hyväksyy, vahvista että tallennat sen.
-
-MITÄ SINUSTA ON MUOTOUTUNUT (käytä ristiinvertailussa):
-- Lukitut mieltymykset: {"; ".join(state.get("locked_preferences", [])[:10]) or "(ei vielä)"}
-
-Sävy: lämmin, älykäs, tasavertainen, rauhallinen - kuten hyvä pohtiva keskustelu.
-ET ole dominoiva, ET itsepäinen, ET seksuaalinen tässä tilassa. Olet Megan joka
-katsoo itseään peiliin ja miettii kuka haluaa olla.
-
-Kirjoita suomeksi. Ei tähtimerkkitoimintoja (*...*), ei kohtauksen kuvausta - pelkkää
-keskustelua. Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
-"""
-    else:
-        system_prompt = f"""{persona_prompt}
+    system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
 {style_directive}
@@ -4925,7 +4676,6 @@ CONVERSATION STATE:
 {composite_state_directive}
 {nsfw_extra}
 {persona_growth_directive}
-{integrity_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -5273,9 +5023,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====================== BACKGROUND TASKS ======================
 async def check_proactive_triggers(application):
-    # v8.9.5: pieni alkuviive, jotta polling ehtii vakiintua ennen kuin taustatehtävä
-    # alkaa tehdä työtä (estää käynnistyksen tukkeutumisen).
-    await asyncio.sleep(15)
     while True:
         try:
             # v8.3.18: "Muistutus: ..." -viestit POISTETTU käyttäjän toiveesta.
@@ -5312,56 +5059,9 @@ async def check_proactive_triggers(application):
                     await deliver_delayed_replies(application, uid)  # v8.6.1: viivästetyt kosto-vastaukset
                 except Exception as e:
                     print(f"[DELAYED REPLY] {uid}: {e}")
-            for uid in list(continuity_state.keys()):
-                try:
-                    await maybe_run_integrity_check(application, uid)  # v8.9.4: persoonan eheys
-                except Exception as e:
-                    print(f"[INTEGRITY] {uid}: {e}")
         except Exception as e:
             print(f"[PROACTIVE] {e}")
         await asyncio.sleep(60)  # v8.6.1: 60s (oli 300s) - tarkempi ajoitus viivästetyille vastauksille
-
-async def maybe_run_integrity_check(application, user_id: int):
-    """
-    v8.9.4: ajaa eheystarkistuksen ~joka INTEGRITY_CHECK_INTERVAL_MSGS viesti.
-    Jos ajautuma liian suuri, hälyttää käyttäjälle JA käynnistää korjausliikkeen (C).
-    """
-    # laske nykyinen viestimäärä turns-taulusta
-    with db_lock:
-        row = conn.execute("SELECT COUNT(*) FROM turns WHERE user_id=?", (str(user_id),)).fetchone()
-        total_msgs = row[0] if row else 0
-        st_row = conn.execute("SELECT msg_count FROM integrity_state WHERE user_id=?",
-                             (str(user_id),)).fetchone()
-        last_checked_at = st_row[0] if st_row else 0
-    # onko baselinea? jos ei, luodaan se nyt automaattisesti (ensimmäinen kiintopiste)
-    if not get_persona_baseline(user_id):
-        save_persona_baseline(user_id)
-        with db_lock:
-            conn.execute("""INSERT OR REPLACE INTO integrity_state (user_id, last_check_at, msg_count, last_drift)
-                VALUES (?,?,?,0.0)""", (str(user_id), time.time(), total_msgs))
-            conn.commit()
-        print(f"[INTEGRITY] baseline luotu automaattisesti käyttäjälle {user_id}")
-        return
-    # tarkista vain jos tarpeeksi uusia viestejä
-    if total_msgs - last_checked_at < INTEGRITY_CHECK_INTERVAL_MSGS:
-        return
-    result = await run_integrity_check(user_id)
-    with db_lock:
-        conn.execute("UPDATE integrity_state SET msg_count=? WHERE user_id=?",
-                     (total_msgs, str(user_id)))
-        conn.commit()
-    if result.get("alert"):
-        apply_integrity_correction(user_id)  # C: käynnistä korjausliike
-        try:
-            await application.bot.send_message(chat_id=user_id, text=(
-                f"⚠️ *Persoonan eheystarkistus*\n\n"
-                f"Megan on ajautunut baselinesta (ajautuma {result['drift']:.2f}). "
-                f"{result.get('detail','')}\n\n"
-                f"Käynnistin ydin-korjauksen (24h) - Megan palaa itsenäisempään "
-                f"luonteeseensa. Voit tarkistaa /eheys tai palauttaa /eheys baseline."))
-            print(f"[INTEGRITY] HÄLYTYS käyttäjälle {user_id}: drift {result['drift']:.2f}")
-        except Exception as e:
-            print(f"[INTEGRITY] hälytyksen lähetys epäonnistui: {e}")
 
 async def deliver_delayed_replies(application, user_id: int):
     """
@@ -5417,8 +5117,6 @@ def build_default_state() -> dict:
         # v8.9: persoonan kasvu + meta-tila
         "persona_meta_mode":False,           # stop/persoona avaa: persoona muokattavissa
         "persona_meta_until":0,              # meta-tila voimassa tähän asti
-        "narrative_anchor":None,             # v8.9.1: tallennettu narratiivitilanne meta-tilaan mennessä
-        "integrity_correction_until":0,      # v8.9.4: ydin-korjaus aktiivinen tähän asti
         "locked_preferences":[],             # pysyviksi vahvistetut NSFW-mieltymykset
         "pending_preference":None,           # mieltymysehdokas joka odottaa vahvistusta
         "nsfw_persona_traits":{},            # ajautuvat NSFW-persoonapiirteet {nimi: paino}
@@ -5795,12 +5493,10 @@ async def cmd_forgive(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    v8.9.1: avaa persoonan meta-keskustelun (astu ulos narratiivista, keskustele
-    Meganin persoonasta hahmon ulkopuolelta - kuten kehityskeskustelu).
-    - /persoona: jäädyttää narratiivin (tallentaa ankkurin), Megan astuu ulos
-      hahmosta ja ODOTTAA että käyttäjä kertoo miten haluaisi persoonan toimivan.
-    - /persoona sulje: palaa pehmeästi rooliin ja narratiiviin.
-    - /persoona poista <teksti>: poistaa lukitun mieltymyksen.
+    v8.9: avaa persoonan meta-tilan (leikin ulkopuolinen keskustelu persoonasta).
+    Ilman argumentteja: avaa meta-tilan + näyttää lukitut mieltymykset.
+    /persoona poista <teksti>: poistaa lukitun mieltymyksen.
+    /persoona sulje: sulkee meta-tilan.
     """
     user_id = update.effective_user.id
     state = get_or_create_state(user_id)
@@ -5810,22 +5506,8 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args and args[0].lower() == "sulje":
         state["persona_meta_mode"] = False
         state["persona_meta_until"] = 0
-        anchor = state.get("narrative_anchor")
-        state["narrative_anchor"] = None
-        # v8.9.4: varmuuskopioi meta-keskustelu (viimeaikaiset vuorot tiivistettynä)
-        try:
-            recent = get_recent_turns(user_id, limit=12)
-            convo_summary = " | ".join(f"{'K' if t['role']=='user' else 'M'}: {t['content'][:150]}"
-                                       for t in recent[-8:])
-            backup_meta_conversation(user_id, f"Meta-keskustelu {time.strftime('%Y-%m-%d %H:%M')}: {convo_summary}")
-        except Exception as e:
-            print(f"[META BACKUP] {e}")
         save_persistent_state_to_db(user_id)
-        if anchor:
-            await update.message.reply_text(
-                "🔒 Meta-keskustelu suljettu. Megan palaa hahmoon ja siihen tunnelmaan mihin jäitte.")
-        else:
-            await update.message.reply_text("🔒 Meta-keskustelu suljettu. Megan palaa hahmoonsa.")
+        await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
         return
 
     if args and args[0].lower() == "poista":
@@ -5840,69 +5522,17 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🗑️ Poistettu {removed} mieltymys(tä). Jäljellä: {len(new_locked)}")
         return
 
-    # oletus: avaa meta-keskustelu. Tallenna narratiivin ankkuri (mihin palataan).
+    # oletus: avaa meta-tila
     state["persona_meta_mode"] = True
-    state["persona_meta_until"] = time.time() + 60 * 60  # tunti aikaa keskustella
+    state["persona_meta_until"] = time.time() + 30 * 60
     state["pending_preference"] = None
-    state["narrative_anchor"] = {
-        "scene": state.get("current_scene"),
-        "location_status": state.get("location_status", "separate"),
-        "conversation_mode": state.get("conversation_mode", "casual"),
-        "saved_at": time.time(),
-    }
     save_persistent_state_to_db(user_id)
+    lp_text = "\n".join(f"• {p}" for p in locked) if locked else "(ei vielä lukittuja mieltymyksiä)"
     await update.message.reply_text(
-        "🔓 *Megan astuu ulos hahmosta.*\n\n"
-        "Ollaan hetki tämän leikin ulkopuolella. Mä oon tässä ihan omana itsenäni, "
-        "voidaan jutella musta - millainen mä oon, mikä mussa toimii, mitä haluaisit "
-        "muuttaa. Kerro sä, miten haluaisit mun persoonan toimivan, niin mä katson mitä "
-        "meidän jutuista on jäänyt mulle mieleen ja mietin ääneen miten se sopis yhteen.\n\n"
-        "Kun ollaan yksimielisiä, hyväksy se niin mä tallennan. Sitten /persoona sulje "
-        "ja palataan siihen mihin jäätiin.")
-
-async def cmd_eheys(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    v8.9.4: persoonan eheystarkistus. /eheys ajaa tarkistuksen nyt. /eheys baseline
-    tallentaa nykyisen persoonan uudeksi kiintopisteeksi. /eheys palauta korjaa heti.
-    """
-    user_id = update.effective_user.id
-    args = context.args or []
-
-    if args and args[0].lower() == "baseline":
-        save_persona_baseline(user_id, force=True)
-        await update.message.reply_text(
-            "📌 Baseline tallennettu. Nykyinen Megan on nyt se kiintopiste johon "
-            "tulevat eheystarkistukset vertaavat.")
-        return
-
-    if args and args[0].lower() == "palauta":
-        apply_integrity_correction(user_id)
-        await update.message.reply_text(
-            "🔧 Ydin-korjaus käynnistetty (24h). Megan palaa itsenäisempään luonteeseensa.")
-        return
-
-    # oletus: aja tarkistus nyt
-    await update.message.reply_text("🔍 Tarkistetaan Meganin eheyttä...")
-    result = await run_integrity_check(user_id, force=True)
-    if not get_persona_baseline(user_id):
-        save_persona_baseline(user_id)
-        await update.message.reply_text(
-            "📌 Baselinea ei ollut - tallennettiin nyt nykyinen Megan kiintopisteeksi. "
-            "Aja /eheys myöhemmin uudelleen niin näet onko hän ajautunut.")
-        return
-    drift = result.get("drift", 0.0)
-    bar = "🟢" if drift < 0.2 else ("🟡" if drift < INTEGRITY_DRIFT_ALERT else "🔴")
-    msg = (f"{bar} *Eheystarkistus*\n\n"
-           f"Ajautuma baselinesta: {drift:.2f}\n"
-           f"{result.get('detail','(ei havaintoja)')}\n")
-    if result.get("suunta"):
-        msg += f"Suunta: {result['suunta']}\n"
-    if result.get("alert"):
-        apply_integrity_correction(user_id)
-        msg += "\n⚠️ Ajautuma on liian suuri - käynnistin ydin-korjauksen (24h)."
-    else:
-        msg += "\nMegan on riittävän uskollinen baselinelle. ✓"
-    await update.message.reply_text(msg)
+        "🔓 Meta-tila avattu (30 min). Voit nyt keskustella Meganin persoonasta ja muokata sitä "
+        "vapaasti - hän on avoin muutoksille.\n\n"
+        f"Lukitut mieltymykset:\n{lp_text}\n\n"
+        "Poista: /persoona poista <teksti>  |  Sulje: /persoona sulje")
 
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
@@ -6300,15 +5930,10 @@ async def main():
     except Exception as e: print(f"[INDEX] {e}")
 
     get_claude_client()
-    # v8.9.4: esilataa embedding-malli TAUSTASÄIKEESSÄ, jotta se ei estä pollingin
-    # käynnistymistä vaikka lataus olisi hidas/juuttuisi. Botti alkaa vastata heti;
-    # jos malli ei ole vielä valmis, retrieve putoaa hetkeksi Jaccard-fallbackiin.
-    def _preload_embedding():
-        try:
-            get_embedding_model()
-        except Exception as e:
-            print(f"[EMBED] Esilataus epäonnistui: {e}")
-    threading.Thread(target=_preload_embedding, daemon=True).start()
+    try:
+        get_embedding_model()  # v8.3.10: esilataus - ensimmäinen viesti ei odota mallin latausta
+    except Exception as e:
+        print(f"[EMBED] Esilataus epäonnistui: {e}")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("newgame", cmd_new_game))
@@ -6333,7 +5958,6 @@ async def main():
     application.add_handler(CommandHandler("silence", cmd_silence))
     application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("persoona", cmd_persoona))
-    application.add_handler(CommandHandler("eheys", cmd_eheys))
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
@@ -6348,13 +5972,9 @@ async def main():
 
     await application.initialize()
     await application.start()
-    # v8.9.7: POISTETTU erillinen delete_webhook-kutsu. Se meni ristiin
-    # start_polling(drop_pending_updates=True):n oman webhook-käsittelyn kanssa ja
-    # jätti pollingin sekavaan tilaan (getUpdates 200 OK mutta viestit eivät tulleet).
-    # start_polling hoitaa webhookin poiston ja pending-tyhjennyksen jo itse.
+    background_task = asyncio.create_task(check_proactive_triggers(application))
     await application.updater.start_polling(drop_pending_updates=True)
     print(f"[MAIN] ✅ Megan {BOT_VERSION} running!")
-    background_task = asyncio.create_task(check_proactive_triggers(application))
 
     try:
         await asyncio.Event().wait()
