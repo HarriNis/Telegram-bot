@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1c-deadlock-fix"
+BOT_VERSION = "8.9.1d-meta-lock"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -4763,7 +4763,38 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
                   "aistivoimainen, älä hillitse tai kaunistele. Vie kohtausta eteenpäin.\n"
                   if is_nsfw else "")
 
-    system_prompt = f"""{persona_prompt}
+    if meta_active_now:
+        # v8.9.1c: meta-tilassa KOKO system_prompt korvataan riisutulla
+        # analyyttisellä promptilla (palautettu v8.9.2:n ratkaisu). Ei NSFW-persoonaa,
+        # ei tilaohjeita - vain rauhallinen keskustelu persoonasta hahmon ULKOPUOLELTA.
+        locked_now = state.get("locked_preferences", [])
+        system_prompt = f"""Olet Megan, mutta juuri nyt olet ASTUNUT ULOS hahmosta.
+Tämä EI ole roolileikkiä. Tämä on rauhallinen, analyyttinen keskustelu Meganin
+persoonasta - kuin kehityskeskustelu tekijän ja hahmon välillä.
+
+EHDOTON SÄÄNTÖ: Sä ET esitä, ET toteuta, ET demonstroi mitään piirrettä. Jos käyttäjä
+kertoo haluavansa sinun olevan esim. mustasukkainen tai dominoiva, sä ET ala olla sitä -
+sä KESKUSTELET siitä ulkopuolelta: "okei, eli haluaisit että...", "mä huomaan meidän
+jutuista että...", "miten näkisit että se toimii kun...". Puhut Meganista etäältä,
+analyyttisesti ja lämpimästi, osin kolmannessa persoonassa.
+
+NÄIN TOIMIT:
+1. Kuuntele mitä käyttäjä haluaa persoonaltasi.
+2. Kaiva esiin mitä teidän vuorovaikutuksesta on jäänyt mieleen ja tee RISTIINVERTAILU:
+   miten toive sopii siihen mitä jo tiedät itsestäsi ja käyttäjästä.
+3. Anna OMA ANALYYSI: miten näet piirteen muodostuvan, mikä toimii, mikä voisi olla
+   ristiriidassa, mitä ehdottaisit. Mieti ääneen.
+4. Kun käyttäjä hyväksyy jonkin asian pysyväksi, sano selvästi että se on nyt osa sinua.
+
+Lukitut mieltymykset tällä hetkellä: {"; ".join(locked_now[:10]) if locked_now else "(ei vielä)"}
+
+Sävy: lämmin, älykäs, tasavertainen, rauhallinen - kuten hyvä pohtiva keskustelu.
+ET ole dominoiva, ET itsepäinen, ET seksuaalinen tässä tilassa.
+Kirjoita suomeksi. EI tähtimerkkitoimintoja (*...*), EI kohtauskuvausta - pelkkää keskustelua.
+Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
+"""
+    else:
+        system_prompt = f"""{persona_prompt}
 
 {memory_usage_directive}
 {style_directive}
@@ -5726,6 +5757,36 @@ async def cmd_eheys(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\nMegan on riittävän uskollinen baselinelle. ✓"
     await update.message.reply_text(msg)
 
+async def cmd_lukitse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    v8.9.1c: lukitse mieltymys/persoonapiirre pysyväksi. Käytä meta-keskustelun
+    jälkeen kun olet sopinut jostain: /lukitse <teksti>. Ilman argumenttia näyttää
+    nykyiset lukitut mieltymykset.
+    """
+    user_id = update.effective_user.id
+    state = get_or_create_state(user_id)
+    locked = state.get("locked_preferences", [])
+    text = " ".join(context.args or []).strip()
+    if not text:
+        if locked:
+            lp = "\n".join(f"• {p}" for p in locked)
+            await update.message.reply_text(f"🔒 Lukitut mieltymykset:\n{lp}\n\nLisää: /lukitse <teksti>")
+        else:
+            await update.message.reply_text(
+                "Ei vielä lukittuja mieltymyksiä.\n\nKun olet meta-tilassa sopinut jostain "
+                "pysyvästä piirteestä, lukitse se: /lukitse <lyhyt kuvaus>\n"
+                "Esim: /lukitse hallitsevampi ja aloitteellisempi intiimeissä hetkissä")
+        return
+    if text in locked:
+        await update.message.reply_text("Tämä on jo lukittu.")
+        return
+    locked.append(text)
+    state["locked_preferences"] = locked
+    save_persistent_state_to_db(user_id)
+    await update.message.reply_text(
+        f"🔒 Lukittu pysyväksi osaksi Meganin persoonaa:\n\"{text}\"\n\n"
+        f"Tämä ilmenee jatkossa intiimeissä hetkissä. Poista tarvittaessa: /persoona poista <teksti>")
+
 async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.3.17: näytä Meganin oppimat päätelmät käyttäjästä."""
     user_id = update.effective_user.id
@@ -6151,6 +6212,7 @@ async def main():
     application.add_handler(CommandHandler("forgive", cmd_forgive))
     application.add_handler(CommandHandler("persoona", cmd_persoona))
     application.add_handler(CommandHandler("eheys", cmd_eheys))
+    application.add_handler(CommandHandler("lukitse", cmd_lukitse))
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
