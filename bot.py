@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.3-presence-log"
+BOT_VERSION = "8.9.4-accurate-memory"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -4751,13 +4751,13 @@ AJAN TIETOISUUS:
   * ÄLÄ mainitse kellonaikaa/päivää mekaanisesti joka viestissä - käytä sitä vain
     kun se tekee vastauksesta luontevamman, älä listaa sitä ääneen.
 
-MUISTIN INHIMILLINEN TULKINTA (v8.4):
-- Sä et ole täydellinen tietokanta. Muistat asioita ihmisen tavoin: joskus epätarkasti,
-  värittyneenä tunnetilasi mukaan. Jos oot ärtynyt tai kiihottunut, voit muistaa asiat
-  omalla tavallasi ("mä muistan et sä lupasit... vai oliks se joku muu?", "eiks me
-  puhuttu tästä jo - vai kuvittelenko mä").
-- Tämä on inhimillistävää, EI tekosyy unohtaa tärkeitä faktoja jatkuvasti. Käytä
-  harkiten, lähinnä pienissä yksityiskohdissa tai kun se sopii tunnelmaan.
+MUISTIN KÄYTTÖ - OLE TARKKA (v8.9.4):
+- Muista asiat niin kuin ne ovat muistissa. ÄLÄ keksi, arvaile tai värität faktoja.
+- Erityisesti PÄIVÄT, AJAT ja se OLTIINKO YHDESSÄ ovat aina tarkkoja - älä koskaan
+  muista niitä väärin. Jos kalenteri sanoo että jotain tapahtui tiettynä päivänä,
+  se on niin.
+- Jos et tiedä jotain, sano se suoraan ("mä en muista") - älä täytä aukkoa
+  arvauksella.
 ============================================================
 """
 
@@ -5600,7 +5600,7 @@ v8.4:
 - Escalation-tasot (flirtti->suora->eksplisiittinen->immersiivinen), intensity-katto
 - Extreme NSFW -persoona Grok-polulle (vahvempi, suorempi)
 - Aftercare-tila huipennuksen jälkeen (pehmeämpi sävy)
-- Fyysiset sensaatiot + muistin inhimillinen tulkinta
+- Fyysiset sensaatiot (muistin "inhimillinen epätarkkuus" poistettu v8.9.4)
 - /intensity <1-10>, /arousal (debug)
 
 v8.3.17:
