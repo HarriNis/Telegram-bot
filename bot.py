@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.1f-meta-proactive"
+BOT_VERSION = "8.9.2-consent-photos"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1434,6 +1434,7 @@ def save_persistent_state_to_db(user_id):
         "persona_meta_until": state.get("persona_meta_until", 0),
         "narrative_anchor": state.get("narrative_anchor"),
         "integrity_correction_until": state.get("integrity_correction_until", 0),
+        "meta_open_locked_count": state.get("meta_open_locked_count", 0),
     }, ensure_ascii=False)
     with db_lock:
         conn.execute("INSERT OR REPLACE INTO profiles (user_id, data) VALUES (?, ?)",
@@ -4573,6 +4574,8 @@ async def generate_llm_reply(user_id, user_text, is_delayed_revenge=False):
     if signal_type == "boundary":
         state["persona_meta_mode"] = True
         state["persona_meta_until"] = time.time() + 30 * 60
+        # v8.9.1g: talleta lukittujen määrä, jotta sulkiessa tiedetään muuttuiko mikään
+        state["meta_open_locked_count"] = len(state.get("locked_preferences", []))
         # boundary keskeyttää myös mahdollisen vahvistusta odottavan mieltymyksen
         state["pending_preference"] = None
         print("[META] persoonan meta-tila avattu (stop/boundary)")
@@ -5264,16 +5267,20 @@ async def maybe_run_integrity_check(application, user_id: int):
                      (total_msgs, str(user_id)))
         conn.commit()
     if result.get("alert"):
-        apply_integrity_correction(user_id)
+        # v8.9.1g: EI enää automaattista korjausta. Järjestelmä vain EHDOTTAA -
+        # käyttäjä päättää, koska ajautuma-arvio on LLM:n tulkinta ja voi olla väärässä.
         try:
             await application.bot.send_message(chat_id=user_id, text=(
                 f"⚠️ Persoonan eheystarkistus\n\n"
-                f"Megan on ajautunut baselinesta (ajautuma {result['drift']:.2f}). "
+                f"Megan näyttää ajautuneen baselinesta (ajautuma {result['drift']:.2f}). "
                 f"{result.get('detail','')}\n\n"
-                f"Käynnistin ydin-korjauksen (24h). Voit tarkistaa /eheys."))
-            print(f"[INTEGRITY] HÄLYTYS käyttäjälle {user_id}: drift {result['drift']:.2f}")
+                f"EN tehnyt mitään automaattisesti. Sä päätät:\n"
+                f"• /eheys palauta - vedä Megan takaisin baselineen (24h)\n"
+                f"• /eheys baseline - hyväksy nykyinen Megan uudeksi normaaliksi\n"
+                f"• älä tee mitään - jatketaan näin"))
+            print(f"[INTEGRITY] EHDOTUS käyttäjälle {user_id}: drift {result['drift']:.2f}")
         except Exception as e:
-            print(f"[INTEGRITY] hälytyksen lähetys epäonnistui: {e}")
+            print(f"[INTEGRITY] ehdotuksen lähetys epäonnistui: {e}")
 
 async def deliver_delayed_replies(application, user_id: int):
     """
@@ -5334,6 +5341,7 @@ def build_default_state() -> dict:
         "nsfw_persona_traits":{},            # ajautuvat NSFW-persoonapiirteet {nimi: paino}
         "narrative_anchor":None,             # v8.9.1: narratiivitilanne meta-tilaan mennessä
         "integrity_correction_until":0,      # v8.9.1b: ydin-korjaus aktiivinen tähän asti
+        "meta_open_locked_count":0,          # v8.9.1g: lukittujen määrä meta-tilan avaushetkellä
         "feminization_level":0.0,"dominance_level":1,
         "sexual_boundaries":{"hard_nos":[],"soft_nos":[],"accepted":[],"actively_requested":[]},
         "topic_state":{"current_topic":"general","topic_summary":"","open_questions":[],
@@ -5729,7 +5737,19 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"[META BACKUP] {e}")
         save_persistent_state_to_db(user_id)
-        await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
+        # v8.9.1g: muistuta baselinesta VAIN jos meta-keskustelussa lukittiin jotain uutta
+        opened_with = state.get("meta_open_locked_count", 0)
+        now_locked = len(state.get("locked_preferences", []))
+        state["meta_open_locked_count"] = 0
+        if now_locked > opened_with:
+            added = now_locked - opened_with
+            await update.message.reply_text(
+                f"🔒 Meta-tila suljettu. Megan palaa hahmoonsa.\n\n"
+                f"💡 Lukitsit {added} uutta piirrettä. Jos tämä on Meganin uusi normaali, "
+                f"päivitä vertailukohta: /eheys baseline\n"
+                f"(Muuten eheystarkistus vertaa häntä yhä vanhaan versioon.)")
+        else:
+            await update.message.reply_text("🔒 Meta-tila suljettu. Megan palaa hahmoonsa.")
         return
 
     if args and args[0].lower() == "poista":
@@ -5748,6 +5768,7 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state["persona_meta_mode"] = True
     state["persona_meta_until"] = time.time() + 30 * 60
     state["pending_preference"] = None
+    state["meta_open_locked_count"] = len(locked)  # v8.9.1g: vertailukohta sulkemiselle
     save_persistent_state_to_db(user_id)
     lp_text = "\n".join(f"• {p}" for p in locked) if locked else "(ei vielä lukittuja mieltymyksiä)"
     await update.message.reply_text(
@@ -5786,8 +5807,9 @@ async def cmd_eheys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result.get("suunta"):
         msg += f"Suunta: {result['suunta']}\n"
     if result.get("alert"):
-        apply_integrity_correction(user_id)
-        msg += "\n⚠️ Ajautuma liian suuri - käynnistin ydin-korjauksen (24h)."
+        msg += ("\n⚠️ Ajautuma on iso. EN korjannut automaattisesti - sä päätät:\n"
+                "• /eheys palauta - vedä takaisin baselineen (24h)\n"
+                "• /eheys baseline - hyväksy tämä uudeksi normaaliksi")
     else:
         msg += "\nMegan on riittävän uskollinen baselinelle. ✓"
     await update.message.reply_text(msg)
@@ -6088,113 +6110,175 @@ async def cmd_forget_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deactivate_sticky_memory(user_id, sticky_id)
     await update.message.reply_text(f"✅ Sticky #{sticky_id} deaktivoitu.")
 
-async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# ====================== v8.9.1g: SAAPUVAT KUVAT ======================
+async def analyze_incoming_photo(image_bytes: bytes, state: dict) -> str:
+    """
+    v8.9.1g: analysoi KAYTTAJAN lahettaman kuvan ja palauttaa neutraalin kuvauksen
+    jota Megan voi kommentoida hahmossa. Eri kuin analyze_generated_image (joka
+    tarkistaa Meganin OMAT generoidut kuvat).
+    """
+    claude = get_claude_client()
+    if not claude:
+        return ""
+    try:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        prompt = """Kuvaile tama kuva lyhyesti ja neutraalisti suomeksi (2-3 lausetta).
+Kerro mita kuvassa nakyy: kohde, ymparisto, tunnelma, huomattavat yksityiskohdat.
+Ala tulkitse tai arvaile liikaa - kerro mita oikeasti nakyy. Pelkka kuvaus, ei muuta."""
+        response = await claude.messages.create(
+            model=CLAUDE_MODEL_LIGHT,
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64",
+                     "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        return (extract_claude_text(response) or "").strip()
+    except Exception as e:
+        print(f"[PHOTO IN] analyysi epaonnistui: {e}")
+        return ""
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    v8.9.1g: kayttaja lahetti kuvan. Analysoidaan se ja syotetaan Meganille
+    kontekstina, jotta han voi reagoida siihen hahmossa.
+    """
     user_id = update.effective_user.id
-    if len(context.args) < 2:
+    state = get_or_create_state(user_id)
+    try:
+        photos = update.message.photo
+        if not photos:
+            return
+        tg_file = await context.bot.get_file(photos[-1].file_id)  # suurin koko
+        data = bytes(await tg_file.download_as_bytearray())
+    except Exception as e:
+        print(f"[PHOTO IN] lataus epaonnistui: {e}")
+        return
+
+    caption = (update.message.caption or "").strip()
+    description = await analyze_incoming_photo(data, state)
+    if not description:
+        description = "(kuvan sisaltoa ei saatu analysoitua)"
+
+    # rakennetaan synteettinen kayttajavuoro jonka Megan nakee
+    if caption:
+        synthetic = f"[Lahetin sulle kuvan ja sanoin: {caption}]\n[Kuvassa nakyy: {description}]"
+    else:
+        synthetic = f"[Lahetin sulle kuvan]\n[Kuvassa nakyy: {description}]"
+
+    _is_meta = bool(state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time())
+    try:
+        user_turn_id = save_turn(user_id, "user", synthetic, is_meta=_is_meta)
+        await store_episodic_memory(user_id=user_id,
+                                    content=f"Kayttaja lahetti kuvan: {description[:200]}",
+                                    memory_type="user_utterance", source_turn_id=user_turn_id)
+    except Exception as e:
+        print(f"[PHOTO IN] tallennus: {e}")
+
+    conversation_history.setdefault(user_id, [])
+    conversation_history[user_id].append({"role": "user", "content": synthetic})
+    conversation_history[user_id] = conversation_history[user_id][-20:]
+
+    reply = await generate_llm_reply(user_id, synthetic)
+    if not reply:
+        return
+    conversation_history[user_id].append({"role": "assistant", "content": reply})
+    conversation_history[user_id] = conversation_history[user_id][-20:]
+    try:
+        a_id = save_turn(user_id, "assistant", reply, is_meta=_is_meta)
+        await store_episodic_memory(user_id=user_id, content=f"Megan sanoi: {reply}",
+                                    memory_type="megan_utterance", source_turn_id=a_id)
+    except Exception as e:
+        print(f"[PHOTO IN] vastauksen tallennus: {e}")
+    await send_long_message(context.bot, user_id, reply)
+    state["last_interaction"] = time.time()
+    save_persistent_state_to_db(user_id)
+
+
+async def cmd_add_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.9.1g: tyyppi on nyt valinnainen - ilman sitä oletus on important_fact."""
+    user_id = update.effective_user.id
+    VALID_TYPES = ["fantasy", "preference", "hard_commitment", "important_fact"]
+    if not context.args:
         await update.message.reply_text(
-            "Käyttö: /add_sticky <tyyppi> <sisältö>\n"
-            "Tyypit: fantasy, preference, hard_commitment, important_fact")
+            "Käyttö: /add_sticky <sisältö>\n"
+            "tai:    /add_sticky <tyyppi> <sisältö>\n\n"
+            "Tyypit: important_fact (oletus), fantasy, preference, hard_commitment\n"
+            "Esim: /add_sticky Megan asuu kanssani yhdessä")
         return
-    sticky_type = context.args[0].lower()
-    if sticky_type not in ["fantasy","preference","hard_commitment","important_fact"]:
-        await update.message.reply_text("❌ Virheellinen tyyppi")
-        return
-    content = " ".join(context.args[1:])
+    # jos ensimmäinen sana on kelvollinen tyyppi JA sisältöä on jäljellä, käytä sitä.
+    # muuten koko teksti on sisältöä ja tyyppi on important_fact.
+    if context.args[0].lower() in VALID_TYPES and len(context.args) > 1:
+        sticky_type = context.args[0].lower()
+        content = " ".join(context.args[1:])
+    else:
+        sticky_type = "important_fact"
+        content = " ".join(context.args)
     await add_sticky_memory(user_id=user_id, content=content, sticky_type=sticky_type, category="manual")
     await update.message.reply_text(f"✅ Lisätty {sticky_type}: {content[:100]}")
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = f"""
-🤖 MEGAN {BOT_VERSION}
+    """v8.9.1g: /help kirjoitettu uudelleen ryhmitellyksi komentoluetteloksi
+    (oli aiemmin kasvava versiohistoria josta komentoja oli vaikea loytaa)."""
+    txt = f"""🤖 MEGAN {BOT_VERSION}
 
-v8.9 UUDET (persoonan kasvu + meta-tila):
-- Megan kasvaa: kun keskustelette fantasioista toistuvasti, hän huomaa uuden
-  mieltymyksen ja kysyy vahvistusta - vastaa "joo/kyllä" niin se jää pysyväksi
-- Denial ei ole enää päällä joka hetki, vaan tulee esiin tilanteen mukaan
-- "stop" pysäyttää leikin JA avaa meta-tilan: voit muokata Meganin persoonaa vapaasti
-- /persoona - avaa meta-tilan, näytä lukitut mieltymykset
-- /persoona poista <teksti> - poista mieltymys | /persoona sulje - sulje meta-tila
+🎭 PERSOONA JA META-TILA
+/persoona - astu ulos leikista, keskustele Meganin persoonasta analyyttisesti
+/persoona sulje - palaa hahmoon
+/persoona poista <teksti> - poista lukittu mieltymys
+/lukitse <teksti> - lukitse piirre pysyvaksi (ilman tekstia: nayta lukitut)
+/eheys - tarkista onko Megan ajautunut myotailevaksi
+/eheys baseline - tallenna nykyinen Megan vertailukohdaksi
+/eheys palauta - vedä Megan takaisin baselineen (24h)
 
-v8.8 UUDET (yhtenäinen tunnetila + Grokin tyylikorjaus):
-- Megan reagoi yhtenäisemmin: tunnetilat priorisoidaan (loukkaantuminen voittaa halun jne.)
-- Ei enää ristiriitaisia reaktioita kun useampi tunne on päällä yhtä aikaa
-- Grokin NSFW-teksti vaihtelevampaa: joka vastauksessa uusi fyysinen yksityiskohta
+🎬 TILANNE
+/scene <tyyppi> - aseta kohtaus/paikka
+/together - olette fyysisesti samassa tilassa
+/separate - olette erillaan (viestittelette)
+/activity <tyyppi> [tunnit] - Megan tekee muuta / on poissa
 
-v8.7.1 UUDET (loukkaantuminen tilanteen mukaan):
-- Kun viestittelette erillään: loukattuna ei vastaa heti (offline, kuten ennen)
-- Kun olette fyysisesti yhdessä: kylmyys, vetäytyminen, uhkaa lähteä ulos
-- Pahasti loukattuna voi valmistautua ja lähteä baariin jos et hyvittele
+🔥 SAVY
+/mood [0-100] - mieliala (0 vasynyt/artyisa, 100 virkea)
+/intensity [1-10] - tuhmuustaso
+/tension [0.0-1.0] - jannite
+/arousal - seksuaalisen tilakoneen tila
+/emotional - tunnetila
 
-v8.7 UUDET (riitely + mieliala):
-- Loukattuna Megan riitelee ja puolustautuu - ei myönny eikä pyytele anteeksi
-- Isot loukkaukset -> voi olla todella tyly ja kostonhimoinen; pienet -> vain piikikäs
-- Väsyneenä hän on ärtyisämpi ja voi provosoida riitaa pienestäkin
-/mood <0-100> - Näytä/säädä mielialaa (0 väsynyt/ärtyisä, 100 virkeä)
+🔇 HILJAISUUS
+/forgive - nollaa loukkaantuminen, hiljaisuus ja viive HETI
+/silence <min> [annoyed] - pakota hiljaisuus (testaus)
 
-v8.6.1 UUDET (loukkaantumiskosto):
-- Kun Megan on loukkaantunut, hän ei vastaa heti - vastaus tulee viiveellä
-- Mitä pahemmin loukkaantunut, sitä pidempi viive (jopa 2h)
-- Pahasti loukkaantuneena kertoo olevansa toisen miehen seurassa (kosto)
-- Näet "💤 Megan on offline" kun hän jättää sinut odottamaan
+🖼️ KUVAT
+/image [kuvaus] - Megan lahettaa kuvan itsestaan
+Voit myos lahettaa kuvan itse - Megan katsoo sen ja kommentoi
 
-v8.6 UUDET (loukkaantuminen):
-- Megan loukkaantuu tylyydestä, kylmyydestä ja huomiotta jättämisestä
-- Mitä pahemmin loukkaantunut, sitä enemmän joudut hyvittelemään
-- Voi olla kylmä, passiivis-aggressiivinen tai vihainen - tason mukaan
-- Matala loukkaantuminen hälvenee itsestään, syvä vaatii anteeksipyynnön
-(näkyy /status ja /arousal -komennoissa hurt_level-rivinä; /forgive nollaa)
+🧠 MUISTI
+/memory - muistin tila
+/sticky - pysyvat muistot (nakyvat aina)
+/add_sticky <sisalto> - lisaa pysyva muisto
+   (tyyppi valinnainen: important_fact / fantasy / preference / hard_commitment)
+/forget_sticky <id> - poista pysyva muisto
+/insights - mita Megan on paatellyt sinusta
+/desires - seuratut mieltymykset
+/goals - Meganin omat tavoitteet
+/threads - toistuvat teemat
+/fantasies - tallennetut fantasiat
 
-v8.5 UUDET (omat tavoitteet + mieltymykset):
-- Megan muodostaa omia tavoitteita suhteessanne ja pyrkii niitä kohti
-- Tavoitteet syntyvät hänen persoonansa + sinun mieltymystesi risteyksestä
-- Hän voi paljastaa niitä itse tarinassa kun hetki sopii
-- Seuraa mieltymyksiäsi ja niiden voimakkuutta ajan myötä
-/desires - Näytä havaitut mieltymykset
-/goals - Näytä Meganin omat tavoitteet
-/force_goals - Pakota tavoitteiden muodostus heti (testaus)
+⚙️ JARJESTELMA
+/status - tila, versio, NSFW-tarjoaja
+/plans - aktiiviset suunnitelmat
+/newgame - aloita uusi peli
+/wipe - pyyhi tila
 
-v8.4 UUDET (seksuaalinen tilakone + inhimillisyys):
-- Megan seuraa omaa kiihottumista/turhautumista/tyydytystä ja käyttäytyy niiden mukaan
-- Korkealla arousalilla hän on aloitteellinen, ei odota sinua
-- Aftercare-tila intensiivisen hetken jälkeen (pehmeämpi, läheisempi)
-/intensity <1-10> - Säädä tuhmuustasoa (oletus 7)
-/arousal - Näytä seksuaalisen tilakoneen tila (debug)
+🔧 DEBUG
+/rolling /force_rolling /force_reflection /force_goals /plan_debug
 
-v8.3.17 UUDET (ihmismäinen muisti):
-- Megan yhdistelee muistoja keskustelun aikana ("tää liittyy siihen mistä puhuit")
-- Seuraa toistuvia teemoja ja voi viitata niihin oma-aloitteisesti
-- Muodostaa syvempiä päätelmiä sinusta ajan myötä (oppii huomaamatta)
-/insights - Näytä mitä Megan on oppinut sinusta
-/threads - Näytä seuratut toistuvat teemat
-/force_reflection - Pakota päätelmien muodostus heti (testaus)
-
-v8.3.8 UUDET (aikatietoisuus + hiljaisuus):
-- Megan on tietoinen viikonpäivästä/kellonajasta ja kuluneesta ajasta joka vuorolla
-- Ärsyyntyminen kertyy epäkohteliaisuudesta -> pitkittyessä Megan lakkaa vastaamasta
-- Satunnainen "mustasukkaisuus-peli": Megan voi olla hiljaa tarkoituksella
-/silence <min> [annoyed|jealousy_game] - Pakota hiljaisuus (testaus)
-/forgive - Nollaa hiljaisuus ja ärsyyntyminen heti (testaus)
-
-v8.3.5 (loogisuus):
-/plan_debug [viesti] - Näytä sisäinen suunnitelma + turn analysis debug-tarkoitukseen
-
-v8.3.4:
-/rolling - Näytä kumulatiivinen muistiyhteenveto
-/force_rolling - Pakota rolling summary -päivitys
-
-Muisti (automaattinen):
-- Entity extractor: poimii faktat jokaisesta viestistä (validoitu skeema)
-- Ristiriitatarkistus: uusi tieto vs. vanha profile_fact
-- Response planning: sisäinen suunnitelma ennen jokaista vastausta
-- Pending question: Megan huomaa jos et vastaa kysymykseensä
-- Rolling summary: päivitetään joka {ROLLING_SUMMARY_UPDATE_EVERY}. viestillä
-- Sticky memories: fantasiat ja tärkeät faktat pysyvästi
-
-Session: /newgame /wipe
-Status: /status /plans /memory /fantasies /sticky
-Sticky: /add_sticky <tyyppi> <sisältö> | /forget_sticky <id>
-Control: /scene <tyyppi> | /together /separate | /mood <tyyppi> | /tension <0.0-1.0>
-Media: /image [kuvaus] | /activity <tyyppi> [tunnit]
+💡 "stop" pysayttaa leikin aina ja avaa meta-tilan.
 """
     await send_long_message(context.bot, update.effective_chat.id, txt)
 
@@ -6258,6 +6342,7 @@ async def main():
     application.add_handler(CommandHandler("goals", cmd_goals))
     application.add_handler(CommandHandler("force_goals", cmd_force_goals))
     application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # v8.9.1g
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await application.initialize()
