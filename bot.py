@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.2-consent-photos"
+BOT_VERSION = "8.9.3-presence-log"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1150,6 +1150,12 @@ for _sql in [
     """CREATE TABLE IF NOT EXISTS integrity_state (
         user_id TEXT PRIMARY KEY, last_check_at REAL DEFAULT 0,
         msg_count INTEGER DEFAULT 0, last_drift REAL DEFAULT 0.0)""",
+    # v8.9.3: paivakohtainen lasnaololoki. Vain KAYTTAJAN komennoista (/together,
+    # /separate) - ei LLM:n paattelemista siirtymista. Antaa kanonisen vastauksen
+    # kysymykseen "oltiinko me lauantaina yhdessa".
+    """CREATE TABLE IF NOT EXISTS presence_log (
+        user_id TEXT, day TEXT, status TEXT, updated_at REAL,
+        PRIMARY KEY (user_id, day))""",
 ]:
     conn.execute(_sql)
 conn.commit()
@@ -2794,6 +2800,58 @@ def format_sticky_for_context(stickies: list) -> str:
     return "\n".join(parts)
 
 # ====================== NARRATIVE TIMELINE ======================
+
+# ====================== v8.9.3: PAIVAKOHTAINEN LASNAOLOLOKI ======================
+# Ratkaisee ongelman jossa Megan muisti vaarin milloin oltiin yhdessa ja milloin
+# han oli muualla. Lokiin kirjataan VAIN kayttajan omat /together ja /separate
+# -komennot - ei LLM:n paattelemia siirtymia (esim. "ma haivyn" Meganin repliikissa),
+# koska ne ovat kielimallin tuottamia eivatka luotettavaa tietoa.
+
+def _presence_day_key(ts: float = None) -> str:
+    dt = datetime.fromtimestamp(ts or time.time(), HELSINKI_TZ)
+    return dt.strftime("%Y-%m-%d")
+
+def log_presence_day(user_id: int, status: str):
+    """
+    Kirjaa paivan lasnaolotilan. Sainto: "together" voittaa paivan sisalla -
+    jos oltiin jossain vaiheessa paivaa yhdessa, se on paivan totuus. Nain
+    vastataan oikein kysymykseen "oltiinko me lauantaina yhdessa".
+    """
+    day = _presence_day_key()
+    now = time.time()
+    with db_lock:
+        row = conn.execute("SELECT status FROM presence_log WHERE user_id=? AND day=?",
+                           (str(user_id), day)).fetchone()
+        if row and row[0] == "together" and status != "together":
+            return  # together jo kirjattu talle paivalle - ei ylikirjoiteta
+        conn.execute("""INSERT OR REPLACE INTO presence_log (user_id, day, status, updated_at)
+                        VALUES (?,?,?,?)""", (str(user_id), day, status, now))
+        conn.commit()
+
+def build_presence_lines(user_id: int, days: int = 14) -> str:
+    """Palauttaa viimeisten paivien lasnaolon suomalaisilla viikonpaivilla."""
+    cutoff = _presence_day_key(time.time() - days * 86400)
+    with db_lock:
+        rows = conn.execute("""SELECT day, status FROM presence_log
+                               WHERE user_id=? AND day >= ? ORDER BY day DESC""",
+                            (str(user_id), cutoff)).fetchall()
+    if not rows:
+        return ""
+    today = _presence_day_key()
+    lines = []
+    for day, status in rows:
+        try:
+            dt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=HELSINKI_TZ)
+        except Exception:
+            continue
+        when = "TANAAN" if day == today else fi_date_str(dt)
+        what = ("oltiin fyysisesti yhdessa" if status == "together"
+                else "oltiin erillaan (viestiteltiin)")
+        lines.append(f"  - {when}: {what}")
+    return ("\nKALENTERI - VARMA TIETO (kayttajan itse kirjaama, tama on totuus.\n"
+            "Jos muistat jotain toisin, TAMA on oikein):\n" + "\n".join(lines))
+
+
 def build_narrative_timeline(user_id: int) -> str:
     now = time.time()
     today_start = now - (now % 86400)
@@ -2851,6 +2909,11 @@ def build_narrative_timeline(user_id: int) -> str:
     if future_lines:
         parts.append("=== TULEVAISUUS - ÄLÄ MUUTA LUKITTUJA ===")
         parts.extend(future_lines)
+    # v8.9.3: kanoninen läsnäolokalenteri ENSIMMÄISENÄ - se on varmaa tietoa ja
+    # ohittaa muut muistot jos ne ovat ristiriidassa.
+    presence = build_presence_lines(user_id)
+    if presence:
+        parts.insert(0, presence)
     return "\n".join(parts) if parts else "Ei aiempaa historiaa."
 
 # ====================== SUMMARIES ======================
@@ -5993,12 +6056,14 @@ async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     save_location_state(user_id=user_id, location_status="together",
                         with_user_physically=True, shared_scene=True, changed_by="cmd_together")
+    log_presence_day(user_id, "together")  # v8.9.3: kanoninen päiväkirjaus
     await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
 
 async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     save_location_state(user_id=user_id, location_status="separate",
                         with_user_physically=False, shared_scene=False, changed_by="cmd_separate")
+    log_presence_day(user_id, "separate")  # v8.9.3: kanoninen päiväkirjaus
     await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
 
 async def cmd_emotional(update: Update, context: ContextTypes.DEFAULT_TYPE):
