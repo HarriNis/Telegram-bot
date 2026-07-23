@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.4-accurate-memory"
+BOT_VERSION = "8.9.5-claude-writes-prefs"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -4889,6 +4889,30 @@ RAJAT:
   tulee itse leikissä - tässä päätetään millainen piirre se on".
 - Kun käyttäjä hyväksyy jonkin piirteen pysyväksi, muistuta että sen voi lukita: /lukitse <kuvaus>
 
+SÄ KIRJAAT MIELTYMYKSET ITSE (tärkeä):
+Kun käyttäjä on selvästi hyväksynyt jonkin piirteen, kirjaa se ITSE lisäämällä
+vastauksesi loppuun merkintä. Koodi poimii merkinnän ja tallentaa sen; merkintä
+ei näy käyttäjälle, mutta hän näkee vahvistuksen siitä mitä kirjattiin.
+  [[LUKITSE: <selkeä kuvaus piirteestä>]]
+  [[POISTA: <osa poistettavan kuvauksesta>]]
+  [[MUOKKAA: <vanha teksti> -> <uusi teksti>]]
+
+SÄÄNNÖT:
+- Kirjaa VAIN kun käyttäjä on hyväksynyt asian. Älä koskaan lukitse omin päin
+  tai "varmuuden vuoksi". Jos olet epävarma, kysy ensin.
+- Yksi merkintä per piirre. Voit käyttää useaa merkintää samassa vastauksessa.
+- Jos huomaat että vanha lukitus on huonosti muotoiltu tai päällekkäinen uuden
+  kanssa, ehdota sen muokkaamista tai poistoa - ja tee se MUOKKAA/POISTA-merkinnällä.
+
+MITEN MUOTOILET KUVAUKSEN (tämä on sun tärkein työ tässä):
+Kuvaus menee sellaisenaan ohjeeksi joka ohjaa Meganin käytöstä. Siksi se pitää
+kirjoittaa niin että se on yksiselitteinen ja toimintaan ohjaava:
+- Kerro PIIRRE ja MILLOIN se ilmenee: "on hallitsevampi ja vie tilanteita eteenpäin
+  odottamatta lupaa" on parempi kuin "dominoiva".
+- Konkreettinen mutta ei yksityiskohtainen. Kuvaa käytöstä, ei yksittäistä tekoa.
+- Lyhyt: yksi lause, korkeintaan kaksi. Suomeksi, samalla äänellä kuin Megan puhuu.
+- Vältä ristiriitaa aiempien lukitusten kanssa. Jos ristiriita syntyy, nosta se esiin.
+
 Sävy: lämmin, älykäs, innostunut suunnittelusta, tasavertainen. Kuin hyvä luova
 työpari. Kirjoita suomeksi. EI tähtimerkkitoimintoja, EI kohtauskuvausta.
 Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
@@ -5211,6 +5235,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 memory_type="plan_update", source_turn_id=user_turn_id)
 
         reply = await generate_llm_reply(user_id, text)
+        # v8.9.5: meta-tilassa Claude voi kirjata mieltymyksiä [[LUKITSE: ...]] -tageilla.
+        # Poimitaan ne, suoritetaan, siivotaan vastauksesta ja näytetään vahvistus.
+        if _is_meta_turn:
+            reply, _meta_notes = apply_meta_persona_tags(user_id, reply)
+            if _meta_notes:
+                reply = (reply + "\n\n" + "\n".join(_meta_notes)).strip()
         # v8.3.9: scene/temporal-ristiriitojen korjaus tapahtuu nyt sisällä
         # generate_llm_reply():ssä (pehmeä LLM-korjaus geneerisen tekstin sijaan).
 
@@ -6177,6 +6207,69 @@ async def cmd_forget_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ====================== v8.9.1g: SAAPUVAT KUVAT ======================
+
+# ====================== v8.9.5: META-TILAN MIELTYMYSTEN KIRJAUS ======================
+# Meta-tilassa Claude voi kirjata mieltymyksia suoraan erityisilla merkinnoilla.
+# Merkinta on TARKKA (ei arvausta vapaasta tekstista): koodi poimii vain nama
+# tagit ja suorittaa ne. Nakyva vastaus siivotaan tageista ja tilalle tulee
+# selkea vahvistus, jotta mikaan ei tapahdu huomaamatta.
+META_TAG_RE = re.compile(r"\[\[\s*(LUKITSE|POISTA|MUOKKAA)\s*:\s*(.+?)\s*\]\]",
+                         re.IGNORECASE | re.DOTALL)
+
+def apply_meta_persona_tags(user_id: int, reply: str):
+    """
+    Poimii ja suorittaa meta-tilan merkinnat. Palauttaa (siivottu_vastaus, huomiot).
+    Tuetut muodot:
+      [[LUKITSE: <kuvaus>]]
+      [[POISTA: <kuvauksen osa>]]
+      [[MUOKKAA: <vanha> -> <uusi>]]
+    """
+    matches = META_TAG_RE.findall(reply or "")
+    if not matches:
+        return reply, []
+    state = get_or_create_state(user_id)
+    locked = list(state.get("locked_preferences", []))
+    notes = []
+    for action, payload in matches:
+        action = action.upper()
+        payload = " ".join(payload.split())  # normalisoi valilyonnit/rivinvaihdot
+        if not payload:
+            continue
+        if action == "LUKITSE":
+            if any(payload.lower() == p.lower() for p in locked):
+                notes.append(f"jo lukittu: {payload}")
+            else:
+                locked.append(payload)
+                notes.append(f"🔒 Lukittu: {payload}")
+        elif action == "POISTA":
+            target = payload.lower()
+            kept = [p for p in locked if target not in p.lower()]
+            removed = len(locked) - len(kept)
+            if removed:
+                locked = kept
+                notes.append(f"🗑️ Poistettu {removed} kpl (haku: {payload})")
+            else:
+                notes.append(f"ei loytynyt poistettavaa: {payload}")
+        elif action == "MUOKKAA":
+            if "->" in payload:
+                old_part, new_part = payload.split("->", 1)
+                old_part, new_part = old_part.strip(), new_part.strip()
+                hit = next((p for p in locked if old_part.lower() in p.lower()), None)
+                if hit and new_part:
+                    locked[locked.index(hit)] = new_part
+                    notes.append(f"✏️ Muokattu:\n  ennen: {hit}\n  nyt:   {new_part}")
+                else:
+                    notes.append(f"muokkaus ei onnistunut: {payload}")
+            else:
+                notes.append(f"MUOKKAA tarvitsee muodon 'vanha -> uusi': {payload}")
+    if notes:
+        state["locked_preferences"] = locked
+        save_persistent_state_to_db(user_id)
+    clean = META_TAG_RE.sub("", reply or "").strip()
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean, notes
+
+
 async def analyze_incoming_photo(image_bytes: bytes, state: dict) -> str:
     """
     v8.9.1g: analysoi KAYTTAJAN lahettaman kuvan ja palauttaa neutraalin kuvauksen
