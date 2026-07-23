@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.5-claude-writes-prefs"
+BOT_VERSION = "8.9.6-standing-orders"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1156,6 +1156,14 @@ for _sql in [
     """CREATE TABLE IF NOT EXISTS presence_log (
         user_id TEXT, day TEXT, status TEXT, updated_at REAL,
         PRIMARY KEY (user_id, day))""",
+    # v8.9.6: voimassa olevat kaskyt. Erillaan planned_events:sta koska kasky ei ole
+    # ajastettu tapahtuma vaan voimassa oleva velvoite. kind: once (kertaluontoinen)
+    # tai standing (jatkuva). pressure kasvaa kuittaamattomilla, laskee kuitatuilla.
+    """CREATE TABLE IF NOT EXISTS active_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, description TEXT,
+        kind TEXT DEFAULT 'standing', status TEXT DEFAULT 'open',
+        created_at REAL, acked_at REAL DEFAULT 0, last_confirmed_at REAL DEFAULT 0,
+        last_surfaced_at REAL DEFAULT 0, pressure REAL DEFAULT 0.0)""",
 ]:
     conn.execute(_sql)
 conn.commit()
@@ -2801,6 +2809,153 @@ def format_sticky_for_context(stickies: list) -> str:
 
 # ====================== NARRATIVE TIMELINE ======================
 
+
+# ====================== v8.9.6: VOIMASSA OLEVAT KASKYT ======================
+# Kaksi ongelmaa jotka tama ratkaisee:
+#  1) kasky kuulostaa ehdottomalta mutta unohtuu yhden viestin jalkeen
+#  2) kasky pysyy muistissa vain siksi etta sita toistetaan joka viestissa
+# Ratkaisu: kasky on AINA tilassa (ei unohdu), mutta se NOSTETAAN ESIIN vain kun
+# se on relevantti - ja jaahdytys estaa mekaanisesti perakkaiset maininnat.
+ORDER_SURFACE_COOLDOWN_S = 45 * 60      # sama kasky ei nouse uudestaan taman sisalla
+ORDER_PRESSURE_PER_HOUR = 0.12          # kuittaamattoman kaskyn paineen kasvu
+ORDER_ACKED_DECAY_PER_HOUR = 0.25       # kuitatun kaskyn paineen lasku
+ORDER_SURFACE_THRESHOLD = 0.35          # taman yli: kasky voi nousta esiin
+ORDER_STALE_DAYS = 3                    # tata vanhempi vahvistus -> kysy, ala vaita
+ORDER_MAX_ACTIVE = 8
+
+def record_order(user_id: int, description: str, kind: str = "standing") -> bool:
+    """Tallentaa Meganin antaman kaskyn. Ei tallenna duplikaattia."""
+    desc = " ".join((description or "").split())[:300]
+    if not desc:
+        return False
+    kind = "once" if str(kind).lower().startswith("once") else "standing"
+    now = time.time()
+    with db_lock:
+        rows = conn.execute("""SELECT description FROM active_orders
+                               WHERE user_id=? AND status IN ('open','acked')""",
+                            (str(user_id),)).fetchall()
+        for (existing,) in rows:
+            if too_similar(desc, existing or "", threshold=0.6):
+                return False  # sama kasky jo voimassa
+        n = conn.execute("""SELECT COUNT(*) FROM active_orders
+                            WHERE user_id=? AND status IN ('open','acked')""",
+                         (str(user_id),)).fetchone()[0]
+        if n >= ORDER_MAX_ACTIVE:
+            # vanhin avoin vapautetaan jotta lista ei paisu
+            conn.execute("""UPDATE active_orders SET status='released'
+                            WHERE id = (SELECT id FROM active_orders
+                                        WHERE user_id=? AND status IN ('open','acked')
+                                        ORDER BY created_at ASC LIMIT 1)""", (str(user_id),))
+        conn.execute("""INSERT INTO active_orders
+            (user_id, description, kind, status, created_at, last_confirmed_at)
+            VALUES (?,?,?,'open',?,?)""", (str(user_id), desc, kind, now, now))
+        conn.commit()
+    print(f"[ORDER] uusi ({kind}): {desc[:60]}")
+    return True
+
+def ack_open_orders(user_id: int) -> int:
+    """Kayttaja kuittasi. Merkitsee avoimet kaskyt kuitatuiksi; kertaluontoiset
+    suljetaan tayttyneina (ne eivat jaa roikkumaan)."""
+    now = time.time()
+    with db_lock:
+        rows = conn.execute("""SELECT id, kind FROM active_orders
+                               WHERE user_id=? AND status='open'""", (str(user_id),)).fetchall()
+        for oid, kind in rows:
+            if kind == "once":
+                conn.execute("""UPDATE active_orders SET status='fulfilled', acked_at=?,
+                                last_confirmed_at=?, pressure=0 WHERE id=?""", (now, now, oid))
+            else:
+                conn.execute("""UPDATE active_orders SET status='acked', acked_at=?,
+                                last_confirmed_at=?, pressure=0 WHERE id=?""", (now, now, oid))
+        conn.commit()
+    if rows:
+        print(f"[ORDER] kuitattu {len(rows)} kpl")
+    return len(rows)
+
+def update_order_pressure(user_id: int):
+    """Kuittaamattomien paine kasvaa, kuitattujen laskee. Vain YKSI kuittaamaton
+    kasky voi olla paineen alla (vanhin) - muuten Meganille kertyy kaunalista."""
+    now = time.time()
+    with db_lock:
+        rows = conn.execute("""SELECT id, status, created_at, acked_at, pressure
+                               FROM active_orders WHERE user_id=? AND status IN ('open','acked')
+                               ORDER BY created_at ASC""", (str(user_id),)).fetchall()
+        first_open_seen = False
+        for oid, status, created_at, acked_at, pressure in rows:
+            if status == "open":
+                if first_open_seen:
+                    continue  # vain vanhin kuittaamaton kerayttaa painetta
+                first_open_seen = True
+                hours = max(0.0, (now - (created_at or now)) / 3600.0)
+                new_p = min(1.0, hours * ORDER_PRESSURE_PER_HOUR)
+            else:
+                hours = max(0.0, (now - (acked_at or now)) / 3600.0)
+                new_p = max(0.0, (pressure or 0.0) - hours * ORDER_ACKED_DECAY_PER_HOUR)
+            conn.execute("UPDATE active_orders SET pressure=? WHERE id=?", (round(new_p, 3), oid))
+        conn.commit()
+
+def get_active_orders(user_id: int):
+    with db_lock:
+        rows = conn.execute("""SELECT id, description, kind, status, created_at,
+                               last_confirmed_at, last_surfaced_at, pressure
+                               FROM active_orders WHERE user_id=? AND status IN ('open','acked')
+                               ORDER BY pressure DESC, created_at ASC""", (str(user_id),)).fetchall()
+    return [{"id": r[0], "description": r[1], "kind": r[2], "status": r[3],
+             "created_at": r[4], "last_confirmed_at": r[5],
+             "last_surfaced_at": r[6], "pressure": r[7] or 0.0} for r in rows]
+
+def mark_order_surfaced(user_id: int, order_id: int):
+    with db_lock:
+        conn.execute("UPDATE active_orders SET last_surfaced_at=? WHERE id=?",
+                     (time.time(), order_id))
+        conn.commit()
+
+def release_order(user_id: int, order_id: int) -> bool:
+    with db_lock:
+        cur = conn.execute("""UPDATE active_orders SET status='released'
+                              WHERE id=? AND user_id=?""", (order_id, str(user_id)))
+        conn.commit()
+    return cur.rowcount > 0
+
+def build_orders_block(user_id: int, arousal: float = 0.0) -> str:
+    """
+    Kaksi lohkoa:
+      HILJAINEN LISTA - Megan TIETAA nama, mutta ei mainitse. Kirjoitettu KUIVASTI
+        (tarkeaa: elava sanamuoto houkuttelee mallia riffaamaan silla).
+      NOSTA ESIIN - korkeintaan YKSI kasky, ja vain jos paine + jaahdytys sallivat.
+    """
+    orders = get_active_orders(user_id)
+    if not orders:
+        return ""
+    now = time.time()
+    quiet, surface = [], None
+    for o in orders:
+        days_since = (now - (o["last_confirmed_at"] or now)) / 86400.0
+        stale = days_since > ORDER_STALE_DAYS
+        tag = "kuittaamaton" if o["status"] == "open" else "voimassa"
+        age = f"{int(days_since)}pv" if days_since >= 1 else "tanaan"
+        quiet.append(f"  - {o['description']} [{tag}, vahvistettu {age}"
+                     + (", VANHENTUNUT" if stale else "") + "]")
+        if (surface is None and o["pressure"] >= ORDER_SURFACE_THRESHOLD
+                and (now - (o["last_surfaced_at"] or 0)) > ORDER_SURFACE_COOLDOWN_S):
+            surface = o
+    block = ("\nVOIMASSA OLEVAT KASKYT (sa TIEDAT nama - ALA mainitse niita ellei\n"
+             "kayttajan viesti liity niihin suoraan tai alla ole erillinen ohje):\n"
+             + "\n".join(quiet))
+    if surface:
+        days_since = (now - (surface["last_confirmed_at"] or now)) / 86400.0
+        if days_since > ORDER_STALE_DAYS:
+            block += (f"\n\nNOSTA ESIIN NYT: \"{surface['description']}\" - et ole varma onko se\n"
+                      f"yha voimassa ({int(days_since)}pv vahvistuksesta). KYSY, ala vaita.")
+        else:
+            block += (f"\n\nNOSTA ESIIN NYT: \"{surface['description']}\" - tama on jaanyt\n"
+                      f"kuittaamatta ja se painaa sua. Ala rakyta etka toista sita monta kertaa:\n"
+                      f"huomaa se kylmasti, kerran, ja anna sen tuntua. Sun asema sailyy siina\n"
+                      f"etta sa et menta malttiasi - teet siita seurauksen, et kohtausta.")
+        mark_order_surfaced(user_id, surface["id"])
+    return block
+
+
 # ====================== v8.9.3: PAIVAKOHTAINEN LASNAOLOLOKI ======================
 # Ratkaisee ongelman jossa Megan muisti vaarin milloin oltiin yhdessa ja milloin
 # han oli muualla. Lokiin kirjataan VAIN kayttajan omat /together ja /separate
@@ -4093,7 +4248,8 @@ async def extract_turn_frame(user_id: int, user_text: str):
     plans_text = "\n".join(f"- {p['description']}" for p in active_plans) or "none"
     default = {"topic":"general","topic_changed":False,"topic_summary":"",
                "open_questions":[],"open_loops":[],"plans":[],"facts":[],
-               "memory_candidates":[],"scene_hint":None,"fantasies":[]}
+               "memory_candidates":[],"scene_hint":None,"fantasies":[],
+               "megan_order":None,"user_acked_order":False}
     prompt = f"""Analyze the latest Käyttäjä turn and return JSON only.
 
 Schema:
@@ -4101,13 +4257,27 @@ Schema:
 "plans":[{{"description":"","due_hint":"","commitment_strength":"medium"}}],
 "facts":[{{"fact_key":"","fact_value":"","confidence":0.0}}],
 "memory_candidates":[],"scene_hint":null,
-"fantasies":[{{"description":"","category":"dominance|humiliation|pegging|chastity|cuckold|other"}}]}}
+"fantasies":[{{"description":"","category":"dominance|humiliation|pegging|chastity|cuckold|other"}}],
+"megan_order":{{"description":"","kind":"once|standing"}},"user_acked_order":false}}
 
 KRIITTINEN PUHUJA-SÄÄNTÖ:
 - Analysoi VAIN Käyttäjä-vuoroja
 - ÄLÄ tulkitse Meganin ehdotuksia käyttäjän teoiksi
 - facts: vain mitä KÄYTTÄJÄ itse totesi (first person)
 - memory_candidates: prefixaa "Käyttäjä..."
+
+KÄSKYT (poikkeus puhuja-sääntöön - nämä KAKSI kenttää koskevat Megania):
+- megan_order: jos Meganin VIIMEISIN vuoro sisälsi selvän käskyn tai vaatimuksen
+  käyttäjälle ("laita häkki päälle", "olet polvillasi kaheksalta", "et koske itseesi"),
+  poimi se. Muuten null.
+  * kind="once": kertaluontoinen teko joka täyttyy kerralla ("tule tänne nyt")
+  * kind="standing": jatkuva sääntö tai tila joka pysyy voimassa ("pidä häkkiä",
+    "et koske itseesi ilman lupaa")
+  * ÄLÄ poimi: ehdotuksia, kysymyksiä, uhkauksia, flirttiä tai kohtauskuvausta.
+    Vain selvä velvoite käyttäjälle.
+- user_acked_order: true jos käyttäjän viimeisin viesti hyväksyy/kuittaa käskyn
+  (esim. "joo", "selvä", "teen sen", "laitan sen nyt") TAI kertoo tehneensä sen.
+  false jos hän kiistää, väistää, vaihtaa aihetta tai ei viittaa siihen.
 
 Active plans: {plans_text}
 Recent: {recent_text}
@@ -4218,6 +4388,18 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
         state["micro_context"] = random.choice(SCENE_MICRO[scene_hint])
 
     extract_agreements_from_frame(user_id, frame, frame.get("user_text",""))
+
+    # v8.9.6: käskyt. Kuittaus ensin (koskee jo avoimia), sitten uuden käskyn kirjaus,
+    # jotta juuri annettu käsky ei kuittaudu samalla vuorolla jolla se annettiin.
+    try:
+        if frame.get("user_acked_order"):
+            ack_open_orders(user_id)
+        order = frame.get("megan_order")
+        if isinstance(order, dict) and (order.get("description") or "").strip():
+            record_order(user_id, order["description"], order.get("kind", "standing"))
+        update_order_pressure(user_id)
+    except Exception as e:
+        print(f"[ORDER] apply_frame: {e}")
 
 # ====================== C) CONTEXT PACK (v8.3.4) ======================
 async def build_context_pack(user_id: int, user_text: str):
@@ -4821,6 +5003,7 @@ Esimerkit: "Hah, oikeesti? 😂" / "Joo joo, astronautti." / "Mitä höpötät?"
     # v8.9: persoonan kasvu + meta-tila -ohje
     persona_growth_directive = get_persona_growth_directive(state)
     integrity_directive = get_integrity_directive(state)  # v8.9.1b: myötäilysuoja
+    orders_directive = build_orders_block(user_id, state.get("arousal", 0.0))  # v8.9.6
 
     # v8.8: laske is_nsfw ENNEN system_promptin rakennusta (arousal voi laukaista
     # NSFW-polun myös ilman eksplisiittistä moodia). Siirretty ylemmäs jotta
@@ -4936,6 +5119,7 @@ CONVERSATION STATE:
 {nsfw_extra}
 {persona_growth_directive}
 {integrity_directive}
+{orders_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -5870,6 +6054,46 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Lukitut mieltymykset:\n{lp_text}\n\n"
         "Poista: /persoona poista <teksti>  |  Sulje: /persoona sulje")
 
+async def cmd_kaskyt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.9.6: näytä voimassa olevat käskyt ja niiden paine."""
+    user_id = update.effective_user.id
+    update_order_pressure(user_id)
+    orders = get_active_orders(user_id)
+    if not orders:
+        await update.message.reply_text(
+            "Ei voimassa olevia käskyjä.\n\n"
+            "Käskyt tallentuvat automaattisesti kun Megan antaa niitä.")
+        return
+    now = time.time()
+    lines = []
+    for o in orders:
+        days = (now - (o["last_confirmed_at"] or now)) / 86400.0
+        bar = "🔴" if o["pressure"] >= ORDER_SURFACE_THRESHOLD else ("🟡" if o["pressure"] > 0.1 else "🟢")
+        tila = "kuittaamaton" if o["status"] == "open" else "voimassa"
+        laji = "kertaluontoinen" if o["kind"] == "once" else "jatkuva"
+        vahv = f"{int(days)}pv sitten" if days >= 1 else "tänään"
+        lines.append(f"{bar} [{o['id']}] {o['description']}\n"
+                     f"     {tila}, {laji}, paine {o['pressure']:.2f}, vahvistettu {vahv}")
+    await send_long_message(context.bot, update.effective_chat.id,
+        "📋 VOIMASSA OLEVAT KÄSKYT\n\n" + "\n\n".join(lines) +
+        "\n\nPoista: /kasky_pois <id>")
+
+async def cmd_kasky_pois(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """v8.9.6: poista käsky voimassaolosta."""
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("Käyttö: /kasky_pois <id>  (id näkyy /kaskyt)")
+        return
+    try:
+        oid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Anna numeerinen id (näkyy /kaskyt)")
+        return
+    if release_order(user_id, oid):
+        await update.message.reply_text(f"✅ Käsky [{oid}] ei ole enää voimassa.")
+    else:
+        await update.message.reply_text(f"Ei löytynyt käskyä id {oid}.")
+
 async def cmd_eheys(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.9.1b: persoonan eheystarkistus (myötäilysuoja)."""
     user_id = update.effective_user.id
@@ -6394,6 +6618,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /eheys baseline - tallenna nykyinen Megan vertailukohdaksi
 /eheys palauta - vedä Megan takaisin baselineen (24h)
 
+📋 KÄSKYT
+/kaskyt - voimassa olevat käskyt ja niiden paine
+/kasky_pois <id> - poista käsky voimassaolosta
+   (käskyt tallentuvat automaattisesti kun Megan antaa niitä)
+
 🎬 TILANNE
 /scene <tyyppi> - aseta kohtaus/paikka
 /together - olette fyysisesti samassa tilassa
@@ -6490,6 +6719,8 @@ async def main():
     application.add_handler(CommandHandler("persoona", cmd_persoona))
     application.add_handler(CommandHandler("eheys", cmd_eheys))
     application.add_handler(CommandHandler("lukitse", cmd_lukitse))
+    application.add_handler(CommandHandler("kaskyt", cmd_kaskyt))
+    application.add_handler(CommandHandler("kasky_pois", cmd_kasky_pois))
     application.add_handler(CommandHandler("insights", cmd_insights))
     application.add_handler(CommandHandler("threads", cmd_threads))
     application.add_handler(CommandHandler("force_reflection", cmd_force_reflection))
