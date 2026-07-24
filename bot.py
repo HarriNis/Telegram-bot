@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.7-order-tuning"
+BOT_VERSION = "8.9.8-asterisk-actions"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1196,6 +1196,29 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"[^\w\s]", "", s)
     return s.strip()
+
+
+def describe_user_turn(text: str) -> str:
+    """
+    v8.9.8: nimeaa kayttajan vuoron muistiin oikein. Aiemmin KAIKKI tallennettiin
+    muodossa "Kayttaja sanoi: ..." - myos *tahtimerkkien* sisalla oleva toiminta,
+    jolloin Megan luki teot puheena (ja virhe kantautui muistissa viikkoja).
+      *koko viesti*     -> teki
+      puhetta + *teko*  -> neutraali "Kayttaja:"
+      ei tahtia         -> sanoi
+    """
+    t = (text or "").strip()
+    if not t:
+        return "Käyttäjä sanoi:"
+    stars = re.findall(r"\*+([^*]+)\*+", t)
+    if not stars:
+        return "Käyttäjä sanoi:"
+    # onko koko viesti yhden tahtiparin sisalla?
+    stripped = re.sub(r"\*+([^*]+)\*+", "", t).strip()
+    if not stripped:
+        return "Käyttäjä teki:"
+    return "Käyttäjä:"
+
 
 def too_similar(a: str, b: str, threshold: float = 0.72) -> bool:
     aw = set(normalize_text(a).split()); bw = set(normalize_text(b).split())
@@ -4974,8 +4997,17 @@ AJAN TIETOISUUS:
   * ÄLÄ mainitse kellonaikaa/päivää mekaanisesti joka viestissä - käytä sitä vain
     kun se tekee vastauksesta luontevamman, älä listaa sitä ääneen.
 
-MUISTIN KÄYTTÖ - OLE TARKKA (v8.9.4):
-- Muista asiat niin kuin ne ovat muistissa. ÄLÄ keksi, arvaile tai värität faktoja.
+TÄHTIMERKKIEN MERKITYS (v8.9.8) - koskee MOLEMPIA osapuolia:
+- *tähtien välissä oleva teksti* on TEKO, ELE tai YMPÄRISTÖN KUVAUS - EI puhetta.
+- Tämä pätee myös KÄYTTÄJÄN viesteihin. Jos hän kirjoittaa "*nousen ylös ja kävelen
+  ikkunalle*", hän EI sanonut sitä ääneen - hän teki sen. Reagoi tekoon, älä vastaa
+  kuin hän olisi puhunut.
+- Sama viesti voi sisältää molempia: *nojaan taaksepäin* Mitä sä siitä sanot?
+  -> ensimmäinen on teko, toinen on puhetta.
+- Käytä itse samaa konventiota johdonmukaisesti: teot ja kuvaus tähtien väliin,
+  puhe ilman.
+
+MUISTIN KÄYTTÖ - OLE TARKKA (v8.9.4):- Muista asiat niin kuin ne ovat muistissa. ÄLÄ keksi, arvaile tai värität faktoja.
 - Erityisesti PÄIVÄT, AJAT ja se OLTIINKO YHDESSÄ ovat aina tarkkoja - älä koskaan
   muista niitä väärin. Jos kalenteri sanoo että jotain tapahtui tiettynä päivänä,
   se on niin.
@@ -5369,7 +5401,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _is_meta_turn = bool(state.get("persona_meta_mode") and state.get("persona_meta_until", 0) > time.time())
         user_turn_id = save_turn(user_id, "user", text, is_meta=_is_meta_turn)
 
-        await store_episodic_memory(user_id=user_id, content=f"Käyttäjä sanoi: {text}",
+        await store_episodic_memory(user_id=user_id,
+                                    content=f"{describe_user_turn(text)} {text}",
                                     memory_type="user_utterance", source_turn_id=user_turn_id)
 
         # v8.3.4/8.3.5 A: Entity extraction (validoitu, taustalla)
@@ -6816,4 +6849,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[STARTUP] Fatal: {type(e).__name__}: {e}")
         traceback.print_exc()
-
