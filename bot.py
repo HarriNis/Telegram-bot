@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.11-action-gating"
+BOT_VERSION = "8.9.12-directive-priority"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -3760,6 +3760,68 @@ Oot todella loukkaantunut, vihainen ja kostonhimoinen.
 (Muista: "stop" pysäyttää kaiken heti - se ei ole osa tätä leikkiä.)
 """
 
+
+def build_behavior_directive(*, situation="", question="", silence="", composite="",
+                             nsfw="", growth="", integrity="", orders="",
+                             style="", memory_usage="") -> str:
+    """
+    v8.9.12: KOKOAA kaikki kayttaytymisohjeet YHDEKSI priorisoiduksi lohkoksi.
+
+    Ongelma jonka tama ratkaisee: promptissa oli ~10 erillista ohjelohkoa jotka
+    kilpailivat mallin huomiosta eika mikaan kertonut kumpi voittaa ristiriidassa.
+    Malli ei voi noudattaa kymmenta osin ristiriitaista ohjetta johdonmukaisesti -
+    siita seurasi epaloogista kaytosta.
+
+    Kaksi mekanismia:
+      1) TARKEYSJARJESTYS - ylempi voittaa alemman, sanottu eksplisiittisesti.
+      2) MEKAANISET PORTIT - aidosti yhteensopimattomat ohjeet suljetaan pois
+         kokonaan, ei jateta mallin ratkaistavaksi.
+    """
+    silence_active = bool((silence or "").strip())
+    integrity_active = bool((integrity or "").strip())
+
+    # --- PORTIT: aidot ristiriidat ratkaistaan koodissa, ei promptissa ---
+    if silence_active:
+        # vetaytynyt Megan ei nosta kaskyja eika eskaloi seksuaalisesti
+        orders = ""
+        nsfw = ""
+    if integrity_active:
+        # ydin-korjaus on kaynnissa myotailyn takia - talloin EI samaan aikaan
+        # painoteta mieltymyksiin mukautumista (ne vetaisivat vastakkain)
+        growth = ""
+
+    ordered = [
+        ("FYYSINEN JA AJALLINEN JATKUVUUS (faktat - naita ei voi kumota)", situation),
+        ("TUNNETILA JA VETAYTYMINEN", composite),
+        ("HILJAISUUS", silence),
+        ("KAYTTAJAN SUORA KYSYMYS TAI AIE", question),
+        ("VOIMASSA OLEVAT KASKYT", orders),
+        ("YTIMEN KORJAUS", integrity),
+        ("PERSOONAN KEHITYS", growth),
+        ("INTIIMI TILA", nsfw),
+        ("MUISTIN KAYTTO", memory_usage),
+        ("TYYLI JA RYTMI", style),
+    ]
+    parts = []
+    n = 0
+    for title, body in ordered:
+        body = (body or "").strip()
+        if not body:
+            continue
+        n += 1
+        parts.append(f"[{n}] {title}\n{body}")
+    if not parts:
+        return ""
+    return ("============================================================\n"
+            "KAYTTAYTYMISOHJE - TARKEYSJARJESTYS\n"
+            "Jos ohjeet ovat keskenaan ristiriidassa, PIENEMPI numero voittaa.\n"
+            "Ala yrita toteuttaa kaikkia yhtaikaa - noudata tarkeinta ja anna\n"
+            "alempien vaistya.\n"
+            "============================================================\n\n"
+            + "\n\n".join(parts) +
+            "\n============================================================")
+
+
 def build_composite_state_directive(state: dict, is_delayed_revenge: bool = False, composite_user_text: str = "") -> str:
     """
     v8.8 (Grokin katselmus, kohta 3): kokoaa Meganin sisäisen tilan YHDEKSI
@@ -5344,10 +5406,20 @@ työpari. Kirjoita suomeksi. EI tähtimerkkitoimintoja, EI kohtauskuvausta.
 Kun käyttäjä sanoo "/persoona sulje", palaat hahmoon.
 """
     else:
+        # v8.9.12: kaikki kayttaytymisohjeet YHTEEN priorisoituun lohkoon
+        behavior_directive = build_behavior_directive(
+            situation=situation_directive, question=question_directive,
+            silence=silence_directive, composite=composite_state_directive,
+            nsfw=nsfw_extra, growth=persona_growth_directive,
+            integrity=integrity_directive, orders=orders_directive,
+            style=style_directive, memory_usage=memory_usage_directive)
+        # v8.9.12: lopetussaanto ei saa riidella hiljaisuuden kanssa
+        ending_rule = ("Vastaus päättyy Meganin tekoon tai käskyyn, ei avoimeen "
+                       "kysymykseen (ellei retorinen).")
+        if (silence_directive or "").strip():
+            ending_rule = ("Olet vetäytynyt - vastaus saa olla lyhyt, viileä tai jäädä "
+                           "auki. ÄLÄ pakota loppuun käskyä.")
         system_prompt = f"""{persona_prompt}
-
-{memory_usage_directive}
-{style_directive}
 
 CONVERSATION STATE:
 - Mode: {current_mode}
@@ -5355,14 +5427,7 @@ CONVERSATION STATE:
 - Submission: {submission_level:.2f}
 - Signal: {signal_type}
 
-{situation_directive}
-{question_directive}
-{silence_directive}
-{composite_state_directive}
-{nsfw_extra}
-{persona_growth_directive}
-{integrity_directive}
-{orders_directive}
+{behavior_directive}
 
 HAHMON JOHDONMUKAISUUS:
 Mielipide-erimielisyys = Megan pitää kantansa.
@@ -5370,7 +5435,7 @@ Raja tai stop = noudatetaan heti.
 Jos SISÄINEN SUUNNITELMA (user-viestissä) mainitsee ristiriidan, käsittele se
 hahmon sisällä luonnollisesti - älä ohita sitä.
 
-Respond naturally in Finnish. Vastaus päättyy Meganin tekoon tai käskyyn, ei avoimeen kysymykseen (ellei retorinen).
+Respond naturally in Finnish. {ending_rule}
 """
 
     user_prompt = f"""TURN ANALYSIS: {json.dumps(turn_analysis, ensure_ascii=False)}
