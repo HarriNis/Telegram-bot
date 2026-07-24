@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.10-day-log"
+BOT_VERSION = "8.9.11-action-gating"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -866,6 +866,9 @@ SCENE_ACTIONS = {
 }
 MIN_SCENE_DURATION = 1800
 ACTION_MIN, ACTION_MAX = 300, 1800
+ACTION_ASSIGN_CHANCE = 0.22   # v8.9.11: oli 0.4 - laskettu, koska arvottu tekeminen
+                              # on nyt sallittu vain erillaan oltaessa (harvinaisempi
+                              # mutta osuvampi)
 
 def init_scene_state():
     return {
@@ -945,10 +948,31 @@ def maybe_transition_scene(state, now):
     return state["scene"]
 
 def update_action(state, now):
+    """
+    v8.9.11: arvottu tekeminen RAJATTU tilanteisiin joissa se on uskottava.
+    Aiemmin tama arpoi Meganille tekemisen 40% todennakoisyydella joka vuoro
+    riippumatta tilanteesta - myos kesken kohtausta tai samassa tilassa ollessa
+    ("alkaa katsoa sarjaa"). Nyt: vain kun ollaan erillaan eika keskustelu ole
+    intiimi. Lisaksi jo voimassa oleva tekeminen nollataan jos tilanne muuttuu,
+    jottei vanha "katsoo sarjaa" jaa roikkumaan.
+    """
+    mode = state.get("conversation_mode", "casual")
+    together = state.get("location_status") == "together"
+    blocked = together or mode in ("nsfw", "suggestive")
+
+    if blocked:
+        # tilanne muuttui - vanha arvottu tekeminen ei ole enaa uskottava
+        if state.get("current_action"):
+            state["current_action"] = None
+            state["action_end"] = 0
+            state["action_duration"] = 0
+            state["action_started"] = 0
+        return
+
     if state["current_action"] and now < state["action_end"]:
         return
     scene = state["scene"]
-    if scene in SCENE_ACTIONS and random.random() < 0.4:
+    if scene in SCENE_ACTIONS and random.random() < ACTION_ASSIGN_CHANCE:
         action = random.choice(SCENE_ACTIONS[scene])
         duration = random.randint(ACTION_MIN, ACTION_MAX)
         state["current_action"] = action
