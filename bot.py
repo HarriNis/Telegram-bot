@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.9-wardrobe-restored"
+BOT_VERSION = "8.9.10-day-log"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -1175,6 +1175,12 @@ for _sql in [
         kind TEXT DEFAULT 'standing', status TEXT DEFAULT 'open',
         created_at REAL, acked_at REAL DEFAULT 0, last_confirmed_at REAL DEFAULT 0,
         last_surfaced_at REAL DEFAULT 0, pressure REAL DEFAULT 0.0)""",
+    # v8.9.10: paattyneet tapahtumat paivatasolla. Ratkaisee sen etta mikaan ei
+    # kirjannut TEHTYJA asioita - current_action nollautui jattamatta jalkea, joten
+    # Megan saattoi ehdottaa salille menoa heti salilta tultua.
+    """CREATE TABLE IF NOT EXISTS day_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, day TEXT,
+        ts REAL, what TEXT, together INTEGER DEFAULT -1)""",
 ]:
     conn.execute(_sql)
 conn.commit()
@@ -3074,6 +3080,66 @@ def build_presence_lines(user_id: int, days: int = 14) -> str:
             "Jos muistat jotain toisin, TAMA on oikein):\n" + "\n".join(lines))
 
 
+
+# ====================== v8.9.10: PAATTYNEET TAPAHTUMAT (paivaloki) ======================
+# Vain PAATTYNEITA asioita, ei viestikohtaista metadataa. Viestitason tagitus olisi
+# kohinaa (200 riviä "koti, 20:14"); informaatio on muutoksissa ja tehdyissa asioissa.
+# Lahteet ovat luotettavia: kayttajan omat lausumat + hanen komennot. EI mallin
+# improvisointia.
+DAY_EVENTS_SHOW_MAX = 6         # promptissa nakyy korkeintaan tama monta (lyhyt = luetaan)
+
+def log_day_event(user_id: int, what: str, together: int = -1) -> bool:
+    """Kirjaa paattyneen tapahtuman. Ohittaa duplikaatit saman paivan sisalla."""
+    txt = " ".join((what or "").split())[:160]
+    if not txt:
+        return False
+    now = time.time()
+    day = _presence_day_key(now)
+    with db_lock:
+        rows = conn.execute("SELECT what, ts FROM day_events WHERE user_id=? AND day=?",
+                            (str(user_id), day)).fetchall()
+        for existing, ts in rows:
+            # sama asia jo kirjattu tanaan (parafraasikestava vertailu)
+            if _orders_look_same(txt, existing or ""):
+                return False
+            if (now - (ts or 0)) < 15 * 60 and too_similar(txt, existing or "", threshold=0.35):
+                return False
+        conn.execute("""INSERT INTO day_events (user_id, day, ts, what, together)
+                        VALUES (?,?,?,?,?)""", (str(user_id), day, now, txt, together))
+        conn.commit()
+    print(f"[DAY] {txt[:60]}")
+    return True
+
+def get_day_events(user_id: int, day: str = None):
+    day = day or _presence_day_key()
+    with db_lock:
+        rows = conn.execute("""SELECT ts, what, together FROM day_events
+                               WHERE user_id=? AND day=? ORDER BY ts ASC""",
+                            (str(user_id), day)).fetchall()
+    return [{"ts": r[0], "what": r[1], "together": r[2]} for r in rows]
+
+def build_day_events_block(user_id: int) -> str:
+    """
+    Lyhyt kanoninen loki tasta paivasta. Pidetaan TIETOISESTI lyhyena:
+    3-5 riviä luetaan, 30 rivia ohitetaan.
+    """
+    events = get_day_events(user_id)
+    if not events:
+        return ""
+    events = events[-DAY_EVENTS_SHOW_MAX:]
+    lines = []
+    for e in events:
+        klo = datetime.fromtimestamp(e["ts"], HELSINKI_TZ).strftime("%H:%M")
+        tag = ""
+        if e["together"] == 1:
+            tag = " (yhdessa)"
+        elif e["together"] == 0:
+            tag = " (erillaan)"
+        lines.append(f"  {klo} {e['what']}{tag}")
+    return ("\nTANAAN JO TAPAHTUNUT - VARMA TIETO (ala ehdota naita uudestaan\n"
+            "tekemattomina, ala ole niista tietamaton):\n" + "\n".join(lines))
+
+
 def build_narrative_timeline(user_id: int) -> str:
     now = time.time()
     today_start = now - (now % 86400)
@@ -3136,6 +3202,10 @@ def build_narrative_timeline(user_id: int) -> str:
     presence = build_presence_lines(user_id)
     if presence:
         parts.insert(0, presence)
+    # v8.9.10: tanaan jo tapahtunut - kaikkein karkeen, koska tuorein ja tarkein
+    today_events = build_day_events_block(user_id)
+    if today_events:
+        parts.insert(0, today_events)
     return "\n".join(parts) if parts else "Ei aiempaa historiaa."
 
 # ====================== SUMMARIES ======================
@@ -4363,7 +4433,7 @@ async def extract_turn_frame(user_id: int, user_text: str):
     default = {"topic":"general","topic_changed":False,"topic_summary":"",
                "open_questions":[],"open_loops":[],"plans":[],"facts":[],
                "memory_candidates":[],"scene_hint":None,"fantasies":[],
-               "megan_order":None,"user_acked_order":False}
+               "megan_order":None,"user_acked_order":False,"completed_events":[]}
     prompt = f"""Analyze the latest Käyttäjä turn and return JSON only.
 
 Schema:
@@ -4372,7 +4442,8 @@ Schema:
 "facts":[{{"fact_key":"","fact_value":"","confidence":0.0}}],
 "memory_candidates":[],"scene_hint":null,
 "fantasies":[{{"description":"","category":"dominance|humiliation|pegging|chastity|cuckold|other"}}],
-"megan_order":{{"description":"","kind":"once|standing"}},"user_acked_order":false}}
+"megan_order":{{"description":"","kind":"once|standing"}},"user_acked_order":false,
+"completed_events":[""]}}
 
 KRIITTINEN PUHUJA-SÄÄNTÖ:
 - Analysoi VAIN Käyttäjä-vuoroja
@@ -4397,6 +4468,14 @@ KÄSKYT (poikkeus puhuja-sääntöön - nämä KAKSI kenttää koskevat Megania)
   * saman käskyn toistoa tai uudelleenmuotoilua jos se on jo mainittu aiemmin
   Testi: jos käskyn voi noudattaa ja päättää seuraavan minuutin sisällä eikä
   siihen tarvitse palata myöhemmin, se on null.
+PÄÄTTYNEET TAPAHTUMAT:
+- completed_events: asiat jotka KÄYTTÄJÄ kertoo JO TAPAHTUNEEKSI tai juuri
+  päättyneeksi ("tulimme just salilta", "kävin suihkussa", "syötiin jo",
+  "olin töissä myöhään"). Lyhyt kuvaus 2-6 sanaa, esim. "tuli kuntosalilta",
+  "kävi suihkussa", "söi illallisen".
+- ÄLÄ laita tähän: tulevia suunnitelmia (ne menevät plans-kenttään), Meganin
+  tekemisiä, arvauksia tai jatkuvia tiloja. VAIN päättynyt konkreettinen teko
+  jonka käyttäjä itse kertoi. Useimmiten tyhjä lista.
 - user_acked_order: true jos käyttäjän viimeisin viesti hyväksyy/kuittaa
   voimassa olevan käskyn ("joo", "selvä", "teen sen", "laitan sen nyt") TAI
   kertoo tehneensä sen. false jos hän kiistää, väistää tai vaihtaa aihetta.
@@ -4522,6 +4601,15 @@ async def apply_frame(user_id: int, frame: dict, source_turn_id: int):
         update_order_pressure(user_id)
     except Exception as e:
         print(f"[ORDER] apply_frame: {e}")
+
+    # v8.9.10: paattyneet tapahtumat paivalokiin (vain kayttajan lausumista)
+    try:
+        tog = 1 if state.get("location_status") == "together" else 0
+        for ev in (frame.get("completed_events") or [])[:3]:
+            if isinstance(ev, str) and ev.strip():
+                log_day_event(user_id, ev, together=tog)
+    except Exception as e:
+        print(f"[DAY] apply_frame: {e}")
 
 # ====================== C) CONTEXT PACK (v8.3.4) ======================
 async def build_context_pack(user_id: int, user_text: str):
@@ -6450,6 +6538,7 @@ async def cmd_together(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_location_state(user_id=user_id, location_status="together",
                         with_user_physically=True, shared_scene=True, changed_by="cmd_together")
     log_presence_day(user_id, "together")  # v8.9.3: kanoninen päiväkirjaus
+    log_day_event(user_id, "oltiin fyysisesti yhdessä", together=1)  # v8.9.10
     await update.message.reply_text("✅ Olet nyt fyysisesti Meganin kanssa.")
 
 async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6457,6 +6546,7 @@ async def cmd_separate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_location_state(user_id=user_id, location_status="separate",
                         with_user_physically=False, shared_scene=False, changed_by="cmd_separate")
     log_presence_day(user_id, "separate")  # v8.9.3: kanoninen päiväkirjaus
+    log_day_event(user_id, "erottiin, jatkettiin viestitellen", together=0)  # v8.9.10
     await update.message.reply_text("✅ Et ole enää fyysisesti Meganin kanssa.")
 
 async def cmd_emotional(update: Update, context: ContextTypes.DEFAULT_TYPE):
