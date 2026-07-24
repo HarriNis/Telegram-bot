@@ -327,7 +327,7 @@ from io import BytesIO
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_VERSION = "8.9.6-standing-orders"
+BOT_VERSION = "8.9.7-order-tuning"
 print(f"🚀 Megan {BOT_VERSION}")
 
 CLAUDE_MODEL_PRIMARY = "claude-opus-4-8"
@@ -2822,26 +2822,52 @@ ORDER_ACKED_DECAY_PER_HOUR = 0.25       # kuitatun kaskyn paineen lasku
 ORDER_SURFACE_THRESHOLD = 0.35          # taman yli: kasky voi nousta esiin
 ORDER_STALE_DAYS = 3                    # tata vanhempi vahvistus -> kysy, ala vaita
 ORDER_MAX_ACTIVE = 8
+ORDER_ONCE_EXPIRY_H = 12                # kuittaamaton kertaluontoinen vanhenee taman jalkeen
+
+def _order_key_words(text: str) -> set:
+    """Sanojen alkuosat (5 merkkia) - kestaa suomen taivutusta:
+    bodysuitissa/bodyn/bodyni -> 'bodys'/'bodyn' ... ja lyhyet sanat pois."""
+    stop = {"ja","tai","ett","kun","niin","sit","mut","just","nyt","ota","tule",
+            "ole","olet","saa","voi","sit","kuin","joka","siit","tan","sen","se"}
+    out = set()
+    for w in normalize_text(text).split():
+        if len(w) < 4 or w in stop:
+            continue
+        out.add(w[:5])
+    return out
+
+def _orders_look_same(a: str, b: str) -> bool:
+    """Parafraasikestava vertailu. Suomen taivutus tekee samasta kaskysta
+    erinakoisen sanatasolla, joten verrataan sanojen alkuosia."""
+    aw, bw = _order_key_words(a), _order_key_words(b)
+    if not aw or not bw:
+        return False
+    overlap = len(aw & bw) / min(len(aw), len(bw))   # min, ei union
+    return overlap >= 0.5
 
 def record_order(user_id: int, description: str, kind: str = "standing") -> bool:
-    """Tallentaa Meganin antaman kaskyn. Ei tallenna duplikaattia."""
+    """Tallentaa Meganin antaman kaskyn. Ei tallenna duplikaattia eika saman
+    kohtauksen uudelleenmuotoilua."""
     desc = " ".join((description or "").split())[:300]
     if not desc:
         return False
     kind = "once" if str(kind).lower().startswith("once") else "standing"
     now = time.time()
     with db_lock:
-        rows = conn.execute("""SELECT description FROM active_orders
+        rows = conn.execute("""SELECT description, created_at FROM active_orders
                                WHERE user_id=? AND status IN ('open','acked')""",
                             (str(user_id),)).fetchall()
-        for (existing,) in rows:
-            if too_similar(desc, existing or "", threshold=0.6):
-                return False  # sama kasky jo voimassa
+        for existing, created_at in rows:
+            if _orders_look_same(desc, existing or ""):
+                return False  # sama kasky jo voimassa (myos parafraasi)
+            # v8.9.7: sama kohtaus - jos kasky tuli juuri, tama on lahes varmasti
+            # uudelleenmuotoilu samasta asiasta
+            if (now - (created_at or 0)) < 20 * 60 and too_similar(desc, existing or "", threshold=0.3):
+                return False
         n = conn.execute("""SELECT COUNT(*) FROM active_orders
                             WHERE user_id=? AND status IN ('open','acked')""",
                          (str(user_id),)).fetchone()[0]
         if n >= ORDER_MAX_ACTIVE:
-            # vanhin avoin vapautetaan jotta lista ei paisu
             conn.execute("""UPDATE active_orders SET status='released'
                             WHERE id = (SELECT id FROM active_orders
                                         WHERE user_id=? AND status IN ('open','acked')
@@ -2877,6 +2903,13 @@ def update_order_pressure(user_id: int):
     kasky voi olla paineen alla (vanhin) - muuten Meganille kertyy kaunalista."""
     now = time.time()
     with db_lock:
+        # v8.9.7: kuittaamaton KERTALUONTOINEN vanhenee - hetki meni ohi, ei ole
+        # enaa mielekasta muistuttaa siita eika kerata painetta.
+        conn.execute("""UPDATE active_orders SET status='released', pressure=0
+                        WHERE user_id=? AND status='open' AND kind='once'
+                        AND ? - created_at > ?""",
+                     (str(user_id), now, ORDER_ONCE_EXPIRY_H * 3600))
+        conn.commit()
         rows = conn.execute("""SELECT id, status, created_at, acked_at, pressure
                                FROM active_orders WHERE user_id=? AND status IN ('open','acked')
                                ORDER BY created_at ASC""", (str(user_id),)).fetchall()
@@ -4267,17 +4300,25 @@ KRIITTINEN PUHUJA-SÄÄNTÖ:
 - memory_candidates: prefixaa "Käyttäjä..."
 
 KÄSKYT (poikkeus puhuja-sääntöön - nämä KAKSI kenttää koskevat Megania):
-- megan_order: jos Meganin VIIMEISIN vuoro sisälsi selvän käskyn tai vaatimuksen
-  käyttäjälle ("laita häkki päälle", "olet polvillasi kaheksalta", "et koske itseesi"),
-  poimi se. Muuten null.
-  * kind="once": kertaluontoinen teko joka täyttyy kerralla ("tule tänne nyt")
-  * kind="standing": jatkuva sääntö tai tila joka pysyy voimassa ("pidä häkkiä",
-    "et koske itseesi ilman lupaa")
-  * ÄLÄ poimi: ehdotuksia, kysymyksiä, uhkauksia, flirttiä tai kohtauskuvausta.
-    Vain selvä velvoite käyttäjälle.
-- user_acked_order: true jos käyttäjän viimeisin viesti hyväksyy/kuittaa käskyn
-  (esim. "joo", "selvä", "teen sen", "laitan sen nyt") TAI kertoo tehneensä sen.
-  false jos hän kiistää, väistää, vaihtaa aihetta tai ei viittaa siihen.
+- megan_order: poimi VAIN jos Meganin viimeisin vuoro sisälsi käskyn joka
+  JÄÄ VOIMAAN TÄMÄN HETKEN JÄLKEEN. Tämä on tiukka rajaus - useimmissa vuoroissa
+  vastaus on null.
+  * kind="standing": jatkuva sääntö tai tila joka pysyy voimassa päiviä
+    ("pidä häkkiä", "et koske itseesi ilman lupaa", "kerrot mulle aina kun...")
+  * kind="once": kertaluontoinen mutta SIIRRETTY tulevaisuuteen, jolla on selvä
+    ajankohta ("kaheksalta polvillas", "huomenna kerrot mulle", "kun tulen kotiin")
+- ÄLÄ POIMI (tämä on tärkeää, nämä ovat suurin virhelähde):
+  * välittömiä kohtauksen sisäisiä ohjeita joita noudatetaan heti ja jotka
+    päättyvät siihen: "tule tänne", "polvillesi", "kuvaa mut nyt", "kosketa
+    tuota", "riisu se" - NÄMÄ EIVÄT OLE KÄSKYJÄ TÄSSÄ MERKITYKSESSÄ, ne ovat
+    kohtauksen kulkua. Palauta null.
+  * ehdotuksia, kysymyksiä, uhkauksia, flirttiä, kuvailua
+  * saman käskyn toistoa tai uudelleenmuotoilua jos se on jo mainittu aiemmin
+  Testi: jos käskyn voi noudattaa ja päättää seuraavan minuutin sisällä eikä
+  siihen tarvitse palata myöhemmin, se on null.
+- user_acked_order: true jos käyttäjän viimeisin viesti hyväksyy/kuittaa
+  voimassa olevan käskyn ("joo", "selvä", "teen sen", "laitan sen nyt") TAI
+  kertoo tehneensä sen. false jos hän kiistää, väistää tai vaihtaa aihetta.
 
 Active plans: {plans_text}
 Recent: {recent_text}
@@ -6057,6 +6098,13 @@ async def cmd_persoona(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_kaskyt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.9.6: näytä voimassa olevat käskyt ja niiden paine."""
     user_id = update.effective_user.id
+    # v8.9.7: /kaskyt tyhjenna - poistaa kaikki voimassa olevat kerralla
+    if context.args and context.args[0].lower() in ("tyhjenna", "tyhjennä"):
+        orders = get_active_orders(user_id)
+        for o in orders:
+            release_order(user_id, o["id"])
+        await update.message.reply_text(f"🧹 Poistettu {len(orders)} käskyä voimassaolosta.")
+        return
     update_order_pressure(user_id)
     orders = get_active_orders(user_id)
     if not orders:
@@ -6076,7 +6124,7 @@ async def cmd_kaskyt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"     {tila}, {laji}, paine {o['pressure']:.2f}, vahvistettu {vahv}")
     await send_long_message(context.bot, update.effective_chat.id,
         "📋 VOIMASSA OLEVAT KÄSKYT\n\n" + "\n\n".join(lines) +
-        "\n\nPoista: /kasky_pois <id>")
+        "\n\nPoista: /kasky_pois <id>  |  Kaikki: /kaskyt tyhjenna")
 
 async def cmd_kasky_pois(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """v8.9.6: poista käsky voimassaolosta."""
@@ -6768,3 +6816,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[STARTUP] Fatal: {type(e).__name__}: {e}")
         traceback.print_exc()
+
